@@ -1,0 +1,117 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-void: #050608;
+  --color-surface: #0e1013;
+  --color-surface-raised: #14171c;
+  --color-surface-overlay: #1c2026;
+  --color-border-dim: #1f2328;
+  --color-border-glow: #2b3139;
+  --color-neon: #0ecb81;
+  --color-neon-dim: #0ecb8140;
+  --color-cyan: #1e9ff2;
+  --color-cyan-dim: #1e9ff240;
+  --color-danger: #f6465d;
+  --color-danger-dim: #f6465d40;
+  --color-warning: #f0b90b;
+  --color-warning-dim: #f0b90b40;
+  --color-text-primary: #eaecef;
+  --color-text-secondary: #b7bdc6;
+  --color-text-muted: #848e9c;
+  --font-display: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: "IBM Plex Mono", "JetBrains Mono", monospace;
+  --font-body: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+}
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-void);
+  color: var(--color-text-primary);
+  font-family: var(--font-body);
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* No scanlines — clean Binance style */
+.scanlines::before {
+  display: none;
+}
+
+/* Solid card backgrounds */
+.glass {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border-dim);
+}
+
+.glass-raised {
+  background: var(--color-surface-raised);
+  border: 1px solid var(--color-border-dim);
+  border-radius: 12px;
+}
+
+/* Subtle hover glow */
+.glow-neon {
+  box-shadow: none;
+}
+
+.glow-cyan {
+  box-shadow: none;
+}
+
+.glow-danger {
+  box-shadow: none;
+}
+
+.text-glow-neon {
+  text-shadow: none;
+}
+
+.text-glow-cyan {
+  text-shadow: none;
+}
+
+/* No grid background — clean */
+.grid-bg {
+  background-image: none;
+}
+
+/* Pulse ring for live indicators */
+@keyframes pulse-ring {
+  0% { transform: scale(0.8); opacity: 1; }
+  100% { transform: scale(2.2); opacity: 0; }
+}
+
+.pulse-live::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 9999px;
+  border: 1px solid var(--color-neon);
+  animation: pulse-ring 2s ease-out infinite;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-glow);
+  border-radius: 3px;
+}
+
+/* Recharts overrides */
+.recharts-cartesian-grid-horizontal line,
+.recharts-cartesian-grid-vertical line {
+  stroke: rgba(255, 255, 255, 0.04) !important;
+}
+
+.recharts-tooltip-wrapper {
+  outline: none !important;
+}
+
+/* Number tabular figures */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}

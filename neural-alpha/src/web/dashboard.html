@@ -1,0 +1,641 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neural Alpha — Trading Agent</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,500;0,9..40,700;1,9..40,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #080b12; --bg2: #0c1019;
+    --surface: #111621; --surface2: #181e2c; --surface3: #1e2538;
+    --border: #252d3f; --border2: #323c52;
+    --text: #e8eaf0; --text2: #8893a7; --text3: #5c6478;
+    --green: #22c55e; --green2: #16a34a; --green-bg: rgba(34,197,94,.1);
+    --red: #ef4444; --red2: #dc2626; --red-bg: rgba(239,68,68,.08);
+    --yellow: #eab308; --yellow-bg: rgba(234,179,8,.08);
+    --blue: #3b82f6; --blue-bg: rgba(59,130,246,.1);
+    --purple: #a78bfa; --purple-bg: rgba(167,139,250,.08);
+    --cyan: #22d3ee; --cyan-bg: rgba(34,211,238,.06);
+    --accent: #f0b90b;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    font-family: 'DM Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    background: var(--bg); color: var(--text); min-height: 100vh;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Header */
+  .header {
+    background: var(--bg2);
+    border-bottom: 1px solid var(--border);
+    padding: 0 28px; height: 56px;
+    display: flex; align-items: center; justify-content: space-between;
+    position: sticky; top: 0; z-index: 100;
+    backdrop-filter: blur(12px);
+  }
+  .header-brand {
+    display: flex; align-items: center; gap: 10px;
+    font-weight: 700; font-size: 15px; letter-spacing: -.2px;
+  }
+  .header-brand svg { flex-shrink: 0; }
+  .header-brand .accent { color: var(--accent); }
+  .header-right { display: flex; gap: 8px; align-items: center; }
+  .pill {
+    padding: 3px 10px; border-radius: 6px; font-size: 11px;
+    font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500; letter-spacing: .3px;
+  }
+  .pill-mode { background: var(--purple-bg); color: var(--purple); border: 1px solid rgba(167,139,250,.2); }
+  .pill-data { border: 1px solid var(--border); }
+  .pill-data.live { background: var(--green-bg); color: var(--green); border-color: rgba(34,197,94,.2); }
+  .pill-data.mock { background: var(--yellow-bg); color: var(--yellow); border-color: rgba(234,179,8,.2); }
+  .pill-status { font-weight: 600; }
+  .pill-status.running { background: var(--green-bg); color: var(--green); border: 1px solid rgba(34,197,94,.25); }
+  .pill-status.stopped { background: var(--red-bg); color: var(--red); border: 1px solid rgba(239,68,68,.2); }
+  .pill-cycle { color: var(--text3); font-family: 'IBM Plex Mono', monospace; font-size: 11px; }
+  .conn-dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle; }
+  .conn-live { background: var(--green); box-shadow: 0 0 6px rgba(34,197,94,.5); }
+  .conn-dead { background: var(--red); }
+  .btn-stop {
+    padding: 5px 12px; border-radius: 6px; font-size: 11px; font-weight: 600;
+    cursor: pointer; border: 1px solid rgba(239,68,68,.25); background: var(--red-bg);
+    color: var(--red); font-family: 'IBM Plex Mono', monospace; letter-spacing: .3px;
+    transition: all .15s;
+  }
+  .btn-stop:hover { background: rgba(239,68,68,.18); border-color: var(--red); }
+
+  /* Layout */
+  .main { padding: 20px 28px 32px; max-width: 1440px; margin: 0 auto; }
+
+  /* KPI Row */
+  .kpi-row {
+    display: grid; gap: 14px; margin-bottom: 20px;
+    grid-template-columns: repeat(6, 1fr);
+  }
+  .kpi {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; padding: 16px 18px;
+    display: flex; flex-direction: column; gap: 4px;
+    transition: border-color .2s;
+  }
+  .kpi:hover { border-color: var(--border2); }
+  .kpi-label {
+    font-size: 11px; color: var(--text3); font-weight: 500;
+    text-transform: uppercase; letter-spacing: .8px;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .kpi-value {
+    font-size: 24px; font-weight: 700; letter-spacing: -.5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .kpi-sub { font-size: 12px; color: var(--text2); }
+
+  .up { color: var(--green); }
+  .down { color: var(--red); }
+  .neutral { color: var(--text3); }
+
+  /* Progress bar */
+  .bar-track { height: 6px; border-radius: 3px; background: var(--surface2); margin-top: 8px; overflow: hidden; }
+  .bar-fill { height: 100%; border-radius: 3px; transition: width .5s ease, background .3s; }
+
+  /* Fear & Greed */
+  .fg-wrap { display: flex; align-items: center; gap: 12px; margin-top: 2px; }
+  .fg-ring {
+    width: 44px; height: 44px; border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 15px; font-weight: 700;
+    font-family: 'IBM Plex Mono', monospace;
+    border: 2px solid var(--border);
+    transition: all .3s;
+  }
+
+  /* Sections */
+  .section { margin-bottom: 20px; }
+  .section-head {
+    font-size: 12px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .8px; color: var(--text2); margin-bottom: 10px;
+    font-family: 'IBM Plex Mono', monospace;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .section-head .badge {
+    font-size: 10px; padding: 2px 7px; border-radius: 4px;
+    background: var(--blue-bg); color: var(--blue); font-weight: 500;
+  }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 12px; overflow: hidden;
+  }
+
+  /* Grid layouts */
+  .g2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .g3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+
+  /* Table */
+  table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  th {
+    text-align: left; padding: 10px 14px; font-size: 10px;
+    text-transform: uppercase; letter-spacing: .6px;
+    color: var(--text3); font-weight: 600; border-bottom: 1px solid var(--border);
+    font-family: 'IBM Plex Mono', monospace;
+    background: var(--bg2); position: sticky; top: 0; z-index: 1;
+  }
+  td { padding: 9px 14px; border-bottom: 1px solid rgba(37,45,63,.5); font-variant-numeric: tabular-nums; }
+  tr:hover td { background: rgba(255,255,255,.015); }
+  .table-scroll { max-height: 320px; overflow-y: auto; }
+
+  /* Positions empty */
+  .empty { text-align: center; padding: 36px 20px; color: var(--text3); font-size: 13px; }
+  .empty-icon { font-size: 28px; margin-bottom: 8px; opacity: .5; }
+
+  /* Controls */
+  .ctrl-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 12px; padding: 16px;
+  }
+  .ctrl-card { display: flex; flex-direction: column; gap: 6px; }
+  .ctrl-label {
+    font-size: 10px; color: var(--text3); text-transform: uppercase;
+    letter-spacing: .6px; font-weight: 600;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .ctrl-input {
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); border-radius: 8px; padding: 8px 12px;
+    font-size: 14px; font-family: 'IBM Plex Mono', monospace;
+    font-weight: 500; width: 100%; transition: border-color .15s;
+  }
+  .ctrl-input:focus { outline: none; border-color: var(--blue); box-shadow: 0 0 0 2px rgba(59,130,246,.15); }
+  .ctrl-input:hover { border-color: var(--text3); }
+  .ctrl-hint { font-size: 10px; color: var(--text3); line-height: 1.3; }
+  .ctrl-readonly {
+    font-size: 15px; font-weight: 700; padding: 6px 0;
+    font-family: 'IBM Plex Mono', monospace;
+  }
+  .ctrl-bar {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px; border-top: 1px solid var(--border);
+  }
+  .btn-save {
+    background: var(--blue); color: white; border: none; padding: 8px 22px;
+    border-radius: 8px; font-size: 12px; font-weight: 600; cursor: pointer;
+    font-family: 'IBM Plex Mono', monospace; letter-spacing: .3px;
+    transition: all .15s;
+  }
+  .btn-save:hover { filter: brightness(1.1); }
+  .btn-save:disabled { opacity: .35; cursor: not-allowed; }
+  .save-msg { font-size: 11px; transition: opacity .3s; }
+
+  /* Log panel */
+  .log-wrap {
+    max-height: 280px; overflow-y: auto; padding: 10px 14px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; line-height: 1.7;
+  }
+  .log-line { white-space: pre-wrap; word-break: break-all; padding: 1px 0; }
+  .log-info { color: var(--cyan); }
+  .log-warn, .log-risk { color: var(--yellow); }
+  .log-error { color: var(--red); }
+  .log-trade { color: var(--green); }
+  .log-signal { color: var(--purple); }
+  .log-ts { color: var(--text3); margin-right: 6px; }
+
+  /* Footer */
+  .footer {
+    padding: 16px 28px; text-align: center; font-size: 10px;
+    color: var(--text3); border-top: 1px solid var(--border);
+    font-family: 'IBM Plex Mono', monospace; letter-spacing: .3px;
+  }
+
+  /* Responsive */
+  @media (max-width: 1100px) { .kpi-row { grid-template-columns: repeat(3, 1fr); } }
+  @media (max-width: 768px) {
+    .kpi-row { grid-template-columns: repeat(2, 1fr); }
+    .g2, .g3 { grid-template-columns: 1fr; }
+    .header { padding: 0 16px; }
+    .main { padding: 16px; }
+    .ctrl-grid { grid-template-columns: 1fr 1fr; }
+  }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--border2); }
+
+  /* Animate in */
+  @keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+  .kpi, .panel { animation: fadeUp .4s ease both; }
+  .kpi:nth-child(2) { animation-delay: .04s; }
+  .kpi:nth-child(3) { animation-delay: .08s; }
+  .kpi:nth-child(4) { animation-delay: .12s; }
+  .kpi:nth-child(5) { animation-delay: .16s; }
+  .kpi:nth-child(6) { animation-delay: .2s; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-brand">
+    <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
+      <path d="M12 2L3 7v10l9 5 9-5V7l-9-5z" stroke="#f0b90b" stroke-width="1.5" fill="rgba(240,185,11,.1)"/>
+      <path d="M12 6l-5 3v6l5 3 5-3V9l-5-3z" stroke="#f0b90b" stroke-width="1.2" fill="rgba(240,185,11,.15)"/>
+    </svg>
+    <span><span class="accent">BNB</span> Hack — Trading Agent</span>
+  </div>
+  <div class="header-right">
+    <span id="conn" style="font-size:11px;color:var(--text3)"><span class="conn-dot conn-dead"></span>Connecting</span>
+    <span id="modePill" class="pill pill-mode">PAPER</span>
+    <span id="dataPill" class="pill pill-data mock" title="Data source">DATA: —</span>
+    <span id="statusPill" class="pill pill-status stopped">STOPPED</span>
+    <span id="cycle" class="pill-cycle">Cycle —</span>
+    <button class="btn-stop" onclick="stopAgent()">Stop</button>
+  </div>
+</div>
+
+<div class="main">
+
+<!-- KPI Cards -->
+<div class="kpi-row">
+  <div class="kpi">
+    <div class="kpi-label">Portfolio Value</div>
+    <div class="kpi-value" id="portValue">$1,000.00</div>
+    <div class="kpi-sub" id="portChange">+$0.00 (0.00%)</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Cash Available</div>
+    <div class="kpi-value" id="cashValue">$1,000.00</div>
+    <div class="kpi-sub" id="posCount">0 open positions</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Max Drawdown</div>
+    <div class="kpi-value" id="drawdown">0.00%</div>
+    <div class="bar-track"><div class="bar-fill" id="drawdownBar" style="width:0%;background:var(--green)"></div></div>
+    <div class="kpi-sub" id="drawdownLimit">Limit: 25%</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Fear & Greed</div>
+    <div class="fg-wrap">
+      <div class="fg-ring" id="fgCircle">—</div>
+      <div>
+        <div id="fgLabel" style="font-size:13px;font-weight:600">Unknown</div>
+        <div id="fgSub" class="kpi-sub">Waiting for data</div>
+      </div>
+    </div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Today's Trades</div>
+    <div class="kpi-value" id="dailyTrades">0</div>
+    <div class="kpi-sub" id="dailyTradeLimit">Limit: 10/day</div>
+  </div>
+  <div class="kpi">
+    <div class="kpi-label">Total Trades</div>
+    <div class="kpi-value" id="totalTrades">0</div>
+    <div class="kpi-sub" id="winRate">Success rate: —</div>
+  </div>
+</div>
+
+<!-- Positions -->
+<div class="section">
+  <div class="section-head">Open Positions</div>
+  <div class="panel">
+    <div id="positionsArea">
+      <div class="empty"><div class="empty-icon">📊</div>No positions yet — agent is analyzing markets</div>
+    </div>
+  </div>
+</div>
+
+<!-- Watchlist + Trades -->
+<div class="section">
+  <div class="g2">
+    <div>
+      <div class="section-head">Watchlist <span class="badge" id="watchCount">0</span></div>
+      <div class="panel">
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Token</th><th>Price</th><th>Mom %</th><th>ATR %</th><th>Score</th></tr></thead>
+            <tbody id="priceTable"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div>
+      <div class="section-head">Recent Trades <span class="badge" id="tradeCount">0</span></div>
+      <div class="panel">
+        <div class="table-scroll">
+          <div id="tradesArea">
+            <div class="empty"><div class="empty-icon">📈</div>No trades executed yet</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Agent Controls -->
+<div class="section">
+  <div class="section-head">Agent Controls <span class="badge">changes apply next cycle</span></div>
+  <div class="panel">
+    <div class="ctrl-grid">
+      <div class="ctrl-card">
+        <div class="ctrl-label">Mode</div>
+        <div class="ctrl-readonly" id="cfgMode">paper</div>
+        <div class="ctrl-hint">Set via AGENT_MODE env</div>
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-label">Max Position Size ($)</div>
+        <input type="number" class="ctrl-input" id="inMaxPos" min="5" max="10000" step="5" value="100">
+        <div class="ctrl-hint">Max USD per single trade</div>
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-label">Trade Interval (min)</div>
+        <input type="number" class="ctrl-input" id="inInterval" min="0.5" max="60" step="0.5" value="5">
+        <div class="ctrl-hint">Minutes between cycles</div>
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-label">Max Drawdown (%)</div>
+        <input type="number" class="ctrl-input" id="inDrawdown" min="5" max="30" step="1" value="25">
+        <div class="ctrl-hint">DQ at 30% — keep ≤ 25</div>
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-label">Slippage (%)</div>
+        <input type="number" class="ctrl-input" id="inSlippage" min="0.1" max="10" step="0.1" value="1.5">
+        <div class="ctrl-hint">Max slippage per swap</div>
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-label">Max Daily Trades</div>
+        <input type="number" class="ctrl-input" id="inMaxDaily" min="1" max="50" step="1" value="10">
+        <div class="ctrl-hint">Trades per day cap</div>
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-label">Max Positions</div>
+        <input type="number" class="ctrl-input" id="inMaxPositions" min="1" max="20" step="1" value="5">
+        <div class="ctrl-hint">Concurrent token positions</div>
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-label">Base Currency</div>
+        <div class="ctrl-readonly" id="cfgBase">USDT</div>
+        <div class="ctrl-hint">Quote asset for trades</div>
+      </div>
+      <div class="ctrl-card">
+        <div class="ctrl-label">Emergency Mode</div>
+        <div class="ctrl-readonly" id="cfgEmergency" style="color:var(--green)">OFF</div>
+        <div class="ctrl-hint">Triggers at 80% of drawdown limit</div>
+      </div>
+    </div>
+    <div class="ctrl-bar">
+      <button class="btn-save" id="btnSaveConfig" onclick="saveConfig()">Save Config</button>
+      <span class="save-msg" id="saveMsg"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Logs -->
+<div class="section">
+  <div class="section-head">Live Logs <span class="badge" id="logCount">0</span></div>
+  <div class="panel">
+    <div class="log-wrap" id="logContainer"></div>
+  </div>
+</div>
+
+</div><!-- .main -->
+
+<div class="footer">
+  Neural Alpha &middot; CMC Agent Hub + TWAK + BSC
+</div>
+
+<script>
+let es = null, reconnectTimer = null;
+const logBox = document.getElementById('logContainer');
+let logEntryCount = 0;
+
+function connect() {
+  if (es) { try { es.close(); } catch {} }
+  es = new EventSource('/api/events');
+  es.addEventListener('connected', () => {
+    document.getElementById('conn').innerHTML = '<span class="conn-dot conn-live"></span>Live';
+  });
+  es.addEventListener('state', (e) => { try { updateDashboard(JSON.parse(e.data)); } catch {} });
+  es.addEventListener('log', (e) => { try { appendLog(JSON.parse(e.data)); } catch {} });
+  es.onerror = () => {
+    document.getElementById('conn').innerHTML = '<span class="conn-dot conn-dead"></span>Reconnecting';
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    reconnectTimer = setTimeout(connect, 3000);
+  };
+}
+
+function updateDashboard(s) {
+  if (!s) return;
+
+  // Status pills
+  const sp = document.getElementById('statusPill');
+  sp.className = 'pill pill-status ' + (s.running ? 'running' : 'stopped');
+  sp.textContent = s.running ? 'RUNNING' : 'STOPPED';
+  document.getElementById('modePill').textContent = s.mode.toUpperCase();
+  document.getElementById('cycle').textContent = 'Cycle ' + s.cycleCount;
+
+  // Data source
+  const dp = document.getElementById('dataPill');
+  const src = s.bridgeSource || 'unknown';
+  const isReal = src.includes('twak') || src.includes('cmc-pro');
+  const labels = {'twak-mcp':'CMC x402','twak+cmc-pro':'CMC PRO + TWAK','cmc-pro':'CMC PRO','mock':'MOCK','mock-fallback':'MOCK'};
+  dp.textContent = labels[src] || src.toUpperCase();
+  dp.className = 'pill pill-data ' + (isReal ? 'live' : 'mock');
+  const tips = {
+    'twak-mcp':'CMC Agent Hub via TWAK x402','twak+cmc-pro':'Real CMC data (Pro API) + TWAK execution',
+    'cmc-pro':'Real CMC data (Pro API) — paper swaps','mock':'Simulated data','mock-fallback':'Simulated fallback data'
+  };
+  dp.title = tips[src] || src;
+
+  // Portfolio
+  const pv = s.portfolio;
+  if (pv) {
+    document.getElementById('portValue').textContent = '$' + fmt(pv.totalValueUsd);
+    const pnl = pv.totalPnl || 0, pnlPct = pv.totalPnlPct || 0;
+    const sign = pnl >= 0 ? '+' : '', cls = pnl > 0 ? 'up' : pnl < 0 ? 'down' : 'neutral';
+    document.getElementById('portChange').innerHTML = `<span class="${cls}">${sign}$${fmt(pnl)} (${sign}${pnlPct.toFixed(2)}%)</span>`;
+    document.getElementById('cashValue').textContent = '$' + fmt(pv.cashUsd);
+    document.getElementById('posCount').textContent = (pv.positions?.length || 0) + ' open positions';
+    document.getElementById('totalTrades').textContent = pv.tradeCount || 0;
+
+    const dd = pv.maxDrawdownPct || 0;
+    document.getElementById('drawdown').textContent = dd.toFixed(2) + '%';
+    const ddLimit = s.config?.maxDrawdownPct || 25;
+    const ddPct = Math.min(100, (dd / ddLimit) * 100);
+    const bar = document.getElementById('drawdownBar');
+    bar.style.width = ddPct + '%';
+    bar.style.background = dd > ddLimit * 0.8 ? 'var(--red)' : dd > ddLimit * 0.5 ? 'var(--yellow)' : 'var(--green)';
+    document.getElementById('drawdownLimit').textContent = 'Limit: ' + ddLimit + '%';
+    renderPositions(pv.positions || []);
+  }
+
+  // Risk
+  if (s.risk) {
+    document.getElementById('dailyTrades').textContent = s.risk.dailyTrades || 0;
+    document.getElementById('dailyTradeLimit').textContent = 'Limit: ' + (s.risk.maxDailyTrades || 10) + '/day';
+    document.getElementById('cfgEmergency').textContent = s.risk.emergencyMode ? 'ON' : 'OFF';
+    document.getElementById('cfgEmergency').style.color = s.risk.emergencyMode ? 'var(--red)' : 'var(--green)';
+  }
+
+  // Fear & Greed
+  const fg = s.fearGreedIndex;
+  if (fg !== null && fg !== undefined) {
+    const fgC = document.getElementById('fgCircle');
+    fgC.textContent = fg;
+    let label, color;
+    if (fg <= 20) { label='Extreme Fear'; color='var(--red)'; }
+    else if (fg <= 40) { label='Fear'; color='var(--yellow)'; }
+    else if (fg <= 60) { label='Neutral'; color='var(--text2)'; }
+    else if (fg <= 80) { label='Greed'; color='var(--green)'; }
+    else { label='Extreme Greed'; color='var(--green)'; }
+    fgC.style.background = color + '18'; fgC.style.color = color; fgC.style.borderColor = color;
+    document.getElementById('fgLabel').textContent = label;
+    document.getElementById('fgLabel').style.color = color;
+    const srcLabel = (s.bridgeSource||'').includes('cmc-pro') ? 'CMC Pro API' : s.bridgeSource === 'twak-mcp' ? 'CMC x402' : 'Mock';
+    document.getElementById('fgSub').textContent = srcLabel;
+  }
+
+  // Config sync — interval stored as ms, display as minutes
+  if (s.config) {
+    document.getElementById('cfgMode').textContent = s.config.mode;
+    document.getElementById('cfgBase').textContent = s.config.baseCurrency;
+    if (!configDirty) {
+      syncInput('inMaxPos', s.config.maxPositionSizeUsd);
+      syncInput('inInterval', +(s.config.tradeIntervalMs / 60000).toFixed(1));
+      syncInput('inDrawdown', s.config.maxDrawdownPct);
+      syncInput('inSlippage', s.config.slippageTolerance);
+      syncInput('inMaxDaily', s.config.maxDailyTrades);
+      syncInput('inMaxPositions', s.config.maxPortfolioTokens);
+    }
+  }
+
+  // Prices
+  if (s.prices) {
+    renderPrices(s.prices, s.tokenMetrics || {});
+    document.getElementById('watchCount').textContent = Object.keys(s.prices).length;
+  }
+
+  // Trades
+  if (s.trades) {
+    renderTrades(s.trades);
+    document.getElementById('tradeCount').textContent = s.trades.length;
+    const wins = s.trades.filter(t => t.success).length, total = s.trades.length;
+    document.getElementById('winRate').textContent = total > 0 ? `Success: ${wins}/${total} (${((wins/total)*100).toFixed(0)}%)` : 'Success rate: —';
+  }
+}
+
+function renderPositions(positions) {
+  const area = document.getElementById('positionsArea');
+  if (!positions?.length) {
+    area.innerHTML = '<div class="empty"><div class="empty-icon">📊</div>No positions yet — agent is analyzing markets</div>';
+    return;
+  }
+  let h = '<table><thead><tr><th>Token</th><th>Qty</th><th>Entry</th><th>Current</th><th>P&L</th><th>Weight</th></tr></thead><tbody>';
+  for (const p of positions) {
+    const c = p.unrealizedPnl >= 0 ? 'up' : 'down', sign = p.unrealizedPnl >= 0 ? '+' : '';
+    h += `<tr><td style="font-weight:600">${p.symbol}</td><td>${fmtAmt(p.amount)}</td><td>$${fmtP(p.avgEntryPrice)}</td><td>$${fmtP(p.currentPrice)}</td><td class="${c}">${sign}$${fmt(p.unrealizedPnl)} (${sign}${p.unrealizedPnlPct.toFixed(1)}%)</td><td>${p.weight.toFixed(1)}%</td></tr>`;
+  }
+  area.innerHTML = h + '</tbody></table>';
+}
+
+function renderPrices(prices, metrics) {
+  const sorted = Object.entries(prices).sort((a, b) => Math.abs(metrics[b[0]]?.score ?? 0) - Math.abs(metrics[a[0]]?.score ?? 0));
+  let h = '';
+  for (const [sym, price] of sorted) {
+    const m = metrics[sym] || {};
+    const mom = m.momentum != null ? (m.momentum >= 0 ? '+' : '') + m.momentum.toFixed(1) + '%' : '—';
+    const momC = (m.momentum ?? 0) > 3 ? 'up' : (m.momentum ?? 0) < -3 ? 'down' : 'neutral';
+    const atr = m.atrPct != null ? m.atrPct.toFixed(2) + '%' : '—';
+    const score = m.score != null ? m.score : '—';
+    const sC = (m.score ?? 0) >= 15 ? 'up' : (m.score ?? 0) <= -10 ? 'down' : 'neutral';
+    h += `<tr><td style="font-weight:600">${sym}</td><td style="font-family:'IBM Plex Mono',monospace">$${fmtP(price)}</td><td class="${momC}">${mom}</td><td>${atr}</td><td class="${sC}" style="font-weight:600">${score}</td></tr>`;
+  }
+  document.getElementById('priceTable').innerHTML = h;
+}
+
+function renderTrades(trades) {
+  const area = document.getElementById('tradesArea');
+  if (!trades?.length) {
+    area.innerHTML = '<div class="empty"><div class="empty-icon">📈</div>No trades executed yet</div>';
+    return;
+  }
+  let h = '<table><thead><tr><th>Time</th><th>From</th><th>To</th><th>Amount</th><th>Status</th><th>Tx</th></tr></thead><tbody>';
+  for (const t of trades.slice(-20).reverse()) {
+    const time = new Date(t.timestamp).toLocaleTimeString();
+    const status = t.success ? '<span class="up">✓</span>' : '<span class="down">✗</span>';
+    const tx = t.txHash
+      ? (t.txHash.startsWith('paper-') ? '<span style="color:var(--purple)">PAPER</span>'
+        : `<a href="https://bscscan.com/tx/${t.txHash}" target="_blank" style="color:var(--blue)">${t.txHash.slice(0,10)}…</a>`)
+      : '—';
+    h += `<tr><td>${time}</td><td>${t.fromToken}</td><td style="font-weight:600">${t.toToken}</td><td style="font-family:'IBM Plex Mono',monospace">$${fmt(parseFloat(t.fromAmount))}</td><td>${status}</td><td>${tx}</td></tr>`;
+  }
+  area.innerHTML = h + '</tbody></table>';
+}
+
+function appendLog(entry) {
+  logEntryCount++;
+  document.getElementById('logCount').textContent = logEntryCount;
+  const div = document.createElement('div');
+  div.className = 'log-line log-' + entry.level;
+  const ts = entry.timestamp.split('T')[1]?.slice(0,12) || '';
+  let msg = `<span class="log-ts">${ts}</span>[${entry.level.toUpperCase()}] ${esc(entry.event)}`;
+  if (entry.data) msg += ' ' + esc(JSON.stringify(entry.data));
+  if (entry.txHash) msg += ' tx:' + entry.txHash;
+  div.innerHTML = msg;
+  logBox.appendChild(div);
+  if (logBox.children.length > 200) logBox.removeChild(logBox.firstChild);
+  logBox.scrollTop = logBox.scrollHeight;
+}
+
+let configDirty = false, dirtyTimer = null;
+document.querySelectorAll('.ctrl-input').forEach(el => {
+  el.addEventListener('input', () => {
+    configDirty = true;
+    if (dirtyTimer) clearTimeout(dirtyTimer);
+    dirtyTimer = setTimeout(() => { configDirty = false; }, 15000);
+  });
+});
+
+function syncInput(id, val) { const el = document.getElementById(id); if (el && document.activeElement !== el) el.value = val; }
+
+function saveConfig() {
+  const body = {
+    maxPositionSizeUsd: parseFloat(document.getElementById('inMaxPos').value),
+    tradeIntervalMs: parseFloat(document.getElementById('inInterval').value) * 60000,
+    maxDrawdownPct: parseFloat(document.getElementById('inDrawdown').value),
+    slippageTolerance: parseFloat(document.getElementById('inSlippage').value),
+    maxDailyTrades: parseInt(document.getElementById('inMaxDaily').value),
+    maxPortfolioTokens: parseInt(document.getElementById('inMaxPositions').value),
+  };
+  if (body.maxDrawdownPct > 30) { showMsg('Drawdown > 30% will DQ you!', 'var(--red)'); return; }
+  const btn = document.getElementById('btnSaveConfig');
+  btn.disabled = true; btn.textContent = 'SAVING...';
+  fetch('/api/control/config', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body) })
+    .then(r => r.json())
+    .then(d => { configDirty = false; btn.disabled = false; btn.textContent = 'SAVE CONFIG'; showMsg(d.ok ? 'Saved — applied next cycle' : 'Error: ' + (d.error||'unknown'), d.ok ? 'var(--green)' : 'var(--red)'); })
+    .catch(() => { btn.disabled = false; btn.textContent = 'SAVE CONFIG'; showMsg('Network error', 'var(--red)'); });
+}
+
+function showMsg(text, color) {
+  const el = document.getElementById('saveMsg');
+  el.textContent = text; el.style.color = color; el.style.opacity = '1';
+  setTimeout(() => { el.style.opacity = '0'; }, 4000);
+}
+
+function stopAgent() {
+  if (!confirm('Stop the trading agent?')) return;
+  fetch('/api/control/stop', { method:'POST' }).then(r=>r.json()).catch(()=>{});
+}
+
+function fmt(n) { return (n||0).toFixed(2); }
+function fmtP(n) { return n >= 1 ? n.toFixed(2) : n >= 0.01 ? n.toFixed(4) : n.toFixed(8); }
+function fmtAmt(n) { return n >= 1000 ? n.toFixed(2) : n >= 1 ? n.toFixed(4) : n.toFixed(8); }
+function esc(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+fetch('/api/logs').then(r=>r.json()).then(logs => { for (const l of logs) appendLog(l); }).catch(()=>{});
+connect();
+</script>
+</body>
+</html>

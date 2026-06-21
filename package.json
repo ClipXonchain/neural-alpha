@@ -1,0 +1,22 @@
+{
+  "name": "neural-alpha",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Neural Alpha — autonomous BSC trading agent for BNB Hack Track 1",
+  "workspaces": [
+    "neural-alpha",
+    "dashboard"
+  ],
+  "scripts": {
+    "dev": "concurrently -n agent,dashboard -c yellow,cyan \"npm run dev --workspace=neural-alpha\" \"npm run dev --workspace=dashboard\"",
+    "build": "npm run build --workspace=neural-alpha && npm run build --workspace=dashboard",
+    "agent": "npm run start --workspace=neural-alpha",
+    "agent:dev": "npm run dev --workspace=neural-alpha",
+    "register": "npm run register --workspace=neural-alpha",
+    "dashboard": "npm run dev --workspace=dashboard",
+    "dashboard:build": "npm run build --workspace=dashboard"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}

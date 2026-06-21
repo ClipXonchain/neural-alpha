@@ -1,0 +1,183 @@
+/** Neural Alpha agent HTTP API — proxied via Next.js rewrites at /api/agent/* */
+
+const AGENT_BASE =
+  process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
+
+export interface Track1Snapshot {
+  mode: string;
+  running: boolean;
+  cycleCount: number;
+  bridgeSource?: string;
+  startedAt?: number;
+  fearGreedIndex: number | null;
+  watchlist: string[];
+  prices: Record<string, number>;
+  config: {
+    mode?: string;
+    maxDrawdownPct: number;
+    maxDailyTrades: number;
+    baseCurrency: string;
+    maxPositionSizeUsd?: number;
+    tradeIntervalMs?: number;
+    slippageTolerance?: number;
+    maxPortfolioTokens?: number;
+  };
+  portfolio: {
+    timestamp: number;
+    totalValueUsd: number;
+    cashUsd: number;
+    dailyPnl: number;
+    totalPnl: number;
+    totalPnlPct: number;
+    maxDrawdownPct: number;
+    tradeCount: number;
+    positions: Array<{
+      symbol: string;
+      amount: number;
+      avgEntryPrice: number;
+      currentPrice: number;
+      unrealizedPnl: number;
+      unrealizedPnlPct: number;
+      weight: number;
+    }>;
+  };
+  snapshots: Array<{
+    timestamp: number;
+    totalValueUsd: number;
+    maxDrawdownPct: number;
+  }>;
+  trades: Array<{
+    orderId: string;
+    success: boolean;
+    txHash?: string;
+    fromToken: string;
+    toToken: string;
+    fromAmount: string;
+    toAmount?: string;
+    priceAtExecution: number;
+    timestamp: number;
+  }>;
+  risk: Record<string, unknown>;
+  tokenMetrics?: Record<
+    string,
+    {
+      momentum: number | null;
+      atrPct: number | null;
+      score: number | null;
+      newsScore?: number | null;
+      newsArticles?: number;
+    }
+  >;
+  newsCount?: number;
+}
+
+export interface WalletSnapshot {
+  address: string | null;
+  bnbBalance: number;
+  usdtBalance: number;
+  walletMode: string;
+  walletState: string;
+  registered: boolean;
+  registrationOpen: boolean;
+}
+
+export interface LogEntry {
+  timestamp: string;
+  level: string;
+  event: string;
+  data?: Record<string, unknown>;
+  txHash?: string;
+}
+
+async function agentFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${AGENT_BASE}${path}`, {
+    ...init,
+    headers: { "Content-Type": "application/json", ...init?.headers },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((err as { error?: string }).error || res.statusText);
+  }
+  return res.json() as Promise<T>;
+}
+
+export async function fetchAgentState(): Promise<Track1Snapshot> {
+  return agentFetch("/state");
+}
+
+export async function fetchWallet(): Promise<WalletSnapshot> {
+  return agentFetch("/wallet");
+}
+
+export async function fetchLogs(): Promise<LogEntry[]> {
+  return agentFetch("/logs");
+}
+
+export async function stopAgent(): Promise<void> {
+  await agentFetch("/control/stop", { method: "POST" });
+}
+
+export async function syncWallet(): Promise<{ usdtBalance: number; synced: boolean }> {
+  return agentFetch("/wallet/sync", { method: "POST" });
+}
+
+export async function registerCompetition(): Promise<Record<string, unknown>> {
+  return agentFetch("/competition/register", { method: "POST" });
+}
+
+export async function switchWalletMode(
+  mode: "local" | "walletconnect"
+): Promise<Record<string, unknown>> {
+  return agentFetch("/wallet/mode", {
+    method: "POST",
+    body: JSON.stringify({ mode }),
+  });
+}
+
+export async function saveAgentConfig(
+  updates: Record<string, unknown>
+): Promise<{ ok: boolean; error?: string }> {
+  return agentFetch("/control/config", {
+    method: "POST",
+    body: JSON.stringify(updates),
+  });
+}
+
+const SSE_BASE =
+  process.env.NEXT_PUBLIC_AGENT_SSE_URL || "http://localhost:3847";
+
+export function subscribeAgentEvents(
+  onState: (state: Track1Snapshot) => void,
+  onLog?: (log: LogEntry) => void
+): () => void {
+  const es = new EventSource(`${SSE_BASE}/api/events`);
+
+  es.addEventListener("state", (e) => {
+    try {
+      onState(JSON.parse(e.data) as Track1Snapshot);
+    } catch { /* ignore */ }
+  });
+
+  if (onLog) {
+    es.addEventListener("log", (ev) => {
+      try {
+        onLog(JSON.parse(ev.data) as LogEntry);
+      } catch { /* ignore */ }
+    });
+  }
+
+  es.onerror = () => { /* browser auto-reconnects */ };
+
+  return () => es.close();
+}
+
+export async function checkAgentConnection(): Promise<boolean> {
+  try {
+    await fetchAgentState();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export { AGENT_BASE };
