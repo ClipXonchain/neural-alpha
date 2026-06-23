@@ -22,6 +22,7 @@ import {
 import { logger } from "./utils/logger.js";
 import { getAgentStore } from "./db/store.js";
 import { fetchBscTokenBalances, scanWalletViaCliSubprocess } from "./integrations/bscscan.js";
+import { fetchOnChainTradeHistory } from "./integrations/bsc-trade-history.js";
 import { fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
 
 /**
@@ -1250,8 +1251,40 @@ export class TradingAgent {
     const navState = await store.loadNavState();
     if (navState) this.portfolio.restorePersistedNav(navState);
 
-    const trades = await store.loadRecentTrades(50, this.currentWalletAddress());
-    if (trades.length > 0) this.portfolio.hydrateTradeHistory(trades);
+    const wallet = await this.resolveBootstrapWalletAddress();
+    const dbTrades = await store.loadRecentTrades(50, wallet);
+    if (dbTrades.length > 0) this.portfolio.hydrateTradeHistory(dbTrades);
+
+    if (wallet && this.config.mode === "live") {
+      const knownHashes = new Set(
+        dbTrades.map((t) => t.txHash?.toLowerCase()).filter(Boolean) as string[]
+      );
+      const chainTrades = await fetchOnChainTradeHistory(wallet, 50);
+      const novel = chainTrades.filter(
+        (t) => t.txHash && !knownHashes.has(t.txHash.toLowerCase())
+      );
+
+      if (novel.length > 0) {
+        this.portfolio.hydrateTradeHistory(novel);
+        await Promise.all(novel.map((t) => store.saveChainTrade(t, wallet)));
+        logger.info("On-chain trades merged into history", {
+          imported: novel.length,
+          wallet: wallet.slice(0, 10) + "…",
+        });
+      }
+    }
+  }
+
+  /** Wallet address for DB scoping before TWAK cache is warm. */
+  private async resolveBootstrapWalletAddress(): Promise<string | null> {
+    try {
+      const addr = await this.mcp.getAddress(BSC_CHAIN);
+      const resolved = this.resolveWalletAddress(addr?.address);
+      if (resolved) return resolved;
+    } catch {
+      /* TWAK may not be bound yet */
+    }
+    return this.resolveWalletAddress(process.env.AGENT_WALLET_ADDRESS);
   }
 
   private async persistTrade(
@@ -1263,6 +1296,7 @@ export class TradingAgent {
     if (!store.enabled) return;
     await store.saveTrade(order, result, this.config.mode, twakResponse, this.currentWalletAddress());
     if (result.success) {
+      this.portfolio.markTradePersisted(result.orderId);
       logger.trade(
         `Trade persisted to DB — ${order.side.toUpperCase()} ${order.symbol}`,
         {

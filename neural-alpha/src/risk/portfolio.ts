@@ -8,6 +8,8 @@ export class PortfolioTracker {
   private positions: Map<string, { amount: number; avgEntryPrice: number }> = new Map();
   private peakPnlPct: Map<string, number> = new Map();
   private tradeHistory: TradeResult[] = [];
+  /** DB / chain / confirmed trades — never purged from Recent Trades display. */
+  private persistentTradeIds = new Set<string>();
   private snapshots: PortfolioSnapshot[] = [];
   private peakValueUsd: number;
   private dailyTradesByDate: Map<string, number> = new Map();
@@ -87,16 +89,22 @@ export class PortfolioTracker {
     }
   }
 
-  /** Merge confirmed trades loaded from Neon (survives restarts). */
+  /** Merge confirmed trades loaded from Neon or on-chain backfill (survives restarts). */
   hydrateTradeHistory(trades: import("../utils/types.js").TradeResult[]) {
     if (trades.length === 0) return;
     const existing = new Set(this.tradeHistory.map((t) => t.orderId));
     for (const t of trades) {
       if (!existing.has(t.orderId)) this.tradeHistory.push(t);
+      this.persistentTradeIds.add(t.orderId);
     }
     this.tradeHistory.sort((a, b) => a.timestamp - b.timestamp);
     this.rebuildDailyTradeCounts();
     logger.info("Trade history hydrated from database", { count: trades.length });
+  }
+
+  /** Mark a trade as persisted/confirmed so it stays in Recent Trades after reconcile. */
+  markTradePersisted(orderId: string) {
+    this.persistentTradeIds.add(orderId);
   }
 
   get gasReserve(): { symbol: string; amount: number; valueUsd: number } {
@@ -209,6 +217,7 @@ export class PortfolioTracker {
     const stables = new Set([baseCurrency.toUpperCase(), "USDT", "USD", "BNB"]);
     const before = this.tradeHistory.length;
     this.tradeHistory = this.tradeHistory.filter((t) => {
+      if (this.persistentTradeIds.has(t.orderId)) return true;
       if (!t.success) return true;
       const from = t.fromToken.toUpperCase();
       if (!stables.has(from)) return true;

@@ -115,6 +115,45 @@ export class AgentStore {
     }
   }
 
+  /** Persist a trade reconstructed from on-chain transfer history (idempotent). */
+  async saveChainTrade(trade: TradeResult, walletAddress: string): Promise<void> {
+    if (!this.pool || !trade.txHash) return;
+    const stables = new Set(["USDT", "USDC", "BNB", "BUSD", "DAI", "FDUSD"]);
+    const isBuy = stables.has(trade.fromToken.toUpperCase());
+    const side = isBuy ? "buy" : "sell";
+    const symbol = isBuy ? trade.toToken : trade.fromToken;
+    const fromAmt = parseFloat(trade.fromAmount) || 0;
+    const toAmt = parseFloat(trade.toAmount ?? "") || 0;
+    const amountUsd = isBuy ? fromAmt : toAmt || fromAmt * (trade.priceAtExecution || 0);
+
+    try {
+      await this.pool.query(
+        `INSERT INTO trades (
+          order_id, symbol, side, amount_usd,
+          from_token, to_token, from_amount, to_amount,
+          price_usd, tx_hash, status, confirmed_at, wallet_address
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'confirmed',$11,$12)
+        ON CONFLICT (order_id) DO NOTHING`,
+        [
+          trade.orderId,
+          symbol.toUpperCase(),
+          side,
+          amountUsd,
+          trade.fromToken,
+          trade.toToken,
+          trade.fromAmount,
+          trade.toAmount ?? null,
+          trade.priceAtExecution ?? null,
+          trade.txHash,
+          new Date(trade.timestamp).toISOString(),
+          walletAddress.toLowerCase(),
+        ]
+      );
+    } catch (err) {
+      logger.warn("Failed to persist chain trade", { orderId: trade.orderId, error: String(err) });
+    }
+  }
+
   async saveNavSnapshot(
     snap: PortfolioSnapshot,
     cycleId: number,
