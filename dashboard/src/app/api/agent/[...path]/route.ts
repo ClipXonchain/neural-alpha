@@ -4,12 +4,15 @@ import { getAgentApiUrl } from "@/lib/agent-url";
 export const dynamic = "force-dynamic";
 
 const API_SECRET = process.env.API_SECRET?.trim();
-// On public/read-only deployments the proxy must NOT auto-attach the operator
-// secret, otherwise any anonymous visitor's request would be authenticated and
-// could control the live agent. Controls are only usable on non-read-only
-// (operator) builds where this flag is unset.
-const READONLY =
-  process.env.READONLY === "true" || process.env.NEXT_PUBLIC_READONLY === "true";
+const PUBLIC_DASHBOARD_HOSTS = new Set(["agents.clipx.app"]);
+
+function isReadonlyDeploy(req: NextRequest): boolean {
+  if (process.env.READONLY === "true" || process.env.NEXT_PUBLIC_READONLY === "true") {
+    return true;
+  }
+  const host = (req.headers.get("host") ?? "").split(":")[0].toLowerCase();
+  return PUBLIC_DASHBOARD_HOSTS.has(host);
+}
 const ALLOWED_ORIGINS = new Set(
   (process.env.CORS_ORIGINS ?? "https://agents.clipx.app,http://localhost:3000")
     .split(",")
@@ -53,7 +56,7 @@ async function proxyToAgent(req: NextRequest, ctx: RouteContext) {
   const clientAuth = req.headers.get("authorization") ?? req.headers.get("x-api-key");
   if (clientAuth) {
     headers.set("Authorization", clientAuth.startsWith("Bearer ") ? clientAuth : `Bearer ${clientAuth}`);
-  } else if (API_SECRET && !READONLY) {
+  } else if (API_SECRET && !isReadonlyDeploy(req)) {
     headers.set("Authorization", `Bearer ${API_SECRET}`);
   }
 

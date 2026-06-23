@@ -4,15 +4,6 @@ export function cn(...inputs: ClassValue[]) {
   return clsx(inputs);
 }
 
-/**
- * Public/read-only deployment flag. When `NEXT_PUBLIC_READONLY=true` (e.g. on
- * agents.clipx.app) the dashboard renders as monitoring-only: all controls that
- * mutate the agent (start/stop, command/assistant, wallet sync, register,
- * resync, config) are hidden. Controls remain available on local/operator builds
- * where the flag is unset.
- */
-export const READ_ONLY = process.env.NEXT_PUBLIC_READONLY === "true";
-
 export function formatUsd(value: number, decimals = 2): string {
   return new Intl.NumberFormat("en-US", {
     style: "currency",

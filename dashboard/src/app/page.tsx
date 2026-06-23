@@ -14,7 +14,7 @@ import { WalletPanel } from "@/components/dashboard/WalletPanel";
 import { AgentControls } from "@/components/dashboard/AgentControls";
 import { CommandPanel } from "@/components/dashboard/CommandPanel";
 import { useAgentConnection } from "@/hooks/useAgentConnection";
-import { READ_ONLY } from "@/lib/utils";
+import { useReadOnly } from "@/hooks/useReadOnly";
 
 const EquityChart = dynamic(
   () => import("@/components/dashboard/EquityChart").then((m) => m.EquityChart),
@@ -88,6 +88,7 @@ function BootSequence({ onComplete }: { onComplete: () => void }) {
 
 export default function DashboardPage() {
   const [booting, setBooting] = useState(true);
+  const readOnly = useReadOnly();
   const {
     connected,
     loading,
@@ -134,7 +135,7 @@ export default function DashboardPage() {
               onStop={handleStop}
               connected={connected}
               error={error}
-              readOnly={READ_ONLY}
+              readOnly={readOnly}
             />
 
             <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
@@ -149,7 +150,7 @@ export default function DashboardPage() {
               {/* Charts row */}
               <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
                 <EquityChart state={state} />
-                <AllocationChart state={state} onRefresh={READ_ONLY ? undefined : handleResync} />
+                <AllocationChart state={state} onRefresh={readOnly ? undefined : handleResync} />
               </div>
 
               {/* Trades + Live Logs — main monitoring area */}
@@ -170,7 +171,7 @@ export default function DashboardPage() {
                   onSync={handleSyncWallet}
                   onRegister={handleRegister}
                   onSwitchMode={handleSwitchWallet}
-                  readOnly={READ_ONLY}
+                  readOnly={readOnly}
                 />
                 <RiskPanel state={state} />
               </div>
@@ -179,7 +180,7 @@ export default function DashboardPage() {
               <SignalMonitor signals={state.signals} />
 
               {/* Agent Controls — hidden on public/read-only deployments */}
-              {!READ_ONLY && (
+              {!readOnly && (
                 <AgentControls
                   connected={connected}
                   config={agentConfig ? {
@@ -210,7 +211,7 @@ export default function DashboardPage() {
           </div>
 
           {/* Floating Command Assistant — hidden on public/read-only deployments */}
-          {!READ_ONLY && <CommandPanel connected={connected} />}
+          {!readOnly && <CommandPanel connected={connected} />}
         </div>
       )}
     </>

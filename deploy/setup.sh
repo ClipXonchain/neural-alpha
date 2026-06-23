@@ -60,6 +60,21 @@ if ! grep -q "^NODE_ENV=" .env; then
   echo "  ✓ NODE_ENV=production added to .env"
 fi
 
+# Public dashboard — hide controls on agents.clipx.app (baked into Next.js client bundle)
+if ! grep -q "^NEXT_PUBLIC_READONLY=" .env; then
+  echo "NEXT_PUBLIC_READONLY=true" >> .env
+  echo "  ✓ NEXT_PUBLIC_READONLY=true added to .env"
+fi
+if ! grep -q "^READONLY=" .env; then
+  echo "READONLY=true" >> .env
+  echo "  ✓ READONLY=true added to .env"
+fi
+
+# Next.js reads dashboard/.env.local at build time for NEXT_PUBLIC_* vars
+mkdir -p dashboard
+grep -E '^(NEXT_PUBLIC_READONLY|READONLY|API_SECRET|AGENT_API_URL)=' .env > dashboard/.env.local 2>/dev/null || true
+echo "  ✓ dashboard/.env.local synced from .env"
+
 echo "  ✓ Environment configured"
 
 # ─── 3. Install dependencies ───────────────────────────────────
@@ -71,6 +86,10 @@ echo "  ✓ Dependencies installed"
 # ─── 4. Build dashboard ────────────────────────────────────────
 echo ""
 echo "▸ Building dashboard..."
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
 npm run dashboard:build
 echo "  ✓ Dashboard built"
 

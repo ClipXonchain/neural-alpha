@@ -37,6 +37,8 @@ module.exports = {
       env: {
         NODE_ENV: "production",
         PORT: "3000",
+        READONLY: "true",
+        NEXT_PUBLIC_READONLY: "true",
       },
       instances: 1,
       exec_mode: "fork",
