@@ -200,7 +200,9 @@ export class PortfolioTracker {
 
   /** Drop trades without a confirmed tx hash and rebuild daily counters. */
   purgeUnconfirmedTrades(isConfirmed: (txHash: string | undefined) => boolean) {
-    const kept = this.tradeHistory.filter((t) => isConfirmed(t.txHash));
+    const kept = this.tradeHistory.filter(
+      (t) => this.persistentTradeIds.has(t.orderId) || isConfirmed(t.txHash)
+    );
     if (kept.length === this.tradeHistory.length) return 0;
 
     const removed = this.tradeHistory.length - kept.length;

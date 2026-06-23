@@ -145,6 +145,10 @@ export class TradingAgent {
           logger.warn("Initial wallet sync failed", { error: String(err) });
         }
       }
+
+      if (this.portfolio.getTradeHistory().length === 0) {
+        await this.backfillTradeHistoryFromChain();
+      }
     }
 
     this.getWalletInfo().catch(() => {});
@@ -1246,45 +1250,81 @@ export class TradingAgent {
 
   private async bootstrapPersistence() {
     const store = getAgentStore();
-    if (!store.enabled) return;
+    let dbTrades: import("./utils/types.js").TradeResult[] = [];
 
-    const navState = await store.loadNavState();
-    if (navState) this.portfolio.restorePersistedNav(navState);
+    if (store.enabled) {
+      const navState = await store.loadNavState();
+      if (navState) this.portfolio.restorePersistedNav(navState);
+
+      const wallet = await this.resolveBootstrapWalletAddress();
+      dbTrades = await store.loadRecentTrades(50, wallet);
+      if (dbTrades.length > 0) this.portfolio.hydrateTradeHistory(dbTrades);
+    }
+
+    await this.backfillTradeHistoryFromChain(dbTrades);
+  }
+
+  /**
+   * Import Recent Trades from Binance Web3 / BscScan when DB is empty or sparse.
+   * Runs even without DATABASE_URL — does not depend on Neon.
+   */
+  private async backfillTradeHistoryFromChain(
+    existing: import("./utils/types.js").TradeResult[] = []
+  ) {
+    if (this.config.mode !== "live") return;
 
     const wallet = await this.resolveBootstrapWalletAddress();
-    const dbTrades = await store.loadRecentTrades(50, wallet);
-    if (dbTrades.length > 0) this.portfolio.hydrateTradeHistory(dbTrades);
+    if (!wallet) {
+      logger.warn("Trade history backfill skipped — set AGENT_WALLET_ADDRESS or bind TWAK wallet");
+      return;
+    }
 
-    if (wallet && this.config.mode === "live") {
-      const knownHashes = new Set(
-        dbTrades.map((t) => t.txHash?.toLowerCase()).filter(Boolean) as string[]
-      );
-      const chainTrades = await fetchWalletTradeHistory(wallet, 50);
-      const novel = chainTrades.filter(
-        (t) => t.txHash && !knownHashes.has(t.txHash.toLowerCase())
-      );
+    const knownHashes = new Set(
+      existing.map((t) => t.txHash?.toLowerCase()).filter(Boolean) as string[]
+    );
+    for (const t of this.portfolio.getTradeHistory()) {
+      if (t.txHash) knownHashes.add(t.txHash.toLowerCase());
+    }
 
-      if (novel.length > 0) {
-        this.portfolio.hydrateTradeHistory(novel);
-        await Promise.all(novel.map((t) => store.saveChainTrade(t, wallet)));
-        logger.info("On-chain trades merged into history", {
-          imported: novel.length,
+    const chainTrades = await fetchWalletTradeHistory(wallet, 50);
+    const novel = chainTrades.filter(
+      (t) => t.txHash && !knownHashes.has(t.txHash.toLowerCase())
+    );
+
+    if (novel.length === 0) {
+      if (this.portfolio.getTradeHistory().length === 0 && chainTrades.length > 0) {
+        this.portfolio.hydrateTradeHistory(chainTrades);
+        logger.info("Trade history hydrated from chain (memory only)", {
+          count: chainTrades.length,
           wallet: wallet.slice(0, 10) + "…",
         });
       }
+      return;
     }
+
+    this.portfolio.hydrateTradeHistory(novel);
+
+    const store = getAgentStore();
+    if (store.enabled) {
+      await Promise.all(novel.map((t) => store.saveChainTrade(t, wallet)));
+    }
+
+    logger.info("Trade history backfilled from chain", {
+      imported: novel.length,
+      wallet: wallet.slice(0, 10) + "…",
+    });
   }
 
   /** Wallet address for DB scoping before TWAK cache is warm. */
   private async resolveBootstrapWalletAddress(): Promise<string | null> {
+    const envAddr = this.resolveWalletAddress(process.env.AGENT_WALLET_ADDRESS);
+    if (envAddr) return envAddr;
     try {
       const addr = await this.mcp.getAddress(BSC_CHAIN);
-      const resolved = this.resolveWalletAddress(addr?.address);
-      if (resolved) return resolved;
+      return this.resolveWalletAddress(addr?.address);
     } catch {
-      /* TWAK may not be bound yet */
+      return null;
     }
-    return this.resolveWalletAddress(process.env.AGENT_WALLET_ADDRESS);
   }
 
   private async persistTrade(
