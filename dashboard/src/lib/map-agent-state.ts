@@ -18,6 +18,7 @@ function isConfirmedTrade(
   mode: string
 ): boolean {
   if (!t.success || !t.txHash) return false;
+  if (t.txHash.startsWith("binance-web3-")) return true;
   if (mode === "paper") {
     return t.txHash.startsWith("paper-") || ON_CHAIN_TX_PATTERN.test(t.txHash);
   }

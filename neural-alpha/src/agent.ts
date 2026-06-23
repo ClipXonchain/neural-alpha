@@ -22,7 +22,7 @@ import {
 import { logger } from "./utils/logger.js";
 import { getAgentStore } from "./db/store.js";
 import { fetchBscTokenBalances, scanWalletViaCliSubprocess } from "./integrations/bscscan.js";
-import { fetchOnChainTradeHistory } from "./integrations/bsc-trade-history.js";
+import { fetchWalletTradeHistory } from "./integrations/trade-history.js";
 import { fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
 
 /**
@@ -1259,7 +1259,7 @@ export class TradingAgent {
       const knownHashes = new Set(
         dbTrades.map((t) => t.txHash?.toLowerCase()).filter(Boolean) as string[]
       );
-      const chainTrades = await fetchOnChainTradeHistory(wallet, 50);
+      const chainTrades = await fetchWalletTradeHistory(wallet, 50);
       const novel = chainTrades.filter(
         (t) => t.txHash && !knownHashes.has(t.txHash.toLowerCase())
       );

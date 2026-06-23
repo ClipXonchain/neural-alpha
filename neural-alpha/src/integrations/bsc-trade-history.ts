@@ -90,7 +90,12 @@ async function fetchTokenTransfers(
 
     if (json.status !== "1" || !Array.isArray(json.result)) {
       const msg = typeof json.result === "string" ? json.result : json.message ?? "unknown";
-      if (page === 1) throw new Error(`BscScan tokentx: ${msg}`);
+      if (page === 1) {
+        logger.warn("BscScan tokentx unavailable (BSC requires paid Etherscan v2 plan on most keys)", {
+          error: msg,
+        });
+        throw new Error(`BscScan tokentx: ${msg}`);
+      }
       break;
     }
 
@@ -212,7 +217,7 @@ export async function fetchOnChainTradeHistory(
 ): Promise<TradeResult[]> {
   const apiKey = process.env.BSCSCAN_API_KEY?.trim();
   if (!apiKey) {
-    logger.warn("BSCSCAN_API_KEY not set — cannot backfill trade history from chain");
+    logger.warn("BSCSCAN_API_KEY not set — skipping per-tx BscScan backfill (using Binance Web3 fallback)");
     return [];
   }
   if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {

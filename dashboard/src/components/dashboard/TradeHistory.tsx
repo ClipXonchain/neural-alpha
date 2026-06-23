@@ -104,9 +104,14 @@ function TradeRow({ trade, index }: { trade: Trade; index: number }) {
   const isBuy = trade.side === "buy";
   const hasPnl = trade.pnl !== undefined;
   const isProfit = (trade.pnl ?? 0) >= 0;
-  const txUrl = trade.txHash && trade.txHash !== "pending"
-    ? `https://bscscan.com/tx/${trade.txHash}`
-    : null;
+  const isBinanceAggregate = trade.txHash?.startsWith("binance-web3-") ?? false;
+  const txUrl =
+    trade.txHash &&
+    trade.txHash !== "pending" &&
+    !isBinanceAggregate &&
+    /^0x[a-fA-F0-9]{40,}$/.test(trade.txHash)
+      ? `https://bscscan.com/tx/${trade.txHash}`
+      : null;
 
   return (
     <motion.div
@@ -203,6 +208,15 @@ function TradeRow({ trade, index }: { trade: Trade; index: number }) {
             {shortenHash(trade.txHash)}
             <ExternalLink className="size-2.5" />
           </a>
+        ) : isBinanceAggregate ? (
+          <span
+            className="flex items-center gap-1.5 px-2 py-1 rounded text-[10px] bg-cyan/5 text-cyan/80 border border-cyan/10"
+            style={{ fontFamily: "var(--font-mono)" }}
+            title="Aggregate buy/sell stats from Binance Web3 (not a single tx hash)"
+          >
+            <CheckCircle2 className="size-3" />
+            Binance Web3
+          </span>
         ) : (
           <span
             className="flex items-center gap-1.5 px-2 py-1 rounded text-[10px] bg-surface-overlay/40 text-text-muted"
