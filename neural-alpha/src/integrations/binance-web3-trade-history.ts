@@ -25,6 +25,11 @@ interface BinancePositionRow {
   lastTxTime?: string | number | null;
 }
 
+/** Raw Binance Web3 position rows (includes buyCnt / lastTxTime hints for RPC scan). */
+export async function fetchRawBinancePositions(address: string): Promise<BinancePositionRow[]> {
+  return fetchRawPositions(address);
+}
+
 async function fetchRawPositions(address: string): Promise<BinancePositionRow[]> {
   const all: BinancePositionRow[] = [];
   let offset = 0;

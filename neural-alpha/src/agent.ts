@@ -147,7 +147,7 @@ export class TradingAgent {
       }
 
       if (this.portfolio.getTradeHistory().length === 0) {
-        await this.backfillTradeHistoryFromChain();
+        this.scheduleTradeHistoryBackfill();
       }
     }
 
@@ -1261,7 +1261,16 @@ export class TradingAgent {
       if (dbTrades.length > 0) this.portfolio.hydrateTradeHistory(dbTrades);
     }
 
-    await this.backfillTradeHistoryFromChain(dbTrades);
+    this.scheduleTradeHistoryBackfill(dbTrades);
+  }
+
+  /** Run chain backfill without blocking startup (RPC scan can take 1–2 min). */
+  private scheduleTradeHistoryBackfill(
+    existing: import("./utils/types.js").TradeResult[] = []
+  ) {
+    void this.backfillTradeHistoryFromChain(existing).catch((err) => {
+      logger.warn("Trade history backfill failed", { error: String(err) });
+    });
   }
 
   /**
@@ -1279,6 +1288,25 @@ export class TradingAgent {
       return;
     }
 
+    const chainTrades = await fetchWalletTradeHistory(wallet, 50);
+    const realChainTrades = chainTrades.filter(
+      (t) => t.txHash && /^0x[a-fA-F0-9]{64}$/.test(t.txHash)
+    );
+
+    if (realChainTrades.length > 0) {
+      const purged = this.portfolio.purgeBinanceAggregateTrades();
+      const store = getAgentStore();
+      if (store.enabled) {
+        const dbPurged = await store.deleteBinanceAggregateTrades(wallet);
+        if (purged > 0 || dbPurged > 0) {
+          logger.info("Replaced Binance aggregate trades with on-chain txs", {
+            memory: purged,
+            db: dbPurged,
+          });
+        }
+      }
+    }
+
     const knownHashes = new Set(
       existing.map((t) => t.txHash?.toLowerCase()).filter(Boolean) as string[]
     );
@@ -1286,7 +1314,6 @@ export class TradingAgent {
       if (t.txHash) knownHashes.add(t.txHash.toLowerCase());
     }
 
-    const chainTrades = await fetchWalletTradeHistory(wallet, 50);
     const novel = chainTrades.filter(
       (t) => t.txHash && !knownHashes.has(t.txHash.toLowerCase())
     );

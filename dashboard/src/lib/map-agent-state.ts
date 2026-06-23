@@ -77,8 +77,9 @@ function mapSignals(snap: Track1Snapshot): Signal[] {
 function mapTrades(snap: Track1Snapshot): Trade[] {
   return snap.trades
     .filter((t) => isConfirmedTrade(t, snap.mode))
-    .slice(-20)
-    .reverse()
+    .slice()
+    .sort((a, b) => b.timestamp - a.timestamp)
+    .slice(0, 20)
     .map((t) => {
       const isBuy = ["USDT", "BNB", snap.config.baseCurrency]
         .includes(t.fromToken.toUpperCase());

@@ -115,6 +115,23 @@ export class AgentStore {
     }
   }
 
+  /** Remove Binance Web3 aggregate rows superseded by real on-chain txs. */
+  async deleteBinanceAggregateTrades(walletAddress: string): Promise<number> {
+    if (!this.pool) return 0;
+    try {
+      const { rowCount } = await this.pool.query(
+        `DELETE FROM trades
+         WHERE tx_hash LIKE 'binance-web3-%'
+           AND LOWER(wallet_address) = $1`,
+        [walletAddress.toLowerCase()]
+      );
+      return rowCount ?? 0;
+    } catch (err) {
+      logger.warn("Failed to delete Binance aggregate trades", { error: String(err) });
+      return 0;
+    }
+  }
+
   /** Persist a trade reconstructed from on-chain transfer history (idempotent). */
   async saveChainTrade(trade: TradeResult, walletAddress: string): Promise<void> {
     if (!this.pool || !trade.txHash) return;
@@ -273,13 +290,14 @@ export class AgentStore {
         price_usd: number | null;
         tx_hash: string | null;
         realized_pnl: number | null;
+        confirmed_at: string | null;
         created_at: string;
       }>(
         `SELECT order_id, from_token, to_token, from_amount, to_amount,
-                price_usd, tx_hash, realized_pnl, created_at
+                price_usd, tx_hash, realized_pnl, confirmed_at, created_at
          FROM trades
          WHERE status IN ('confirmed', 'paper')${walletClause}
-         ORDER BY created_at DESC
+         ORDER BY COALESCE(confirmed_at, created_at) DESC
          LIMIT $1`,
         params
       );
@@ -292,7 +310,7 @@ export class AgentStore {
         toAmount: r.to_amount ? String(r.to_amount) : undefined,
         priceAtExecution: Number(r.price_usd ?? 0),
         txHash: r.tx_hash ?? undefined,
-        timestamp: new Date(r.created_at).getTime(),
+        timestamp: new Date(r.confirmed_at ?? r.created_at).getTime(),
         ...(r.realized_pnl != null ? { realizedPnl: r.realized_pnl } : {}),
       }));
     } catch (err) {

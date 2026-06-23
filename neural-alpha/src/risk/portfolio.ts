@@ -198,6 +198,19 @@ export class PortfolioTracker {
     return { added, removed };
   }
 
+  /** Drop Binance Web3 aggregate rows once real on-chain txs are available. */
+  purgeBinanceAggregateTrades(): number {
+    const before = this.tradeHistory.length;
+    this.tradeHistory = this.tradeHistory.filter((t) => {
+      if (!t.txHash?.startsWith("binance-web3-")) return true;
+      this.persistentTradeIds.delete(t.orderId);
+      return false;
+    });
+    const removed = before - this.tradeHistory.length;
+    if (removed > 0) this.rebuildDailyTradeCounts();
+    return removed;
+  }
+
   /** Drop trades without a confirmed tx hash and rebuild daily counters. */
   purgeUnconfirmedTrades(isConfirmed: (txHash: string | undefined) => boolean) {
     const kept = this.tradeHistory.filter(
