@@ -18,7 +18,17 @@ import {
   saveAgentConfig,
 } from "@/lib/agent-api";
 import { mapTrack1ToDashboard, enrichStateWithWallet } from "@/lib/map-agent-state";
-import { generateMockState } from "@/lib/mock-data";
+import { generateOfflineState } from "@/lib/mock-data";
+
+function offlineMessage(): string {
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname;
+    if (host === "localhost" || host === "127.0.0.1") {
+      return "Agent offline — start the agent with: npm run dev";
+    }
+  }
+  return "Agent API unreachable — reconnecting automatically…";
+}
 
 export function useAgentConnection() {
   const [connected, setConnected] = useState(false);
@@ -116,11 +126,11 @@ export function useAgentConnection() {
         } catch (e) {
           if (cancelled) return;
           setError(String(e));
-          setState(generateMockState());
+          setState(generateOfflineState());
         }
       } else {
-        setState(generateMockState());
-        setError("Agent offline — showing demo data. Start with: npm run dev");
+        setState(generateOfflineState());
+        setError(offlineMessage());
       }
 
       setLoading(false);
@@ -132,6 +142,16 @@ export function useAgentConnection() {
       if (walletPoll) clearInterval(walletPoll);
     };
   }, [refreshWallet]);
+
+  // Retry when the agent was down on first load (e.g. PM2 restart).
+  useEffect(() => {
+    if (connected) return;
+    const retry = setInterval(async () => {
+      const ok = await checkAgentConnection();
+      if (ok) window.location.reload();
+    }, 10_000);
+    return () => clearInterval(retry);
+  }, [connected]);
 
   const handleStart = useCallback(async () => {
     if (connectedRef.current) {

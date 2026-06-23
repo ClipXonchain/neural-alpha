@@ -167,3 +167,33 @@ export function generateMockState(): AgentState {
     drawdownCurve: generateDrawdownCurve(),
   };
 }
+
+/** Empty shell when the agent API is unreachable — not fake demo portfolio data. */
+export function generateOfflineState(): AgentState {
+  return {
+    status: "stopped",
+    mode: "live",
+    uptime: 0,
+    cycleCount: 0,
+    portfolioValue: 0,
+    cashBalance: 0,
+    totalPnl: 0,
+    totalPnlPct: 0,
+    realizedPnl: 0,
+    gasReserveUsd: 0,
+    dailyPnl: 0,
+    dailyPnlPct: 0,
+    maxDrawdownPct: 0,
+    currentDrawdownPct: 0,
+    todayTrades: 0,
+    totalTrades: 0,
+    winRate: 0,
+    fearGreedIndex: 50,
+    positions: [],
+    trades: [],
+    signals: [],
+    activity: [],
+    equityCurve: [],
+    drawdownCurve: [],
+  };
+}

@@ -24,7 +24,8 @@ interface HeaderProps {
 }
 
 export function Header({ state, onStart, onStop, connected, readOnly }: HeaderProps) {
-  const isRunning = state.status === "running";
+  const isRunning = connected && state.status === "running";
+  const showOffline = connected === false;
 
   const uptimeHrs = Math.floor(state.uptime / 3600);
   const uptimeMin = Math.floor((state.uptime % 3600) / 60);
@@ -66,9 +67,11 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
           transition={{ delay: 0.2 }}
           className={cn(
             "relative flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono font-medium",
-            isRunning
-              ? "bg-neon/10 text-neon border border-neon/20"
-              : "bg-warning/10 text-warning border border-warning/20"
+            showOffline
+              ? "bg-danger/10 text-danger border border-danger/20"
+              : isRunning
+                ? "bg-neon/10 text-neon border border-neon/20"
+                : "bg-warning/10 text-warning border border-warning/20"
           )}
         >
           <span className="relative flex size-2">
@@ -81,11 +84,11 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
             <span
               className={cn(
                 "relative inline-flex size-2 rounded-full",
-                isRunning ? "bg-neon" : "bg-warning"
+                showOffline ? "bg-danger" : isRunning ? "bg-neon" : "bg-warning"
               )}
             />
           </span>
-          {isRunning ? "RUNNING" : "STOPPED"}
+          {showOffline ? "OFFLINE" : isRunning ? "RUNNING" : "STOPPED"}
         </motion.div>
 
         <div className="hidden md:flex items-center gap-3 text-xs font-mono text-text-secondary">
@@ -96,17 +99,21 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
             )}
           >
             <Radio className="size-3" />
-            {connected ? "LIVE" : "DEMO"}
+            {connected ? "LIVE" : "OFFLINE"}
           </span>
-          <span className="text-text-muted">|</span>
-          <span className="flex items-center gap-1.5">
-            <Activity className="size-3 text-neon" />
-            Cycle #{state.cycleCount}
-          </span>
-          <span className="text-text-muted">|</span>
-          <span>
-            {uptimeHrs}h {uptimeMin}m
-          </span>
+          {connected && (
+            <>
+              <span className="text-text-muted">|</span>
+              <span className="flex items-center gap-1.5">
+                <Activity className="size-3 text-neon" />
+                Cycle #{state.cycleCount}
+              </span>
+              <span className="text-text-muted">|</span>
+              <span>
+                {uptimeHrs}h {uptimeMin}m
+              </span>
+            </>
+          )}
         </div>
       </div>
 
