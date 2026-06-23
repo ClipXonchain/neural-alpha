@@ -3,6 +3,7 @@ import { isEligibleToken, isStablecoin } from "../config.js";
 import { PortfolioTracker } from "./portfolio.js";
 import { logger } from "../utils/logger.js";
 import { getTokenMomentumMetrics } from "../strategy/signals.js";
+import { getLatestPrice } from "../data/market.js";
 
 export class RiskManager {
   private config: AgentConfig;
@@ -13,17 +14,25 @@ export class RiskManager {
     this.portfolio = portfolio;
   }
 
+  getPortfolio(): PortfolioTracker {
+    return this.portfolio;
+  }
+
   /**
    * Full pre-trade risk validation. Returns a RiskCheck with pass/fail
    * and a list of any violations. The agent MUST NOT execute a trade
    * if passed === false.
    */
-  validateTrade(signal: TradeSignal, tradeAmountUsd: number): RiskCheck {
+  validateTrade(
+    signal: TradeSignal,
+    tradeAmountUsd: number,
+    opts: { manual?: boolean; explicitAmount?: boolean } = {}
+  ): RiskCheck {
     const violations: string[] = [];
     const dailyTradeCount = this.portfolio.getTodayTradeCount();
     const drawdownPct = this.portfolio.getMaxDrawdown();
-    const positionSizePct = this.portfolio.cash > 0
-      ? (tradeAmountUsd / this.portfolio.cash) * 100
+    const positionSizePct = this.portfolio.getSpendableCash() > 0
+      ? (tradeAmountUsd / this.portfolio.getSpendableCash()) * 100
       : 100;
 
     // 1. Eligible token check (hard requirement)
@@ -36,10 +45,11 @@ export class RiskManager {
       violations.push(`Cannot buy stablecoin ${signal.symbol} as a position`);
     }
 
-    // 3. Max drawdown gate (competition disqualifier at 30%)
-    if (drawdownPct >= this.config.maxDrawdownPct) {
+    // 3. Max drawdown gate — halts NEW BUYS only. Sells are risk-reducing
+    //    (and protective exits), so they must always be allowed to execute.
+    if (signal.action === "buy" && drawdownPct >= this.config.maxDrawdownPct) {
       violations.push(
-        `Drawdown ${drawdownPct.toFixed(1)}% exceeds max ${this.config.maxDrawdownPct}% — HALT TRADING`
+        `Drawdown ${drawdownPct.toFixed(1)}% exceeds max ${this.config.maxDrawdownPct}% — no new buys`
       );
     }
 
@@ -50,31 +60,42 @@ export class RiskManager {
       );
     }
 
-    // 5. Daily trade limit
-    if (dailyTradeCount >= this.config.maxDailyTrades) {
+    // 5. Daily trade limit — autonomous pacing only. Manual (operator /
+    //    natural-language) commands override it: an explicit user trade should
+    //    always go through regardless of how many auto-trades ran today.
+    if (!opts.manual && dailyTradeCount >= this.config.maxDailyTrades) {
       violations.push(
         `Daily trade limit reached: ${dailyTradeCount}/${this.config.maxDailyTrades}`
       );
     }
 
-    // 6. Position size limit
-    if (tradeAmountUsd > this.config.maxPositionSizeUsd) {
+    // 6. Position size limit — skipped when operator specifies an explicit USD amount
+    if (
+      !opts.explicitAmount &&
+      tradeAmountUsd > this.config.maxPositionSizeUsd
+    ) {
       violations.push(
         `Trade $${tradeAmountUsd.toFixed(2)} exceeds max position size $${this.config.maxPositionSizeUsd}`
       );
     }
 
-    // 7. Minimum trade amount
-    if (tradeAmountUsd < this.config.minTradeAmountUsd) {
+    // 7. Minimum trade amount (buys only — allow full position exits).
+    //    Operator explicit-amount commands bypass the floor: a deliberate
+    //    "buy $20 X" should execute even when the autonomous floor is higher.
+    if (
+      signal.action === "buy" &&
+      !opts.explicitAmount &&
+      tradeAmountUsd < this.config.minTradeAmountUsd
+    ) {
       violations.push(
         `Trade $${tradeAmountUsd.toFixed(2)} below minimum $${this.config.minTradeAmountUsd}`
       );
     }
 
-    // 8. Cash availability
+    // 8. USDT cash availability
     if (signal.action === "buy" && tradeAmountUsd > this.portfolio.cash) {
       violations.push(
-        `Insufficient cash: need $${tradeAmountUsd.toFixed(2)}, have $${this.portfolio.cash.toFixed(2)}`
+        `Insufficient USDT: need $${tradeAmountUsd.toFixed(2)}, have $${this.portfolio.cash.toFixed(2)}`
       );
     }
 
@@ -90,9 +111,15 @@ export class RiskManager {
       );
     }
 
-    // 10. Signal confidence threshold
-    if (signal.confidence < 0.4) {
-      violations.push(`Signal confidence ${(signal.confidence * 100).toFixed(0)}% below 40% threshold`);
+    // 10. Signal confidence threshold (only gates new buys; manual explicit trades skip)
+    if (
+      signal.action === "buy" &&
+      !opts.explicitAmount &&
+      signal.confidence < this.config.minBuyConfidence
+    ) {
+      violations.push(
+        `Signal confidence ${(signal.confidence * 100).toFixed(0)}% below ${(this.config.minBuyConfidence * 100).toFixed(0)}% threshold`
+      );
     }
 
     const passed = violations.length === 0;
@@ -124,12 +151,15 @@ export class RiskManager {
     if (signal.action === "sell") {
       const pos = this.portfolio.getPosition(signal.symbol);
       if (!pos) return 0;
-      return Math.max(0, Math.round(pos.amount * pos.avgEntryPrice * 100) / 100);
+      const price =
+        getLatestPrice(signal.symbol) ?? pos.avgEntryPrice;
+      if (price <= 0) return 0;
+      return Math.max(0, Math.round(pos.amount * price * 100) / 100);
     }
 
     const maxByConfig = this.config.maxPositionSizeUsd;
-    const maxByCash = this.portfolio.cash * 0.9; // Keep 10% reserve
-    const maxByAllocation = (this.portfolio.cash + this.estimatePositionsValue()) *
+    const maxByCash = this.portfolio.getSpendableCash() * 0.9; // Keep 10% reserve
+    const maxByAllocation = (this.portfolio.getSpendableCash() + this.estimatePositionsValue()) *
       (signal.targetAllocationPct / 100);
 
     let size = Math.min(maxByConfig, maxByCash, maxByAllocation);
@@ -148,6 +178,9 @@ export class RiskManager {
     // Scale by confidence
     size *= signal.confidence;
 
+    // Strategy sizing aggressiveness (SafeTrade < Medium < Momentum)
+    size *= this.config.positionSizeMultiplier ?? 1;
+
     // Volatility-weighted sizing: high ATR → slightly smaller positions
     if (signal.action === "buy") {
       const { atrPct } = getTokenMomentumMetrics(signal.symbol);
@@ -157,6 +190,16 @@ export class RiskManager {
         Math.max(0.55, baselineAtr / Math.max(atrPct ?? baselineAtr, 0.5))
       );
       size *= volMultiplier;
+    }
+
+    // Small computed sizes on tiny accounts: use minimum trade if cash allows.
+    if (
+      signal.action === "buy" &&
+      size > 0 &&
+      size < this.config.minTradeAmountUsd &&
+      this.portfolio.getSpendableCash() >= this.config.minTradeAmountUsd
+    ) {
+      size = this.config.minTradeAmountUsd;
     }
 
     return Math.max(0, Math.round(size * 100) / 100);
@@ -181,6 +224,8 @@ export class RiskManager {
       dailyTrades: this.portfolio.getTodayTradeCount(),
       maxDailyTrades: this.config.maxDailyTrades,
       cashUsd: Math.round(this.portfolio.cash * 100) / 100,
+      spendableCashUsd: Math.round(this.portfolio.getSpendableCash() * 100) / 100,
+      spendableBnbUsd: Math.round(this.portfolio.getSpendableBnbUsd() * 100) / 100,
       positionCount: this.portfolio.getAllPositions().size,
       maxPositions: this.config.maxPortfolioTokens,
       emergencyMode: this.isEmergencyMode(),

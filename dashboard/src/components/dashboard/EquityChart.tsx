@@ -33,9 +33,13 @@ function CustomTooltip({ active, payload, label }: any) {
 
 export function EquityChart({ state }: { state: AgentState }) {
   const data = state.equityCurve;
-  const currentValue = data[data.length - 1]?.value || 1000;
-  const minValue = Math.min(...data.map((d) => d.value)) * 0.995;
-  const maxValue = Math.max(...data.map((d) => d.value)) * 1.005;
+  const last = data[data.length - 1];
+  // Initial NAV baseline: value − pnl is constant across the curve.
+  const initialValue =
+    last !== undefined ? Number((last.value - last.pnl).toFixed(2)) : 0;
+  const values = data.map((d) => d.value);
+  const minValue = Math.min(...values, initialValue) * 0.995;
+  const maxValue = Math.max(...values, initialValue) * 1.005;
 
   return (
     <motion.div
@@ -97,18 +101,20 @@ export function EquityChart({ state }: { state: AgentState }) {
               tickFormatter={(v) => `$${v.toFixed(0)}`}
             />
             <Tooltip content={<CustomTooltip />} />
-            <ReferenceLine
-              y={1000}
-              stroke="rgba(30,159,242,0.4)"
-              strokeDasharray="6 4"
-              label={{
-                value: "Initial",
-                position: "right",
-                fill: "#b7bdc6",
-                fontSize: 10,
-                fontFamily: "IBM Plex Mono",
-              }}
-            />
+            {initialValue > 0 && (
+              <ReferenceLine
+                y={initialValue}
+                stroke="rgba(30,159,242,0.4)"
+                strokeDasharray="6 4"
+                label={{
+                  value: "Initial",
+                  position: "right",
+                  fill: "#b7bdc6",
+                  fontSize: 10,
+                  fontFamily: "IBM Plex Mono",
+                }}
+              />
+            )}
             <Area
               type="monotone"
               dataKey="value"

@@ -13,6 +13,21 @@ export function formatUsd(value: number, decimals = 2): string {
   }).format(value);
 }
 
+/** Token quantity in trade history (not USD). */
+export function formatTokenQty(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: value >= 1000 ? 2 : 4,
+  }).format(value);
+}
+
+/** Per-token price — extra decimals for sub-dollar assets. */
+export function formatTradePrice(value: number): string {
+  if (value <= 0) return formatUsd(0);
+  if (value >= 1) return formatUsd(value, 2);
+  if (value >= 0.01) return formatUsd(value, 4);
+  return formatUsd(value, 6);
+}
+
 export function roundNum(value: number, decimals = 2): number {
   const factor = 10 ** decimals;
   return Math.round(value * factor) / factor;

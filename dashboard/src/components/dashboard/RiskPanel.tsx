@@ -78,9 +78,9 @@ export function RiskPanel({ state }: { state: AgentState }) {
     {
       label: "Max Drawdown",
       current: state.currentDrawdownPct,
-      max: 25,
+      max: 30,
       unit: "%",
-      passed: state.currentDrawdownPct < 25,
+      passed: state.currentDrawdownPct < 30,
     },
     {
       label: "Daily Trades",
@@ -98,10 +98,15 @@ export function RiskPanel({ state }: { state: AgentState }) {
     },
     {
       label: "Cash Reserve",
-      current: Math.round((state.cashBalance / state.portfolioValue) * 100),
+      current: state.portfolioValue > 0
+        ? Math.round((state.cashBalance / state.portfolioValue) * 100)
+        : 0,
       max: 100,
       unit: "%",
-      passed: state.cashBalance > 50,
+      // Healthy if at least 5% of NAV is kept liquid (scales with wallet size).
+      passed: state.portfolioValue > 0
+        ? state.cashBalance / state.portfolioValue >= 0.05
+        : true,
     },
   ];
 

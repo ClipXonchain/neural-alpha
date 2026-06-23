@@ -12,7 +12,7 @@ import {
   CheckCircle2,
   Clock,
 } from "lucide-react";
-import { cn, formatUsd, timeAgo, shortenHash } from "@/lib/utils";
+import { cn, formatUsd, formatTokenQty, formatTradePrice, timeAgo, shortenHash } from "@/lib/utils";
 import type { Trade } from "@/lib/mock-data";
 
 function TradeSummary({ trades }: { trades: Trade[] }) {
@@ -175,11 +175,11 @@ function TradeRow({ trade, index }: { trade: Trade; index: number }) {
         </div>
         <div className="flex items-center gap-3 text-[10px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
           <span className="tabular-nums">
-            {trade.amount} @ {formatUsd(trade.price)}
+            {formatTokenQty(trade.amount)} {trade.symbol} @ {formatTradePrice(trade.price)}
           </span>
           <span className="text-border-glow">•</span>
           <span className="tabular-nums">
-            Total: {formatUsd(trade.total)}
+            {isBuy ? "Spent" : "Received"}: {formatUsd(trade.total)}
           </span>
           <span className="text-border-glow">•</span>
           <span className="flex items-center gap-1">

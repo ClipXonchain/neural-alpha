@@ -30,12 +30,19 @@ function createHybridBridge(twakBridge: McpBridge, cmcApiKey: string): McpBridge
     x402Request: cmcBridge.x402Request,
     getTrendingTokens: cmcBridge.getTrendingTokens,
 
-    // Execution: TWAK MCP (swap, wallet, risk)
+    // Execution + wallet: TWAK MCP (swap, balances, competition)
     getWalletBalance: twakBridge.getWalletBalance,
     getSwapQuote: twakBridge.getSwapQuote,
     executeSwap: twakBridge.executeSwap,
     getAddress: twakBridge.getAddress,
     checkTokenRisk: twakBridge.checkTokenRisk,
+    getStablecoinBalance: twakBridge.getStablecoinBalance,
+    getTokenBalance: twakBridge.getTokenBalance,
+    getPortfolio: twakBridge.getPortfolio,
+    switchWalletMode: twakBridge.switchWalletMode,
+    getWalletStatus: twakBridge.getWalletStatus,
+    competitionRegister: twakBridge.competitionRegister,
+    competitionStatus: twakBridge.competitionStatus,
   };
 }
 

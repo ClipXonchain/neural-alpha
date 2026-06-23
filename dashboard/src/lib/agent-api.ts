@@ -14,9 +14,11 @@ export interface Track1Snapshot {
   prices: Record<string, number>;
   config: {
     mode?: string;
+    strategy?: "safe" | "medium" | "momentum";
     maxDrawdownPct: number;
     maxDailyTrades: number;
     baseCurrency: string;
+    swapCurrencies?: string[];
     maxPositionSizeUsd?: number;
     tradeIntervalMs?: number;
     slippageTolerance?: number;
@@ -29,6 +31,8 @@ export interface Track1Snapshot {
     dailyPnl: number;
     totalPnl: number;
     totalPnlPct: number;
+    realizedPnl?: number;
+    gasReserveUsd?: number;
     maxDrawdownPct: number;
     tradeCount: number;
     positions: Array<{
@@ -56,6 +60,7 @@ export interface Track1Snapshot {
     toAmount?: string;
     priceAtExecution: number;
     timestamp: number;
+    realizedPnl?: number;
   }>;
   risk: Record<string, unknown>;
   tokenMetrics?: Record<
@@ -66,9 +71,25 @@ export interface Track1Snapshot {
       score: number | null;
       newsScore?: number | null;
       newsArticles?: number;
+      confidence?: number | null;
+      rsi?: number | null;
+      macd?: number | null;
+      volumeRatio?: number | null;
+      aiSummary?: string;
+      aiVerdict?: string;
+      aiAgrees?: boolean;
     }
   >;
   newsCount?: number;
+  binancePositions?: Array<{
+    symbol: string;
+    name: string;
+    remainQty: number;
+    price: number;
+    percentChange24h: number;
+    valueUsd: number;
+    contractAddress: string;
+  }>;
 }
 
 export interface WalletSnapshot {
@@ -79,6 +100,15 @@ export interface WalletSnapshot {
   walletState: string;
   registered: boolean;
   registrationOpen: boolean;
+  binancePositions?: Array<{
+    symbol: string;
+    name: string;
+    remainQty: number;
+    price: number;
+    percentChange24h: number;
+    valueUsd: number;
+    contractAddress: string;
+  }>;
 }
 
 export interface LogEntry {
@@ -117,8 +147,39 @@ export async function stopAgent(): Promise<void> {
   await agentFetch("/control/stop", { method: "POST" });
 }
 
+export async function startAgent(): Promise<void> {
+  await agentFetch("/control/start", { method: "POST" });
+}
+
 export async function syncWallet(): Promise<{ usdtBalance: number; synced: boolean }> {
   return agentFetch("/wallet/sync", { method: "POST" });
+}
+
+export interface ResyncResult {
+  ok: boolean;
+  portfolioValue: number;
+  positions: number;
+  cashUsd: number;
+}
+
+export async function resyncAgent(): Promise<ResyncResult> {
+  return agentFetch("/control/resync", { method: "POST" });
+}
+
+export interface CommandResult {
+  ok: boolean;
+  intent: string;
+  message: string;
+  data?: Record<string, unknown>;
+  suggestions?: string[];
+}
+
+export async function sendCommand(command: string): Promise<CommandResult> {
+  return agentFetch("/command", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ command }),
+  });
 }
 
 export async function registerCompetition(): Promise<Record<string, unknown>> {
@@ -143,14 +204,13 @@ export async function saveAgentConfig(
   });
 }
 
-const SSE_BASE =
-  process.env.NEXT_PUBLIC_AGENT_SSE_URL || "http://localhost:3847";
+const SSE_BASE = process.env.NEXT_PUBLIC_AGENT_SSE_URL || "/api/agent";
 
 export function subscribeAgentEvents(
   onState: (state: Track1Snapshot) => void,
   onLog?: (log: LogEntry) => void
 ): () => void {
-  const es = new EventSource(`${SSE_BASE}/api/events`);
+  const es = new EventSource(`${SSE_BASE}/events`);
 
   es.addEventListener("state", (e) => {
     try {

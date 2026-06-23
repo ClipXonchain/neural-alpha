@@ -32,6 +32,10 @@ export interface Signal {
   change24h: number;
   newsScore?: number | null;
   newsArticles?: number;
+  volumeRatio?: number | null;
+  aiSummary?: string;
+  aiVerdict?: "bullish" | "bearish" | "neutral" | "caution";
+  aiAgrees?: boolean;
 }
 
 export interface ActivityItem {
@@ -43,7 +47,7 @@ export interface ActivityItem {
 }
 
 export interface AgentState {
-  status: "running" | "paused" | "stopped" | "emergency";
+  status: "running" | "paused" | "stopped";
   mode: "live" | "paper";
   uptime: number;
   cycleCount: number;
@@ -51,6 +55,8 @@ export interface AgentState {
   cashBalance: number;
   totalPnl: number;
   totalPnlPct: number;
+  realizedPnl: number;
+  gasReserveUsd: number;
   dailyPnl: number;
   dailyPnlPct: number;
   maxDrawdownPct: number;
@@ -112,6 +118,8 @@ export function generateMockState(): AgentState {
     cashBalance: 412.35,
     totalPnl: latestValue - 1000,
     totalPnlPct: ((latestValue - 1000) / 1000) * 100,
+    realizedPnl: 18.62,
+    gasReserveUsd: 0,
     dailyPnl: 23.47,
     dailyPnlPct: 2.18,
     maxDrawdownPct: 8.4,
@@ -136,14 +144,14 @@ export function generateMockState(): AgentState {
       { id: "t7", timestamp: Date.now() - 57600000, symbol: "DOT", side: "sell", amount: 12, price: 7.45, total: 89.4, txHash: "0xa2c9...1d4e", pnl: 7.2 },
     ],
     signals: [
-      { symbol: "ETH", action: "hold", strength: "neutral", score: 12, rsi: 52, macd: 0.3, confidence: 0.65, price: 3847, change24h: 1.24 },
-      { symbol: "DOGE", action: "buy", strength: "buy", score: 38, rsi: 28, macd: -0.8, confidence: 0.72, price: 0.156, change24h: -3.2 },
-      { symbol: "LINK", action: "hold", strength: "neutral", score: 8, rsi: 55, macd: 0.1, confidence: 0.58, price: 15.62, change24h: 2.1 },
-      { symbol: "AVAX", action: "buy", strength: "strong_buy", score: 62, rsi: 24, macd: -1.2, confidence: 0.85, price: 35.1, change24h: -5.4 },
-      { symbol: "ADA", action: "sell", strength: "sell", score: -34, rsi: 71, macd: 1.5, confidence: 0.68, price: 0.47, change24h: 4.8 },
-      { symbol: "DOT", action: "hold", strength: "neutral", score: -5, rsi: 48, macd: -0.2, confidence: 0.45, price: 7.35, change24h: 0.3 },
-      { symbol: "UNI", action: "buy", strength: "buy", score: 29, rsi: 32, macd: -0.6, confidence: 0.61, price: 11.2, change24h: -2.8 },
-      { symbol: "AAVE", action: "sell", strength: "sell", score: -42, rsi: 73, macd: 2.1, confidence: 0.77, price: 93.2, change24h: 5.6 },
+      { symbol: "ETH", action: "hold", strength: "neutral", score: 12, rsi: 52, macd: 0.3, confidence: 0.65, price: 3847, change24h: 1.24, volumeRatio: 0.9 },
+      { symbol: "DOGE", action: "buy", strength: "buy", score: 38, rsi: 28, macd: -0.8, confidence: 0.72, price: 0.156, change24h: -3.2, volumeRatio: 2.4 },
+      { symbol: "LINK", action: "hold", strength: "neutral", score: 8, rsi: 55, macd: 0.1, confidence: 0.58, price: 15.62, change24h: 2.1, volumeRatio: 1.1 },
+      { symbol: "AVAX", action: "buy", strength: "strong_buy", score: 62, rsi: 24, macd: -1.2, confidence: 0.85, price: 35.1, change24h: -5.4, volumeRatio: 3.2 },
+      { symbol: "ADA", action: "sell", strength: "sell", score: -34, rsi: 71, macd: 1.5, confidence: 0.68, price: 0.47, change24h: 4.8, volumeRatio: 0.4 },
+      { symbol: "DOT", action: "hold", strength: "neutral", score: -5, rsi: 48, macd: -0.2, confidence: 0.45, price: 7.35, change24h: 0.3, volumeRatio: 0.8 },
+      { symbol: "UNI", action: "buy", strength: "buy", score: 29, rsi: 32, macd: -0.6, confidence: 0.61, price: 11.2, change24h: -2.8, volumeRatio: 1.8 },
+      { symbol: "AAVE", action: "sell", strength: "sell", score: -42, rsi: 73, macd: 2.1, confidence: 0.77, price: 93.2, change24h: 5.6, volumeRatio: 1.3 },
     ],
     activity: [
       { id: "a1", timestamp: Date.now() - 60000, type: "trade", message: "BUY 0.0421 ETH @ $3,720", detail: "Score: 45 | Confidence: 82%" },

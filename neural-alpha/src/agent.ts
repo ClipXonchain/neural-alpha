@@ -1,9 +1,13 @@
-import type { AgentConfig, MarketData, CycleResult, TradeResult } from "./utils/types.js";
-import { loadConfig, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, BSC_CHAIN } from "./config.js";
+import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot } from "./utils/types.js";
+import { loadConfig, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
 import { buildMarketData, getLatestPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, parseCmcQuotesBatch, parseCmcTrending, parseFearGreedIndex, unwrapX402Response } from "./data/market.js";
 import { fetchNewsFeed } from "./data/news.js";
 import { analyzeMarkets, selectTrades } from "./strategy/index.js";
-import { getTokenMomentumMetrics } from "./strategy/signals.js";
+import { getStrategyProfile, isStrategyName } from "./strategy/presets.js";
+import { resolveBscTokenAddress, hasBscSwapAddress } from "./integrations/bsc-token-addresses.js";
+import { computeSignals, getTokenMomentumMetrics } from "./strategy/signals.js";
+import { enrichSignalsWithAi, applyAiInsight } from "./strategy/ai-analyst.js";
+import type { AiSignalInsight } from "./strategy/ai-analyst.js";
 import { analyzeNewsSentiment, type NewsSentiment } from "./strategy/news-sentiment.js";
 import { RiskManager } from "./risk/manager.js";
 import { PortfolioTracker } from "./risk/portfolio.js";
@@ -13,8 +17,12 @@ import {
   buildQuoteParams,
   processSwapResult,
   applyTradeToPortfolio,
+  isOnChainTxHash,
 } from "./execution/executor.js";
 import { logger } from "./utils/logger.js";
+import { getAgentStore } from "./db/store.js";
+import { fetchBscTokenBalances, scanWalletViaCliSubprocess } from "./integrations/bscscan.js";
+import { fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
 
 /**
  * Core autonomous trading agent — Neural Alpha.
@@ -43,6 +51,10 @@ export interface McpBridge {
   checkTokenRisk(chain: string, token?: string): Promise<Record<string, unknown> | null>;
   /** USDT (or base stable) balance for the agent wallet */
   getStablecoinBalance?(chain: string): Promise<{ balance: number; symbol: string } | null>;
+  /** Full on-chain token holdings for the agent wallet (live mode). */
+  getPortfolio?(chain: string): Promise<PortfolioHolding[] | null>;
+  /** Direct on-chain balance for a single token symbol (reliable fallback). */
+  getTokenBalance?(chain: string, symbol: string): Promise<PortfolioHolding | null>;
   switchWalletMode?(mode: "local" | "walletconnect"): Promise<Record<string, unknown> | null>;
   getWalletStatus?(): Promise<Record<string, unknown> | null>;
   competitionRegister?(): Promise<Record<string, unknown> | null>;
@@ -57,6 +69,7 @@ export interface WalletInfo {
   walletState: string;
   registered: boolean;
   registrationOpen: boolean;
+  binancePositions?: BinanceWeb3Position[];
 }
 
 export class TradingAgent {
@@ -66,18 +79,28 @@ export class TradingAgent {
   private mcp: McpBridge;
   private cycleCount = 0;
   private running = false;
+  private runGeneration = 0;
   private fearGreedIndex: number | null = null;
   private watchlist: string[];
   private lastSignals: Map<string, number> = new Map();
+  private lastSignalConfidence: Map<string, number> = new Map();
   private lastNewsSentiment: Map<string, NewsSentiment> = new Map();
   private lastNewsCount = 0;
+  private lastAiInsights = new Map<string, AiSignalInsight>();
   private bridgeSource = "unknown";
   private x402Payment = process.env.CMC_X402_MAX_PAYMENT || "10000";
   private startedAt = Date.now();
+  /** Autonomous swap failures — prevents approve+retry spam on the same token. */
+  private failedSwapUntil = new Map<string, number>();
+  /** Estimated autonomous on-chain txs sent today (approve + swap ≈ 2 each). */
+  private autonomousOnChainTxToday = 0;
+  private autonomousTxDay = "";
 
   constructor(mcp: McpBridge, initialCashUsd = 1000, bridgeSource = "unknown") {
     this.config = loadConfig();
-    this.portfolio = new PortfolioTracker(initialCashUsd);
+    // Live mode defers the NAV baseline until the real on-chain balance is
+    // synced, so a placeholder cash value can't trigger a false drawdown.
+    this.portfolio = new PortfolioTracker(initialCashUsd, this.config.mode === "live");
     this.riskManager = new RiskManager(this.config, this.portfolio);
     this.mcp = mcp;
     this.bridgeSource = bridgeSource;
@@ -95,23 +118,42 @@ export class TradingAgent {
   }
 
   async start() {
+    if (this.running) {
+      logger.info("Agent start requested while already running");
+      return;
+    }
+
     this.running = true;
+    const generation = ++this.runGeneration;
     this.startedAt = Date.now();
 
-    // Live mode: seed portfolio cash from on-chain USDT
-    if (this.config.mode === "live" && this.mcp.getStablecoinBalance) {
+    await this.bootstrapPersistence();
+
+    // Live mode: import real on-chain holdings, then seed cash + NAV baseline.
+    // Positions are imported first so the baseline reflects total wallet value.
+    if (this.config.mode === "live") {
       try {
-        await this.syncWalletCapital();
+        await this.syncOnChainPositions();
       } catch (err) {
-        logger.warn("Initial wallet sync failed", { error: String(err) });
+        logger.warn("Initial on-chain position import failed", { error: String(err) });
+      }
+      if (this.mcp.getStablecoinBalance) {
+        try {
+          await this.syncWalletCapital();
+        } catch (err) {
+          logger.warn("Initial wallet sync failed", { error: String(err) });
+        }
       }
     }
 
+    this.getWalletInfo().catch(() => {});
+
     logger.info("Agent started — entering trading loop", {
       interval: `${this.config.tradeIntervalMs / 1000}s`,
+      startupCooldownSec: this.config.startupCooldownMs / 1000,
     });
 
-    while (this.running) {
+    while (this.running && generation === this.runGeneration) {
       try {
         const result = await this.runCycle();
         logger.info("Cycle complete", {
@@ -126,14 +168,20 @@ export class TradingAgent {
         logger.error("Cycle failed", { error: String(err) });
       }
 
-      if (this.running) {
+      if (this.running && generation === this.runGeneration) {
         await sleep(this.config.tradeIntervalMs);
       }
     }
   }
 
   stop() {
+    if (!this.running) {
+      logger.info("Agent stop requested while already stopped");
+      return;
+    }
+
     this.running = false;
+    this.runGeneration++;
     logger.info("Agent stop requested");
   }
 
@@ -153,6 +201,10 @@ export class TradingAgent {
 
     logger.info(`=== Cycle ${cycleId} ===`);
 
+    if (this.config.mode === "live") {
+      await this.reconcileLivePortfolio();
+    }
+
     // Step 1: Fetch news sentiment (ClipX) — used by full scan + signals
     const newsSentiment = await this.fetchNews();
 
@@ -163,78 +215,132 @@ export class TradingAgent {
     await this.fetchSentiment();
 
     // Step 4: Analyze markets and generate signals
-    const signals = analyzeMarkets(markets, this.fearGreedIndex, this.config, newsSentiment);
-    this.lastSignals.clear();
-    for (const s of signals) {
-      this.lastSignals.set(s.symbol, s.score);
+    let signals = analyzeMarkets(markets, this.fearGreedIndex, this.config, newsSentiment);
+
+    // Step 4b: AI technical analysis on top actionable signals (optional)
+    const technicalsMap = new Map(
+      markets.map((m) => [m.symbol, computeSignals(m.symbol)] as const)
+    );
+    this.lastAiInsights = await enrichSignalsWithAi(
+      signals,
+      markets,
+      technicalsMap,
+      this.fearGreedIndex
+    );
+    if (this.lastAiInsights.size > 0) {
+      signals = signals.map((s) =>
+        applyAiInsight(s, this.lastAiInsights.get(s.symbol.toUpperCase()))
+      );
     }
 
-    // Step 3b: Trailing stop-loss — lock momentum profits
+    // Persist (don't clear) so scores from periodic full eligible-token scans
+    // remain visible on the dashboard between scans — otherwise full-scan-only
+    // tokens (e.g. most Binance Alpha names) would vanish on non-scan cycles.
+    for (const s of signals) {
+      this.lastSignals.set(s.symbol, s.score);
+      this.lastSignalConfidence.set(s.symbol, s.confidence);
+    }
+
+    // Step 3b: Protective exits — stop-loss, take-profit, trailing stop (optional).
     const currentPrices = new Map<string, number>();
     for (const m of markets) {
       currentPrices.set(m.symbol, m.price);
     }
-    const trailingStopSymbols = this.portfolio.getTrailingStopSells(currentPrices);
-    const trailingSells = trailingStopSymbols.map((symbol) => ({
-      symbol,
-      action: "sell" as const,
-      strength: "strong_sell" as const,
-      score: -100,
-      reasons: ["Trailing stop — peaked +5%, fell back to +1.5%"],
-      targetAllocationPct: 0,
-      confidence: 1,
-    }));
-    if (trailingSells.length > 0) {
-      logger.risk("Trailing stop triggered", { symbols: trailingStopSymbols });
+    const trailingSells: import("./utils/types.js").TradeSignal[] = [];
+    if (this.config.autoExitEnabled) {
+      const riskExits = this.portfolio.getRiskManagedExits(currentPrices, {
+        stopLossPct: this.config.stopLossPct,
+        takeProfitPct: this.config.takeProfitPct,
+        trailingActivatePct: this.config.trailingActivatePct,
+        trailingGivebackPct: this.config.trailingGivebackPct,
+      });
+      for (const exit of riskExits) {
+        trailingSells.push({
+          symbol: exit.symbol,
+          action: "sell",
+          strength: "strong_sell",
+          score: -100,
+          reasons: [exit.reason],
+          targetAllocationPct: 0,
+          confidence: 1,
+        });
+      }
+      if (trailingSells.length > 0) {
+        logger.risk("Protective exit triggered", {
+          exits: riskExits.map((e) => ({
+            symbol: e.symbol,
+            kind: e.kind,
+            pnlPct: Math.round(e.pnlPct * 10) / 10,
+          })),
+        });
+      }
     }
 
     // Step 4: Select best trades
     const existingPositions = new Set(this.portfolio.getAllPositions().keys());
     const tradesToExecute = selectTrades(signals, this.config, existingPositions);
 
-    // Prepend trailing stops (highest priority exits)
+    // Prepend protective exits (highest priority — always execute first)
     for (const ts of trailingSells) {
       if (!tradesToExecute.find((t) => t.symbol === ts.symbol)) {
         tradesToExecute.unshift(ts);
       }
     }
 
-    // Step 5: Check for emergency mode
+    // Step 5: Check for emergency mode.
+    // High drawdown halts NEW BUYS but never force-liquidates — existing
+    // positions are held so a temporary dip isn't locked in as a realized loss.
     if (this.riskManager.isEmergencyMode()) {
-      logger.risk("EMERGENCY MODE — high drawdown, only sells allowed", this.riskManager.riskSummary());
+      logger.risk(
+        "EMERGENCY MODE — high drawdown, new buys paused (positions held, no liquidation)",
+        this.riskManager.riskSummary()
+      );
       tradesToExecute.splice(0, tradesToExecute.length,
         ...tradesToExecute.filter((t) => t.action === "sell")
       );
 
-      // Force sell all positions if drawdown exceeds limit
       if (this.portfolio.getMaxDrawdown() >= this.config.maxDrawdownPct) {
-        logger.risk("MAX DRAWDOWN BREACHED — liquidating all positions");
-        for (const symbol of existingPositions) {
-          const forceSell = {
-            symbol,
-            action: "sell" as const,
-            strength: "strong_sell" as const,
-            score: -100,
-            reasons: ["Emergency liquidation — max drawdown breached"],
-            targetAllocationPct: 0,
-            confidence: 1,
-          };
-          if (!tradesToExecute.find((t) => t.symbol === symbol)) {
-            tradesToExecute.push(forceSell);
-          }
-        }
+        logger.risk("MAX DRAWDOWN REACHED — buying paused, holding positions (no auto-liquidation)");
       }
     }
 
-    // Step 6: Execute trades
+    // Step 6: Execute trades (autonomous only — manual commands bypass cooldown)
     const tradeResults: TradeResult[] = [];
+    const inStartupCooldown = this.isInStartupCooldown();
+    const maxPerCycle = this.config.maxAutonomousTradesPerCycle;
+    if (inStartupCooldown && tradesToExecute.length > 0) {
+      const remainingSec = Math.ceil(this.getStartupCooldownRemainingMs() / 1000);
+      logger.info("Startup cooldown — autonomous trades paused", {
+        remainingSec,
+        queued: tradesToExecute.length,
+      });
+    } else if (tradesToExecute.length > maxPerCycle) {
+      logger.info("Autonomous trade queue trimmed to per-cycle cap", {
+        queued: tradesToExecute.length,
+        executing: maxPerCycle,
+        skipped: tradesToExecute.slice(maxPerCycle).map((t) => t.symbol),
+      });
+    }
+    let autonomousExecuted = 0;
     for (const signal of tradesToExecute) {
+      if (inStartupCooldown) continue;
+      if (autonomousExecuted >= maxPerCycle) break;
       const result = await this.executeTrade(signal);
-      if (result) tradeResults.push(result);
+      if (result?.success) {
+        tradeResults.push(result);
+        autonomousExecuted++;
+      }
+    }
+
+    // Step 6b: Re-sync with on-chain reality before snapshot so phantom
+    // trades don't inflate peak NAV / drawdown.
+    if (this.config.mode === "live") {
+      await this.reconcileLivePortfolio(currentPrices);
     }
 
     // Step 7: Take portfolio snapshot
     const snapshot = this.portfolio.snapshot(currentPrices);
+    await this.persistCycleSnapshot(cycleId, snapshot);
 
     // Step 8: Log risk summary
     logger.info("Risk status", this.riskManager.riskSummary());
@@ -242,12 +348,18 @@ export class TradingAgent {
     // Step 9: Min daily trade enforcement (competition requires ≥1 trade/day)
     const todayTrades = this.portfolio.getTodayTradeCount();
     const hour = new Date().getUTCHours();
-    if (todayTrades === 0 && hour >= 20 && this.config.mode === "live") {
+    if (
+      todayTrades === 0 &&
+      hour >= 20 &&
+      this.config.mode === "live" &&
+      !this.isInStartupCooldown() &&
+      autonomousExecuted < maxPerCycle
+    ) {
       logger.risk("WARNING: 0 trades today — competition requires ≥1 trade/day. Forcing best available trade.");
       const bestSignal = signals.find((s) => s.action !== "hold" && Math.abs(s.score) > 5);
       if (bestSignal) {
         const result = await this.executeTrade(bestSignal);
-        if (result) tradeResults.push(result);
+        if (result?.success) tradeResults.push(result);
       }
     } else if (todayTrades === 0 && hour >= 18) {
       logger.warn("No trades today yet — competition requires ≥1/day (June 22-28)", { hour });
@@ -274,8 +386,9 @@ export class TradingAgent {
     ]);
     const symbols = [...tokensToCheck];
 
-    // Tier 2: full eligible-token scan every N cycles
-    if (this.cycleCount % FULL_SCAN_INTERVAL === 0) {
+    // Tier 2: full eligible-token scan every N cycles — and once up-front on
+    // the first cycle so the dashboard (incl. Binance Alpha) populates fast.
+    if (this.cycleCount <= 1 || this.cycleCount % FULL_SCAN_INTERVAL === 0) {
       await this.runFullTokenScan(markets);
     }
 
@@ -516,18 +629,111 @@ export class TradingAgent {
     }
   }
 
-  private async executeTrade(signal: import("./utils/types.js").TradeSignal): Promise<TradeResult | null> {
-    const validation = validateAndCreateOrder(signal, this.riskManager, this.config);
+  private isInStartupCooldown(): boolean {
+    return this.getStartupCooldownRemainingMs() > 0;
+  }
 
-    if (!validation.approved || !validation.order) {
-      logger.info("Trade not approved", {
+  private getStartupCooldownRemainingMs(): number {
+    return Math.max(0, this.config.startupCooldownMs - (Date.now() - this.startedAt));
+  }
+
+  private isInFailedSwapCooldown(symbol: string): boolean {
+    const until = this.failedSwapUntil.get(symbol.toUpperCase()) ?? 0;
+    return until > Date.now();
+  }
+
+  private markFailedSwap(symbol: string) {
+    this.failedSwapUntil.set(
+      symbol.toUpperCase(),
+      Date.now() + this.config.failedSwapCooldownMs
+    );
+  }
+
+  private resetAutonomousTxDayIfNeeded() {
+    const today = new Date().toISOString().split("T")[0];
+    if (this.autonomousTxDay !== today) {
+      this.autonomousTxDay = today;
+      this.autonomousOnChainTxToday = 0;
+    }
+  }
+
+  /** Each live swap typically costs 2 on-chain txs (approve + swap). */
+  private static readonly TX_PER_SWAP = 2;
+
+  private autonomousTxBudgetRemaining(): number {
+    this.resetAutonomousTxDayIfNeeded();
+    return Math.max(0, this.config.maxOnChainTxPerDay - this.autonomousOnChainTxToday);
+  }
+
+  private canExecuteAutonomousTrade(): { ok: boolean; reason?: string } {
+    const dailyTrades = this.portfolio.getTodayTradeCount();
+    if (dailyTrades >= this.config.maxDailyTrades) {
+      return {
+        ok: false,
+        reason: `daily autonomous trade cap (${this.config.maxDailyTrades})`,
+      };
+    }
+    if (this.autonomousTxBudgetRemaining() < TradingAgent.TX_PER_SWAP) {
+      return {
+        ok: false,
+        reason: `on-chain tx budget (${this.config.maxOnChainTxPerDay}/day)`,
+      };
+    }
+    return { ok: true };
+  }
+
+  private reserveAutonomousOnChainTx() {
+    this.resetAutonomousTxDayIfNeeded();
+    this.autonomousOnChainTxToday += TradingAgent.TX_PER_SWAP;
+  }
+
+  private async executeTrade(
+    signal: import("./utils/types.js").TradeSignal,
+    opts: { manual?: boolean; order?: import("./utils/types.js").TradeOrder } = {}
+  ): Promise<TradeResult | null> {
+    if (!opts.manual && this.isInStartupCooldown()) {
+      logger.info("Trade deferred — startup cooldown active", {
         symbol: signal.symbol,
-        reasons: validation.violations,
+        action: signal.action,
+        remainingSec: Math.ceil(this.getStartupCooldownRemainingMs() / 1000),
       });
       return null;
     }
 
-    const order = validation.order;
+    if (!opts.manual && this.isInFailedSwapCooldown(signal.symbol)) {
+      const until = this.failedSwapUntil.get(signal.symbol.toUpperCase()) ?? 0;
+      logger.info("Trade skipped — recent failed swap cooldown", {
+        symbol: signal.symbol,
+        remainingMin: Math.ceil((until - Date.now()) / 60000),
+      });
+      return null;
+    }
+
+    if (!opts.manual && this.config.mode === "live") {
+      const gate = this.canExecuteAutonomousTrade();
+      if (!gate.ok) {
+        logger.info("Autonomous trade blocked", {
+          symbol: signal.symbol,
+          reason: gate.reason,
+        });
+        return null;
+      }
+    }
+
+    let order: import("./utils/types.js").TradeOrder;
+    if (opts.order) {
+      order = opts.order;
+    } else {
+      const validation = validateAndCreateOrder(signal, this.riskManager, this.config, opts);
+      if (!validation.approved || !validation.order) {
+        logger.info("Trade not approved", {
+          symbol: signal.symbol,
+          reasons: validation.violations,
+        });
+        return null;
+      }
+      order = validation.order;
+    }
 
     if (this.config.mode === "paper") {
       logger.trade("PAPER trade executed", {
@@ -551,11 +757,43 @@ export class TradingAgent {
       };
 
       applyTradeToPortfolio(order, result, this.portfolio);
+      await this.persistTrade(order, result);
       return result;
     }
 
     // Live mode: get quote first, then execute
     try {
+      // For sells, settle the swap amount against the wallet's ACTUAL
+      // transferable balance. The internally tracked position amount can drift
+      // above the on-chain balance (stale sync, rounding, dust), which makes
+      // TWAK revert with "BEP20: transfer amount exceeds balance". Always sell
+      // the real available balance (minus a tiny margin for precision).
+      if (order.side === "sell") {
+        const onChainBalance = await this.getOnChainTokenBalance(order.fromToken);
+        if (onChainBalance !== null && onChainBalance > 0) {
+          const tracked = order.fromTokenAmount ?? onChainBalance;
+          // Never sell more than the wallet actually holds.
+          const sellable = Math.min(tracked, onChainBalance);
+          // 0.1% haircut absorbs decimal/precision mismatches so the transfer
+          // can never round above the true balance.
+          const safeAmount = sellable * 0.999;
+          if (safeAmount > 0 && safeAmount !== order.fromTokenAmount) {
+            logger.info("Reconciled sell amount to on-chain balance", {
+              symbol: order.symbol,
+              trackedAmount: tracked,
+              onChainBalance,
+              sellAmount: safeAmount,
+            });
+            order.fromTokenAmount = safeAmount;
+          }
+        } else {
+          logger.warn("Could not resolve on-chain balance for sell — using tracked amount", {
+            symbol: order.symbol,
+            trackedAmount: order.fromTokenAmount,
+          });
+        }
+      }
+
       const quoteParams = buildQuoteParams(order);
       const quote = await this.mcp.getSwapQuote(quoteParams);
 
@@ -572,14 +810,40 @@ export class TradingAgent {
       }
 
       const swapParams = buildSwapParams(order);
+      if (!opts.manual) this.reserveAutonomousOnChainTx();
       const swapResult = await this.mcp.executeSwap(swapParams);
 
-      const price = getLatestPrice(order.symbol) || 0;
-      const result = processSwapResult(order, swapResult, price);
+      logger.info("TWAK swap raw response", {
+        symbol: order.symbol,
+        side: order.side,
+        keys: Object.keys(swapResult),
+        sample: JSON.stringify(swapResult).slice(0, 500),
+      });
 
-      applyTradeToPortfolio(order, result, this.portfolio);
+      const price = getLatestPrice(order.symbol) || 0;
+      const result = processSwapResult(order, swapResult, price, { requireOnChainTx: true });
+
+      await this.persistTrade(order, result, swapResult);
+
+      if (result.success) {
+        applyTradeToPortfolio(order, result, this.portfolio);
+        try {
+          await this.syncWalletCapital();
+        } catch (err) {
+          logger.warn("Post-trade wallet sync failed", { error: String(err) });
+        }
+      } else {
+        logger.warn("Live swap not confirmed on-chain — portfolio unchanged", {
+          orderId: order.id,
+          symbol: order.symbol,
+          error: result.error,
+        });
+        if (!opts.manual) this.markFailedSwap(order.symbol);
+      }
+
       return result;
     } catch (err) {
+      if (!opts.manual) this.markFailedSwap(signal.symbol);
       logger.error("Trade execution error", {
         orderId: order.id,
         symbol: order.symbol,
@@ -591,6 +855,91 @@ export class TradingAgent {
 
   getPortfolio(): PortfolioTracker {
     return this.portfolio;
+  }
+
+  /**
+   * Dashboard / command assistant — run a manual trade with structured errors.
+   */
+  /**
+   * Make a token tradable on demand for assistant/manual commands, even if it
+   * isn't on the active watchlist. Resolves the BEP-20 contract (static map →
+   * CMC lookup, cached) and fetches a live price (CMC quote → TWAK spot),
+   * seeding price history so sizing/execution have real numbers.
+   *
+   * Returns whether the token can now be routed (has a contract + price).
+   */
+  async primeTokenForTrade(symbol: string): Promise<{ routable: boolean; price: number | null; address?: string }> {
+    const sym = symbol.toUpperCase();
+
+    // 1. Resolve a BSC contract address (static map, else CMC — populates cache).
+    let address: string | undefined;
+    try {
+      address = (await resolveBscTokenAddress(sym)) ?? undefined;
+    } catch (err) {
+      logger.warn("Manual-trade address resolve failed", { symbol: sym, error: String(err) });
+    }
+
+    // 2. Ensure we have a price + enough history for indicators/sizing.
+    if (getLatestPrice(sym) === null || getHistoryLength(sym) < 20) {
+      try {
+        const quotes = await this.fetchCmcQuotes([sym]);
+        const md = quotes.get(sym);
+        if (md && md.price > 0 && getHistoryLength(sym) < 40) {
+          seedPriceHistory(sym, md.price, 50, 3.5);
+        }
+      } catch (err) {
+        logger.warn("Manual-trade CMC prime failed", { symbol: sym, error: String(err) });
+      }
+    }
+
+    if (getLatestPrice(sym) === null) {
+      try {
+        const priceData = await this.mcp.getTokenPrice(BSC_CHAIN, sym);
+        if (priceData && priceData.price > 0) {
+          seedPriceHistory(sym, priceData.price, 50, 3.5);
+        }
+      } catch (err) {
+        logger.warn("Manual-trade TWAK price prime failed", { symbol: sym, error: String(err) });
+      }
+    }
+
+    const price = getLatestPrice(sym);
+    const routable = hasBscSwapAddress(sym) && price !== null;
+    logger.info("Primed token for manual trade", { symbol: sym, address: address ?? "unmapped", price, routable });
+    return { routable, price, address };
+  }
+
+  async executeManualTrade(
+    signal: import("./utils/types.js").TradeSignal,
+    opts: { amountUsd?: number } = {}
+  ): Promise<{
+    result: TradeResult | null;
+    violations?: string[];
+    tradeSizeUsd: number;
+  }> {
+    // Resolve contract + price up-front so any eligible token is tradable,
+    // not just ones currently on the watchlist.
+    await this.primeTokenForTrade(signal.symbol);
+
+    // Manual = operator-initiated (assistant / NL command). Bypasses the
+    // autonomous daily-trade pacing cap, but still respects hard safety
+    // (eligibility, funds, drawdown, position size).
+    const validation = validateAndCreateOrder(signal, this.riskManager, this.config, {
+      manual: true,
+      amountUsd: opts.amountUsd,
+    });
+    if (!validation.approved || !validation.order) {
+      return {
+        result: null,
+        violations: validation.violations ?? ["Trade not approved"],
+        tradeSizeUsd: validation.order?.amountUsd ?? opts.amountUsd ?? 0,
+      };
+    }
+    const result = await this.executeTrade(signal, {
+      manual: true,
+      order: validation.order,
+    });
+    return { result, tradeSizeUsd: validation.order.amountUsd };
   }
 
   getRiskManager(): RiskManager {
@@ -611,12 +960,32 @@ export class TradingAgent {
    * Only allows safe fields — mode cannot be changed at runtime.
    */
   updateConfig(partial: Partial<AgentConfig>) {
+    const changed: Record<string, unknown> = {};
+
+    // Switching strategy applies that preset's risk profile + sizing first;
+    // any explicit fields in the same payload then override on top.
+    if (partial.strategy !== undefined && isStrategyName(partial.strategy)) {
+      const profile = getStrategyProfile(partial.strategy);
+      this.config.strategy = profile.name;
+      this.config.positionSizeMultiplier = profile.positionSizeMultiplier;
+      this.config.maxDrawdownPct = profile.risk.maxDrawdownPct;
+      this.config.maxDailyTrades = profile.risk.maxDailyTrades;
+      this.config.maxPortfolioTokens = profile.risk.maxPortfolioTokens;
+      this.config.minBuyConfidence = profile.risk.minBuyConfidence;
+      this.config.stopLossPct = profile.risk.stopLossPct;
+      this.config.takeProfitPct = profile.risk.takeProfitPct;
+      this.config.trailingActivatePct = profile.risk.trailingActivatePct;
+      this.config.trailingGivebackPct = profile.risk.trailingGivebackPct;
+      changed.strategy = profile.name;
+    }
+
     const safe: (keyof AgentConfig)[] = [
       "tradeIntervalMs", "maxPositionSizeUsd", "maxDailyTrades",
       "maxDrawdownPct", "slippageTolerance", "maxPortfolioTokens",
-      "minTradeAmountUsd",
+      "minTradeAmountUsd", "minBuyConfidence", "stopLossPct", "takeProfitPct",
+      "trailingActivatePct", "trailingGivebackPct", "autoExitEnabled",
+      "maxAutonomousTradesPerCycle", "maxOnChainTxPerDay",
     ];
-    const changed: Record<string, unknown> = {};
     for (const key of safe) {
       if (partial[key] !== undefined) {
         (this.config as unknown as Record<string, unknown>)[key] = partial[key];
@@ -632,6 +1001,33 @@ export class TradingAgent {
     return this.running;
   }
 
+  /**
+   * Full reset — clears portfolio, trade history, drawdown, PnL, and cycle
+   * count. Re-syncs wallet from chain then resumes the trading loop. Called
+   * when the operator hits the emergency restart button.
+   */
+  async restart() {
+    this.running = false;
+
+    const initialCash = parseFloat(process.env.INITIAL_CASH_USD || "10");
+    this.portfolio = new PortfolioTracker(initialCash, this.config.mode === "live");
+    this.cycleCount = 0;
+    this.lastSignals.clear();
+    this.lastNewsSentiment.clear();
+    this.startedAt = Date.now();
+
+    logger.info("Agent RESET — portfolio/PnL/drawdown cleared, restarting");
+
+    // Re-seed from on-chain state so NAV is real.
+    if (this.config.mode === "live") {
+      try { await this.syncOnChainPositions(); } catch { /* ok */ }
+      try { await this.syncWalletCapital(); } catch { /* ok */ }
+    }
+
+    // Re-enter the trading loop (non-blocking).
+    this.start();
+  }
+
   getCycleCount(): number {
     return this.cycleCount;
   }
@@ -644,10 +1040,32 @@ export class TradingAgent {
     return this.fearGreedIndex;
   }
 
+  /**
+   * Resolve the real BSC wallet address.
+   * Prefers the live TWAK MCP address; falls back to AGENT_WALLET_ADDRESS env
+   * when the bridge returns nothing or a known placeholder (mock/cmc-pro modes).
+   */
+  private resolveWalletAddress(mcpAddress?: string | null): string | null {
+    const isPlaceholder = (a?: string | null) =>
+      !!a && /^0x(0{40}|a{40})$/i.test(a);
+    const envAddress = process.env.AGENT_WALLET_ADDRESS?.trim();
+    if (mcpAddress && !isPlaceholder(mcpAddress)) return mcpAddress;
+    if (envAddress) return envAddress;
+    return mcpAddress ?? null;
+  }
+
+  /** Best-known address of the active wallet (cached MCP address → env). */
+  private currentWalletAddress(): string | null {
+    return this.resolveWalletAddress(this._cachedWalletInfo?.address ?? null);
+  }
+
   /** Read TWAK wallet address + on-chain balances for dashboard. */
+  private _cachedWalletInfo: WalletInfo | null = null;
+  private _walletInfoRefreshing = false;
+
   async getWalletInfo(): Promise<WalletInfo> {
     const addrResult = await this.mcp.getAddress(BSC_CHAIN);
-    const address = addrResult?.address ?? null;
+    const address = this.resolveWalletAddress(addrResult?.address);
 
     let bnbBalance = 0;
     let usdtBalance = 0;
@@ -666,6 +1084,25 @@ export class TradingAgent {
     let walletState = "unknown";
     let registered = false;
     let registrationOpen = false;
+    let binancePositions: BinanceWeb3Position[] | undefined;
+
+    if (address) {
+      try {
+        binancePositions = await fetchWalletPositions(address);
+        if (binancePositions.length > 0) {
+          const binanceUsdt = binancePositions.find((p) => p.symbol === "USDT");
+          if (binanceUsdt && binanceUsdt.remainQty > 0) {
+            usdtBalance = binanceUsdt.remainQty;
+          }
+          const binanceBnb = binancePositions.find((p) => p.symbol === "BNB");
+          if (binanceBnb && binanceBnb.remainQty > 0) {
+            bnbBalance = binanceBnb.remainQty;
+          }
+        }
+      } catch (err) {
+        logger.warn("Binance Web3 wallet query failed", { error: String(err) });
+      }
+    }
 
     if (this.mcp.getWalletStatus) {
       const status = await this.mcp.getWalletStatus();
@@ -679,7 +1116,7 @@ export class TradingAgent {
       registrationOpen = Boolean(comp?.registrationOpen ?? comp?.windowOpen);
     }
 
-    return {
+    const info: WalletInfo = {
       address,
       bnbBalance: Math.round(bnbBalance * 10000) / 10000,
       usdtBalance: Math.round(usdtBalance * 100) / 100,
@@ -687,6 +1124,477 @@ export class TradingAgent {
       walletState,
       registered,
       registrationOpen,
+      ...(binancePositions && binancePositions.length > 0 ? { binancePositions } : {}),
+    };
+    this._cachedWalletInfo = info;
+    return info;
+  }
+
+  /** Seed dashboard wallet cache from an on-chain sync (no MCP round-trips). */
+  private primeWalletCache(address: string, binancePositions: BinanceWeb3Position[]) {
+    const usdt = binancePositions.find((p) => p.symbol === "USDT");
+    const bnb = binancePositions.find((p) => p.symbol === "BNB");
+    const base = this._cachedWalletInfo ?? {
+      address,
+      bnbBalance: 0,
+      usdtBalance: 0,
+      walletMode: "local",
+      walletState: "unknown",
+      registered: false,
+      registrationOpen: false,
+    };
+    this._cachedWalletInfo = {
+      ...base,
+      address,
+      bnbBalance: bnb?.remainQty ?? base.bnbBalance,
+      usdtBalance: usdt?.remainQty ?? base.usdtBalance,
+      binancePositions,
+    };
+  }
+
+  /** Non-blocking: returns cached wallet info, or fetches with a 8s timeout. */
+  async getWalletInfoFast(): Promise<WalletInfo | null> {
+    if (this._cachedWalletInfo) {
+      if (!this._walletInfoRefreshing) {
+        this._walletInfoRefreshing = true;
+        this.getWalletInfo()
+          .then((w) => { this._cachedWalletInfo = w; })
+          .catch(() => {})
+          .finally(() => { this._walletInfoRefreshing = false; });
+      }
+      return this._cachedWalletInfo;
+    }
+    const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 8000));
+    const result = await Promise.race([this.getWalletInfo(), timeout]);
+    return result;
+  }
+
+  /**
+   * Live mode: align in-memory portfolio with on-chain reality.
+   * On-chain holdings + USDT balance are the source of truth; unconfirmed
+   * and phantom trades are purged from history (for accurate counts/display).
+   */
+  private async reconcileLivePortfolio(currentPrices?: Map<string, number>) {
+    let heldSymbols = new Set<string>();
+    let syncMeta = {
+      added: [] as string[],
+      removed: [] as string[],
+      holdings: {} as Record<string, number>,
+      rediscovered: 0,
+    };
+    try {
+      const sync = await this.syncOnChainPositions();
+      heldSymbols = sync.heldSymbols;
+      syncMeta = {
+        added: sync.added,
+        removed: sync.removed,
+        holdings: sync.holdings,
+        rediscovered: sync.rediscovered,
+      };
+    } catch (err) {
+      logger.warn("On-chain position sync during reconcile failed", { error: String(err) });
+    }
+
+    try {
+      await this.syncWalletCapital();
+    } catch (err) {
+      logger.warn("Wallet sync during reconcile failed", { error: String(err) });
+    }
+
+    const removed = this.portfolio.purgeUnconfirmedTrades(isOnChainTxHash);
+    if (removed > 0) {
+      logger.warn("Purged unconfirmed trades from portfolio state", { removed });
+    }
+
+    const purged = this.portfolio.purgeTradesNotBackedByChain(
+      heldSymbols,
+      this.config.baseCurrency
+    );
+    if (purged > 0) {
+      const nav = this.portfolio.estimateNavUsd(currentPrices);
+      this.portfolio.recalibratePeakAfterPhantomPurge(nav, purged);
+      logger.warn("Purged phantom trades not backed by on-chain holdings", { purged });
+    }
+
+    if (syncMeta.rediscovered > 0) {
+      const nav = this.portfolio.estimateNavUsd(currentPrices);
+      this.portfolio.recalibratePeakToOnChainNav(nav, syncMeta.rediscovered);
+    } else if (
+      this.portfolio.getAllPositions().size === 0 &&
+      Object.keys(syncMeta.holdings).length === 0 &&
+      this.portfolio.hasBaseline
+    ) {
+      const nav = this.portfolio.estimateNavUsd(currentPrices);
+      if (this.portfolio.getPeakNav() > nav * 1.02) {
+        this.portfolio.recalibratePeakToOnChainNav(nav, 1);
+      }
+    }
+
+    const store = getAgentStore();
+    if (store.enabled) {
+      const gas = this.portfolio.gasReserve;
+      void store.saveChainSync({
+        holdings: syncMeta.holdings,
+        usdtBalance: this.portfolio.cash,
+        positionsAdded: syncMeta.added,
+        positionsRemoved: syncMeta.removed,
+        ...(gas.valueUsd > 0 ? { gas } : {}),
+      });
+    }
+  }
+
+  private async bootstrapPersistence() {
+    const store = getAgentStore();
+    if (!store.enabled) return;
+
+    const navState = await store.loadNavState();
+    if (navState) this.portfolio.restorePersistedNav(navState);
+
+    const trades = await store.loadRecentTrades(50, this.currentWalletAddress());
+    if (trades.length > 0) this.portfolio.hydrateTradeHistory(trades);
+  }
+
+  private async persistTrade(
+    order: TradeOrder,
+    result: TradeResult,
+    twakResponse?: Record<string, unknown> | null
+  ) {
+    const store = getAgentStore();
+    if (!store.enabled) return;
+    await store.saveTrade(order, result, this.config.mode, twakResponse, this.currentWalletAddress());
+    if (result.success) {
+      logger.trade(
+        `Trade persisted to DB — ${order.side.toUpperCase()} ${order.symbol}`,
+        {
+          side: order.side,
+          symbol: order.symbol,
+          amountUsd: order.amountUsd,
+          status: this.config.mode === "paper" ? "paper" : "confirmed",
+          realizedPnl: result.realizedPnl,
+        },
+        result.txHash
+      );
+    }
+  }
+
+  /** Compute key agent stats for persistence (win rate, trades, sentiment, etc.). */
+  private computeCycleStats(snap: PortfolioSnapshot): import("./db/store.js").CycleStats {
+    const trades = this.portfolio.getTradeHistory().filter((t) => t.success);
+    const closed = trades.filter((t) => t.realizedPnl !== undefined);
+    const wins = closed.filter((t) => (t.realizedPnl ?? 0) >= 0).length;
+    const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0;
+
+    return {
+      realizedPnl: this.portfolio.realizedPnl,
+      dailyPnl: snap.dailyPnl,
+      positionsCount: snap.positions.length,
+      totalTrades: trades.length,
+      todayTrades: this.portfolio.getTodayTradeCount(),
+      winRate: Math.round(winRate * 10) / 10,
+      fearGreed: this.fearGreedIndex,
+      emergencyMode: this.riskManager.isEmergencyMode(),
+    };
+  }
+
+  private async persistCycleSnapshot(cycleId: number, snap: PortfolioSnapshot) {
+    const store = getAgentStore();
+    if (!store.enabled) return;
+    const peak = this.portfolio.getPeakNav();
+    await store.saveNavSnapshot(snap, cycleId, this.config.mode, peak, this.computeCycleStats(snap));
+    await store.saveNavState({
+      peakNavUsd: peak,
+      initialNavUsd: this.portfolio.initialValue,
+      baselineInitialized: this.portfolio.hasBaseline,
+    });
+  }
+
+  /**
+   * Force a full on-chain reconcile (positions + cash + chain sync) on demand.
+   * Used by the dashboard "refresh" button. Returns the fresh state snapshot.
+   */
+  async forceResync(): Promise<AgentState> {
+    if (this.config.mode === "live") {
+      await this.reconcileLivePortfolio();
+    } else {
+      await this.syncWalletCapital().catch(() => undefined);
+    }
+    logger.info("Manual portfolio resync requested");
+    return this.getStateSnapshot();
+  }
+
+  /**
+   * Rebuild tracked positions from the wallet's actual on-chain holdings so
+   * NAV / allocation / PnL reflect every token held — including assets bought
+   * outside this agent run. Eligible, non-stablecoin tokens only.
+   */
+  /**
+   * Best-effort lookup of the wallet's actual transferable balance for a single
+   * token symbol. Prefers the direct per-token balance call, then falls back to
+   * scanning the full on-chain portfolio. Returns null when neither is available.
+   */
+  private async getOnChainTokenBalance(symbol: string): Promise<number | null> {
+    const sym = symbol.toUpperCase();
+
+    if (this.mcp.getTokenBalance) {
+      try {
+        const bal = await this.mcp.getTokenBalance(BSC_CHAIN, sym);
+        if (bal && typeof bal.amount === "number" && bal.amount > 0) {
+          return bal.amount;
+        }
+      } catch (err) {
+        logger.warn("getTokenBalance failed during sell reconcile", {
+          symbol: sym,
+          error: String(err),
+        });
+      }
+    }
+
+    if (this.mcp.getPortfolio) {
+      try {
+        const holdings = await this.mcp.getPortfolio(BSC_CHAIN);
+        const match = holdings?.find((h) => h.symbol.toUpperCase() === sym);
+        if (match && typeof match.amount === "number" && match.amount > 0) {
+          return match.amount;
+        }
+      } catch (err) {
+        logger.warn("getPortfolio lookup failed during sell reconcile", {
+          symbol: sym,
+          error: String(err),
+        });
+      }
+    }
+
+    return null;
+  }
+
+  private async syncOnChainPositions(): Promise<{
+    heldSymbols: Set<string>;
+    added: string[];
+    removed: string[];
+    holdings: Record<string, number>;
+    rediscovered: number;
+  }> {
+    const empty = {
+      heldSymbols: new Set<string>(),
+      added: [] as string[],
+      removed: [] as string[],
+      holdings: {} as Record<string, number>,
+      rediscovered: 0,
+    };
+    if (!this.mcp.getPortfolio) return empty;
+
+    const holdings = await this.mcp.getPortfolio(BSC_CHAIN);
+    if (!holdings) return empty;
+
+    const amounts = new Map<string, number>();
+    const prices = new Map<string, number>();
+    const heldSymbols = new Set<string>();
+    // On BSC only BNB is the native gas coin; ETH is a BEP-20 token (0x2170…)
+    const NATIVE_GAS = new Set(["BNB"]);
+    let nativeGasAmount = 0;
+
+    const ingestHolding = async (h: PortfolioHolding) => {
+      const symbol = h.symbol.toUpperCase();
+
+      if (NATIVE_GAS.has(symbol)) {
+        nativeGasAmount = h.amount;
+        let valueUsd = h.valueUsd;
+        if (!(valueUsd && valueUsd > 0) && h.amount > 0) {
+          try {
+            const quote = await this.mcp.getTokenPrice(BSC_CHAIN, symbol);
+            if (quote?.price) valueUsd = h.amount * quote.price;
+          } catch { /* use fiat from get_balance when available */ }
+        }
+        if (valueUsd && valueUsd > 0) {
+          this.portfolio.setGasReserve(symbol, h.amount, valueUsd);
+        }
+        return;
+      }
+
+      if (!isEligibleToken(symbol) || isStablecoin(symbol)) return;
+      if (!(h.amount > 0)) return;
+
+      // TWAK balance APIs can echo native BNB for unrelated ERC-20 queries.
+      if (nativeGasAmount > 0) {
+        const rel = Math.abs(h.amount - nativeGasAmount) / nativeGasAmount;
+        if (rel < 1e-6) return;
+      }
+
+      let derivedPrice = h.priceUsd
+        ?? (h.valueUsd && h.amount > 0 ? h.valueUsd / h.amount : undefined)
+        ?? getLatestPrice(symbol)
+        ?? undefined;
+
+      if (!(derivedPrice && derivedPrice > 0)) {
+        try {
+          const quote = await this.mcp.getTokenPrice(BSC_CHAIN, symbol);
+          if (quote?.price && quote.price > 0) derivedPrice = quote.price;
+        } catch {
+          /* best-effort pricing */
+        }
+      }
+
+      const valueUsd = h.valueUsd
+        ?? (derivedPrice && h.amount > 0 ? derivedPrice * h.amount : 0);
+      if (!(valueUsd >= MIN_POSITION_VALUE_USD)) return;
+
+      amounts.set(symbol, h.amount);
+      heldSymbols.add(symbol);
+
+      if (derivedPrice && derivedPrice > 0) prices.set(symbol, derivedPrice);
+    };
+
+    // Resolve wallet address early — required for the token scan below.
+    let walletAddress: string | undefined;
+    try {
+      const addr = await this.mcp.getAddress(BSC_CHAIN);
+      walletAddress = this.resolveWalletAddress(addr?.address) ?? undefined;
+    } catch (err) {
+      walletAddress = process.env.AGENT_WALLET_ADDRESS?.trim() || undefined;
+      logger.warn("Could not resolve wallet address for chain sync", {
+        error: String(err),
+        ...(walletAddress ? { fallback: "AGENT_WALLET_ADDRESS" } : {}),
+      });
+    }
+
+    for (const h of holdings) {
+      await ingestHolding(h);
+    }
+
+    if (walletAddress) {
+      const bscTokens = await fetchBscTokenBalances(walletAddress);
+      for (const h of bscTokens) {
+        if (amounts.has(h.symbol.toUpperCase())) continue;
+        await ingestHolding(h);
+      }
+
+      try {
+        const binanceHoldings = await fetchBinanceWeb3Holdings(walletAddress);
+        for (const h of binanceHoldings) {
+          if (amounts.has(h.symbol.toUpperCase())) continue;
+          await ingestHolding(h);
+        }
+        if (binanceHoldings.length > 0) {
+          logger.info("Binance Web3 positions merged into sync", {
+            tokens: binanceHoldings.map((h) => h.symbol),
+          });
+        }
+        const binancePositions = await fetchWalletPositions(walletAddress);
+        if (binancePositions.length > 0) {
+          this.primeWalletCache(walletAddress, binancePositions);
+        }
+      } catch (err) {
+        logger.warn("Binance Web3 sync failed", { error: String(err) });
+      }
+    }
+
+    // Build probe list from actual trade history + DB — NOT the watchlist.
+    const candidates = new Set<string>();
+    for (const t of this.portfolio.getTradeHistory()) {
+      if (!t.success) continue;
+      const sym = t.toToken.toUpperCase();
+      if (isEligibleToken(sym) && !isStablecoin(sym) && !NATIVE_GAS.has(sym)) {
+        candidates.add(sym);
+      }
+    }
+    for (const sym of this.portfolio.getAllPositions().keys()) {
+      candidates.add(sym.toUpperCase());
+    }
+
+    const store = getAgentStore();
+    if (store.enabled) {
+      for (const sym of await store.loadTradedSymbols(this.currentWalletAddress())) {
+        if (isEligibleToken(sym) && !isStablecoin(sym) && !NATIVE_GAS.has(sym)) {
+          candidates.add(sym.toUpperCase());
+        }
+      }
+      for (const sym of await store.loadLastChainSyncHoldings()) {
+        if (isEligibleToken(sym) && !isStablecoin(sym) && !NATIVE_GAS.has(sym)) {
+          candidates.add(sym.toUpperCase());
+        }
+      }
+    }
+
+    let rediscovered = 0;
+    if (walletAddress) {
+      logger.info("Starting CLI wallet scan", {
+        wallet: `${walletAddress.slice(0, 6)}…${walletAddress.slice(-4)}`,
+      });
+      const scanned = await scanWalletViaCliSubprocess(walletAddress);
+      logger.info("CLI wallet scan finished", { found: scanned.length });
+      for (const h of scanned) {
+        const sym = h.symbol.toUpperCase();
+        if (amounts.has(sym)) continue;
+        const wasTracked = this.portfolio.getPosition(sym) !== undefined;
+        await ingestHolding(h);
+        if (!wasTracked) rediscovered++;
+        logger.info("Token balance recovered via wallet scan", {
+          symbol: sym,
+          amount: h.amount,
+          valueUsd: h.valueUsd ? Math.round(h.valueUsd * 100) / 100 : undefined,
+        });
+      }
+    }
+
+    if (this.mcp.getTokenBalance) {
+      for (const sym of candidates) {
+        if (amounts.has(sym)) continue;
+        try {
+          const bal = await this.mcp.getTokenBalance(BSC_CHAIN, sym);
+          if (bal && bal.amount > 0) {
+            const wasTracked = this.portfolio.getPosition(sym) !== undefined;
+            await ingestHolding(bal);
+            if (!wasTracked) rediscovered++;
+            logger.info("Token balance recovered via direct query", {
+              symbol: sym,
+              amount: bal.amount,
+              valueUsd: bal.valueUsd ? Math.round(bal.valueUsd * 100) / 100 : undefined,
+            });
+          }
+        } catch (err) {
+          logger.warn("Direct token balance query failed", { symbol: sym, error: String(err) });
+        }
+      }
+
+      // Verify positions before removal — don't drop a token unless balance is truly zero.
+      for (const sym of [...this.portfolio.getAllPositions().keys()]) {
+        if (amounts.has(sym)) continue;
+        try {
+          const bal = await this.mcp.getTokenBalance(BSC_CHAIN, sym);
+          if (bal && bal.amount > 0) {
+            await ingestHolding(bal);
+            rediscovered++;
+            logger.info("Position preserved after balance re-check", {
+              symbol: sym,
+              amount: bal.amount,
+            });
+          }
+        } catch {
+          /* removal stands if probe fails */
+        }
+      }
+    }
+
+    const { added, removed } = this.portfolio.reconcileOnChainPositions(amounts, prices);
+    const gas = this.portfolio.gasReserve;
+    if (added.length > 0 || removed.length > 0 || gas.valueUsd > 0 || rediscovered > 0) {
+      logger.info("On-chain wallet synced", {
+        ...(added.length > 0 ? { positionsAdded: added } : {}),
+        ...(removed.length > 0 ? { positionsRemoved: removed } : {}),
+        ...(rediscovered > 0 ? { rediscovered } : {}),
+        tokenPositions: [...amounts.keys()],
+        gas: gas.valueUsd > 0
+          ? `${gas.amount.toFixed(4)} ${gas.symbol} (~$${gas.valueUsd.toFixed(2)})`
+          : "none",
+      });
+    }
+
+    return {
+      heldSymbols,
+      added,
+      removed,
+      holdings: Object.fromEntries(amounts),
+      rediscovered,
     };
   }
 
@@ -703,12 +1611,32 @@ export class TradingAgent {
     }
 
     this.portfolio.setCashUsd(stable.balance);
+
+    // Anchor the NAV baseline to real capital on the first successful sync.
+    // NAV = on-chain cash + current value of any tracked positions.
+    if (!this.portfolio.hasBaseline) {
+      const positionsValue = this.estimateTrackedPositionsValue();
+      this.portfolio.setBaselineNav(
+        stable.balance + positionsValue + this.portfolio.gasReserve.valueUsd
+      );
+    }
+
     logger.info("Wallet capital synced from chain", {
       usdt: stable.balance,
       symbol: stable.symbol,
     });
 
     return { usdtBalance: stable.balance, synced: true };
+  }
+
+  /** Current USD value of positions tracked in memory (best-effort pricing). */
+  private estimateTrackedPositionsValue(): number {
+    let total = 0;
+    for (const [symbol, pos] of this.portfolio.getAllPositions()) {
+      const price = getLatestPrice(symbol) ?? pos.avgEntryPrice;
+      total += pos.amount * price;
+    }
+    return total;
   }
 
   async registerCompetition(): Promise<Record<string, unknown>> {
@@ -735,8 +1663,15 @@ export class TradingAgent {
    * Full agent state snapshot for dashboard / API consumers.
    */
   getStateSnapshot(): AgentState {
+    // Report the full set of analyzed tokens (watchlist + every token scored in
+    // the last cycle, incl. full-scan / Binance Alpha promotions), not just the
+    // 15-token trading watchlist — so the dashboard can show all of them.
+    const reportSymbols = Array.from(
+      new Set<string>([...this.watchlist, ...this.lastSignals.keys()])
+    );
+
     const currentPrices = new Map<string, number>();
-    for (const symbol of this.watchlist) {
+    for (const symbol of reportSymbols) {
       const price = getLatestPrice(symbol);
       if (price !== null) currentPrices.set(symbol, price);
     }
@@ -751,20 +1686,40 @@ export class TradingAgent {
     const tokenMetrics: Record<string, {
       momentum: number | null;
       atrPct: number | null;
+      volumeRatio: number | null;
       score: number | null;
       newsScore: number | null;
       newsArticles: number;
+      confidence?: number | null;
+      rsi: number | null;
+      macd: number | null;
+      aiSummary?: string;
+      aiVerdict?: string;
+      aiAgrees?: boolean;
     }> = {};
-    for (const symbol of this.watchlist) {
-      const { momentum, atrPct } = getTokenMomentumMetrics(symbol);
+    for (const symbol of reportSymbols) {
+      const { momentum, atrPct, volumeRatio } = getTokenMomentumMetrics(symbol);
       const sig = this.lastSignals.get(symbol);
       const news = this.lastNewsSentiment.get(symbol);
+      const tech = computeSignals(symbol);
+      const ai = this.lastAiInsights.get(symbol.toUpperCase());
       tokenMetrics[symbol] = {
         momentum,
         atrPct,
+        volumeRatio: volumeRatio !== null ? Math.round(volumeRatio * 100) / 100 : null,
         score: sig !== undefined ? Math.round(sig) : null,
+        confidence: this.lastSignalConfidence.get(symbol) ?? null,
         newsScore: news?.score ?? null,
         newsArticles: news?.articles ?? 0,
+        rsi: tech.rsi !== null ? Math.round(tech.rsi * 10) / 10 : null,
+        macd: tech.macd?.histogram ?? null,
+        ...(ai
+          ? {
+              aiSummary: ai.summary,
+              aiVerdict: ai.verdict,
+              aiAgrees: ai.agreesWithSignal,
+            }
+          : {}),
       };
     }
 
@@ -777,13 +1732,18 @@ export class TradingAgent {
       snapshots,
       trades: this.portfolio.getTradeHistory(),
       risk: this.riskManager.riskSummary(),
-      watchlist: this.watchlist,
+      watchlist: reportSymbols,
       fearGreedIndex: this.fearGreedIndex,
       prices: Object.fromEntries(currentPrices),
       bridgeSource: this.bridgeSource,
       tokenMetrics,
       newsCount: this.lastNewsCount,
       startedAt: this.startedAt,
+      startupCooldownActive: this.isInStartupCooldown(),
+      startupCooldownRemainingMs: this.getStartupCooldownRemainingMs(),
+      ...(this._cachedWalletInfo?.binancePositions?.length
+        ? { binancePositions: this._cachedWalletInfo.binancePositions }
+        : {}),
     };
   }
 }
@@ -804,12 +1764,22 @@ export interface AgentState {
   tokenMetrics?: Record<string, {
     momentum: number | null;
     atrPct: number | null;
+    volumeRatio?: number | null;
     score: number | null;
     newsScore?: number | null;
     newsArticles?: number;
+    confidence?: number | null;
+    rsi?: number | null;
+    macd?: number | null;
+    aiSummary?: string;
+    aiVerdict?: string;
+    aiAgrees?: boolean;
   }>;
   newsCount?: number;
   startedAt?: number;
+  startupCooldownActive?: boolean;
+  startupCooldownRemainingMs?: number;
+  binancePositions?: BinanceWeb3Position[];
 }
 
 function sleep(ms: number): Promise<void> {

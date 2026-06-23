@@ -1,7 +1,8 @@
 import type { AgentConfig } from "./utils/types.js";
+import { getStrategyProfile, resolveStrategyName } from "./strategy/presets.js";
 
 export const ELIGIBLE_TOKENS: string[] = [
-  "ETH", "USDT", "USDC", "XRP", "TRX", "DOGE", "ZEC", "ADA", "LINK", "BCH",
+  "ETH", "USDT", "USDC", "XRP", "TRX", "DOGE", "ZEC", "ADA", "LINK", "BCH", "BNB",
   "DAI", "TON", "USD1", "USDe", "M", "LTC", "AVAX", "SHIB", "XAUt", "WLFI",
   "H", "DOT", "UNI", "ASTER", "DEXE", "USDD", "ETC", "AAVE", "ATOM", "U",
   "STABLE", "FIL", "INJ", "NIGHT", "FET", "TUSD", "BONK", "PENGU", "CAKE",
@@ -65,20 +66,59 @@ export const BSC_CHAIN = "bsc";
 /** BSC mainnet USDT (BEP-20) — base currency for competition swaps */
 export const BSC_USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955";
 
+/** Minimum BNB (USD value) kept for gas — BNB is never used as swap currency */
+export const MIN_GAS_RESERVE_USD = parseFloat(process.env.MIN_GAS_RESERVE_USD || "1.5");
+
+/** Ignore wallet holdings below this USD value (dust + balance API noise). */
+export const MIN_POSITION_VALUE_USD = parseFloat(process.env.MIN_POSITION_VALUE_USD || "1");
+
+/** All buys and sells settle in USDT only — BNB is gas reserve only. */
+export function parseSwapCurrencies(_raw?: string): string[] {
+  return ["USDT"];
+}
+
+export function isSwapCurrency(symbol: string, swapCurrencies: string[]): boolean {
+  return swapCurrencies.includes(symbol.toUpperCase());
+}
+
 export function loadConfig(): AgentConfig {
   const mode = (process.env.AGENT_MODE as "live" | "paper") || "paper";
-  const defaultInterval = mode === "paper" ? "30000" : "300000"; // 30s paper, 5min live
+  const defaultInterval = mode === "paper" ? "30000" : "3600000"; // 30s paper, 60min live
+
+  // Strategy preset supplies risk defaults; explicit env vars still override.
+  const strategy = resolveStrategyName(process.env.STRATEGY);
+  const profile = getStrategyProfile(strategy);
+  const r = profile.risk;
+  const num = (env: string | undefined, fallback: number) =>
+    env !== undefined && env !== "" ? parseFloat(env) : fallback;
+
   return {
     mode,
+    strategy,
+    positionSizeMultiplier: profile.positionSizeMultiplier,
     tradeIntervalMs: parseInt(process.env.TRADE_INTERVAL_MS || defaultInterval, 10),
-    maxPositionSizeUsd: parseFloat(process.env.MAX_POSITION_SIZE_USD || "100"),
-    maxDailyTrades: parseInt(process.env.MAX_DAILY_TRADES || "10", 10),
-    maxDrawdownPct: parseFloat(process.env.MAX_DRAWDOWN_PCT || "25"),
-    slippageTolerance: parseFloat(process.env.SLIPPAGE_TOLERANCE || "1.5"),
-    baseCurrency: process.env.BASE_CURRENCY || "USDT",
-    maxPortfolioTokens: 5,
-    minTradeAmountUsd: 5,
+    maxPositionSizeUsd: num(process.env.MAX_POSITION_SIZE_USD, 100),
+    maxDailyTrades: Math.round(num(process.env.MAX_DAILY_TRADES, r.maxDailyTrades)),
+    maxDrawdownPct: num(process.env.MAX_DRAWDOWN_PCT, r.maxDrawdownPct),
+    slippageTolerance: num(process.env.SLIPPAGE_TOLERANCE, 1),
+    baseCurrency: "USDT",
+    swapCurrencies: parseSwapCurrencies(),
+    maxPortfolioTokens: Math.round(num(process.env.MAX_PORTFOLIO_TOKENS, r.maxPortfolioTokens)),
+    minTradeAmountUsd: num(process.env.MIN_TRADE_AMOUNT_USD, 5),
     rebalanceThresholdPct: 10,
+    // Safety-first exit rules — keep per-trade losses small to limit drawdown.
+    stopLossPct: num(process.env.STOP_LOSS_PCT, r.stopLossPct),
+    takeProfitPct: num(process.env.TAKE_PROFIT_PCT, r.takeProfitPct),
+    trailingActivatePct: num(process.env.TRAILING_ACTIVATE_PCT, r.trailingActivatePct),
+    trailingGivebackPct: num(process.env.TRAILING_GIVEBACK_PCT, r.trailingGivebackPct),
+    minBuyConfidence: num(process.env.MIN_BUY_CONFIDENCE, r.minBuyConfidence),
+    startupCooldownMs: parseInt(process.env.STARTUP_TRADE_COOLDOWN_MS || "120000", 10),
+    autoExitEnabled: process.env.AUTO_EXIT_ENABLED === "true",
+    failedSwapCooldownMs: parseInt(process.env.FAILED_SWAP_COOLDOWN_MS || "1800000", 10),
+    maxAutonomousTradesPerCycle: Math.round(
+      num(process.env.MAX_AUTONOMOUS_TRADES_PER_CYCLE, 1)
+    ),
+    maxOnChainTxPerDay: Math.round(num(process.env.MAX_ONCHAIN_TX_PER_DAY, 10)),
   };
 }
 

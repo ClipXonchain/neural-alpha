@@ -4,6 +4,12 @@ import { isStablecoin } from "../config.js";
 import type { NewsSentiment } from "./news-sentiment.js";
 import * as ind from "./indicators.js";
 import { logger } from "../utils/logger.js";
+import {
+  getStrategyProfile,
+  DEFAULT_STRATEGY,
+  type StrategyProfile,
+  type SignalWeights,
+} from "./presets.js";
 
 export function computeSignals(symbol: string): TechnicalSignals {
   const closes = getClosePrices(symbol);
@@ -28,13 +34,16 @@ export function computeSignals(symbol: string): TechnicalSignals {
 
 interface ScoreComponent {
   name: string;
+  /** Maps the component to its weight in the active strategy profile. */
+  key: keyof SignalWeights;
   score: number;
-  weight: number;
+  /** Whether this component had enough data to contribute. */
+  active: boolean;
   reason: string;
 }
 
 function scoreRsi(rsiVal: number | null): ScoreComponent {
-  if (rsiVal === null) return { name: "RSI", score: 0, weight: 0, reason: "insufficient data" };
+  if (rsiVal === null) return { name: "RSI", key: "rsi", score: 0, active: false, reason: "insufficient data" };
 
   let score = 0;
   let reason = "";
@@ -46,11 +55,11 @@ function scoreRsi(rsiVal: number | null): ScoreComponent {
   else if (rsiVal > 60) { score = -20; reason = `RSI ${rsiVal.toFixed(1)} — approaching overbought`; }
   else { score = 0; reason = `RSI ${rsiVal.toFixed(1)} — neutral zone`; }
 
-  return { name: "RSI", score, weight: 17, reason };
+  return { name: "RSI", key: "rsi", score, active: true, reason };
 }
 
 function scoreMacd(macdVal: { macd: number; signal: number; histogram: number } | null): ScoreComponent {
-  if (!macdVal) return { name: "MACD", score: 0, weight: 0, reason: "insufficient data" };
+  if (!macdVal) return { name: "MACD", key: "macd", score: 0, active: false, reason: "insufficient data" };
 
   let score = 0;
   let reason = "";
@@ -64,17 +73,17 @@ function scoreMacd(macdVal: { macd: number; signal: number; histogram: number } 
     reason = `MACD neutral (hist: ${macdVal.histogram.toFixed(4)})`;
   }
 
-  return { name: "MACD", score, weight: 17, reason };
+  return { name: "MACD", key: "macd", score, active: true, reason };
 }
 
 function scoreBollinger(
   bb: { upper: number; middle: number; lower: number } | null,
   currentPrice: number
 ): ScoreComponent {
-  if (!bb) return { name: "Bollinger", score: 0, weight: 0, reason: "insufficient data" };
+  if (!bb) return { name: "Bollinger", key: "bollinger", score: 0, active: false, reason: "insufficient data" };
 
   const range = bb.upper - bb.lower;
-  if (range === 0) return { name: "Bollinger", score: 0, weight: 8, reason: "zero range" };
+  if (range === 0) return { name: "Bollinger", key: "bollinger", score: 0, active: false, reason: "zero range" };
 
   const position = (currentPrice - bb.lower) / range;
   let score = 0;
@@ -86,11 +95,11 @@ function scoreBollinger(
   else if (position > 0.75) { score = -40; reason = `Price near upper BB — overbought`; }
   else { score = 0; reason = `Price in BB middle zone (${(position * 100).toFixed(0)}%)`; }
 
-  return { name: "Bollinger", score, weight: 8, reason };
+  return { name: "Bollinger", key: "bollinger", score, active: true, reason };
 }
 
 function scoreEma(emaVal: { fast: number; slow: number } | null): ScoreComponent {
-  if (!emaVal) return { name: "EMA", score: 0, weight: 0, reason: "insufficient data" };
+  if (!emaVal) return { name: "EMA", key: "ema", score: 0, active: false, reason: "insufficient data" };
 
   const diff = ((emaVal.fast - emaVal.slow) / emaVal.slow) * 100;
   let score = 0;
@@ -102,13 +111,13 @@ function scoreEma(emaVal: { fast: number; slow: number } | null): ScoreComponent
   else if (diff < -0.5) { score = -30; reason = `EMA12 < EMA26 by ${Math.abs(diff).toFixed(2)}% — downtrend`; }
   else { score = 0; reason = `EMA crossover zone (${diff.toFixed(2)}%)`; }
 
-  return { name: "EMA", score, weight: 13, reason };
+  return { name: "EMA", key: "ema", score, active: true, reason };
 }
 
 function scoreMomentum(symbol: string): ScoreComponent {
   const closes = getClosePrices(symbol);
   const mom = ind.momentum(closes, 10);
-  if (mom === null) return { name: "Momentum", score: 0, weight: 0, reason: "insufficient data" };
+  if (mom === null) return { name: "Momentum", key: "momentum", score: 0, active: false, reason: "insufficient data" };
 
   let score = 0;
   let reason = "";
@@ -118,11 +127,11 @@ function scoreMomentum(symbol: string): ScoreComponent {
   else if (mom < -3) { score = -20; reason = `Negative momentum: ${mom.toFixed(1)}%`; }
   else { score = 0; reason = `Flat momentum: ${mom.toFixed(1)}%`; }
 
-  return { name: "Momentum", score, weight: 22, reason };
+  return { name: "Momentum", key: "momentum", score, active: true, reason };
 }
 
 function scoreSentiment(fearGreed: number | null): ScoreComponent {
-  if (fearGreed === null) return { name: "Sentiment", score: 0, weight: 0, reason: "no F&G data" };
+  if (fearGreed === null) return { name: "Sentiment", key: "sentiment", score: 0, active: false, reason: "no F&G data" };
 
   let score = 0;
   let reason = "";
@@ -133,7 +142,7 @@ function scoreSentiment(fearGreed: number | null): ScoreComponent {
   else if (fearGreed > 65) { score = -25; reason = `Greed (${fearGreed}) — cautious sell`; }
   else { score = 0; reason = `Neutral sentiment (${fearGreed})`; }
 
-  return { name: "Sentiment", score, weight: 8, reason };
+  return { name: "Sentiment", key: "sentiment", score, active: true, reason };
 }
 
 function clamp(n: number, min: number, max: number): number {
@@ -142,32 +151,120 @@ function clamp(n: number, min: number, max: number): number {
 
 function scoreNews(newsSentiment: NewsSentiment | null | undefined): ScoreComponent {
   if (!newsSentiment || newsSentiment.articles === 0) {
-    return { name: "News", score: 0, weight: 0, reason: "No news coverage" };
+    return { name: "News", key: "news", score: 0, active: false, reason: "No news coverage" };
   }
 
   return {
     name: "News",
+    key: "news",
     score: clamp(newsSentiment.score, -100, 100),
-    weight: 15,
+    active: true,
     reason: newsSentiment.reasons[0] || `News sentiment (${newsSentiment.articles} articles)`,
   };
 }
 
-function classifyStrength(totalScore: number): SignalStrength {
-  if (totalScore >= 40) return "strong_buy";
-  if (totalScore >= 15) return "buy";
-  if (totalScore <= -40) return "strong_sell";
-  if (totalScore <= -10) return "sell"; // faster exit on reversals (was -15)
+/**
+ * mcap:volume turnover — 24h volume as a fraction of market cap. High turnover
+ * means the market is paying outsized attention to the token (often precedes
+ * or accompanies a breakout); near-zero turnover flags illiquid / ignored names
+ * we'd rather avoid. Liquidity-aware companion to the raw volume-spike signal.
+ */
+function scoreMcapVolRatio(volume24h?: number, marketCap?: number): ScoreComponent {
+  if (!volume24h || !marketCap || marketCap <= 0) {
+    return { name: "McapVol", key: "mcapVolRatio", score: 0, active: false, reason: "no mcap/volume data" };
+  }
+
+  const turnover = volume24h / marketCap;
+  let score = 0;
+  let reason = "";
+  if (turnover > 0.5) { score = 70; reason = `Turnover ${(turnover * 100).toFixed(0)}% of mcap — heavy interest`; }
+  else if (turnover > 0.25) { score = 45; reason = `Turnover ${(turnover * 100).toFixed(0)}% of mcap — strong interest`; }
+  else if (turnover > 0.1) { score = 20; reason = `Turnover ${(turnover * 100).toFixed(0)}% of mcap — healthy`; }
+  else if (turnover < 0.02) { score = -15; reason = `Turnover ${(turnover * 100).toFixed(1)}% of mcap — thin/illiquid`; }
+  else { score = 0; reason = `Turnover ${(turnover * 100).toFixed(1)}% of mcap — normal`; }
+
+  return { name: "McapVol", key: "mcapVolRatio", score, active: true, reason };
+}
+
+function scoreVolume(volumeRatio: number | null): ScoreComponent {
+  if (volumeRatio === null) {
+    return { name: "Volume", key: "volume", score: 0, active: false, reason: "insufficient volume data" };
+  }
+
+  let score = 0;
+  let reason = "";
+  if (volumeRatio > 3) {
+    score = 70;
+    reason = `Volume spike ${volumeRatio.toFixed(1)}x average`;
+  } else if (volumeRatio > 2) {
+    score = 50;
+    reason = `High volume ${volumeRatio.toFixed(1)}x average`;
+  } else if (volumeRatio > 1.5) {
+    score = 25;
+    reason = `Above-average volume ${volumeRatio.toFixed(1)}x`;
+  } else if (volumeRatio < 0.5) {
+    score = -30;
+    reason = `Low volume ${volumeRatio.toFixed(1)}x average`;
+  } else {
+    reason = `Normal volume ${volumeRatio.toFixed(1)}x average`;
+  }
+
+  return { name: "Volume", key: "volume", score, active: true, reason };
+}
+
+function classifyStrength(
+  totalScore: number,
+  t: StrategyProfile["thresholds"]
+): SignalStrength {
+  if (totalScore >= t.strongBuy) return "strong_buy";
+  if (totalScore >= t.buy) return "buy";
+  if (totalScore <= t.strongSell) return "strong_sell";
+  if (totalScore <= t.sell) return "sell";
   return "neutral";
 }
 
-/** Momentum % and ATR-as-% of price for watchlist / sizing */
+/**
+ * Trend regime gate — protects against "catching a falling knife".
+ *
+ * A buy is only safe in a confirmed downtrend if there is a genuine reversal
+ * signature (deeply oversold RSI + a fresh bullish MACD crossover). Otherwise
+ * we veto the buy, which is one of the biggest drawdown-reducers: it stops the
+ * agent from repeatedly buying assets that are still trending down.
+ */
+function isFallingKnife(
+  signals: TechnicalSignals,
+  symbol: string
+): boolean {
+  const ema = signals.ema;
+  const macd = signals.macd;
+  const rsiVal = signals.rsi;
+  const mom = ind.momentum(getClosePrices(symbol), 10);
+
+  // Confirmed downtrend: fast EMA well below slow EMA + negative momentum.
+  const emaDiffPct = ema ? ((ema.fast - ema.slow) / ema.slow) * 100 : 0;
+  const strongDowntrend = emaDiffPct < -1.5 && (mom ?? 0) < -3;
+  if (!strongDowntrend) return false;
+
+  // Allow the buy only if a real reversal is forming.
+  const bullishReversal =
+    rsiVal !== null &&
+    rsiVal < 30 &&
+    macd !== null &&
+    macd.histogram > 0 &&
+    macd.macd > macd.signal;
+
+  return !bullishReversal;
+}
+
+/** Momentum %, ATR-as-% of price, and volume ratio for watchlist / sizing */
 export function getTokenMomentumMetrics(symbol: string): {
   momentum: number | null;
   atrPct: number | null;
+  volumeRatio: number | null;
 } {
   const closes = getClosePrices(symbol);
   const history = getPriceHistory(symbol);
+  const volumes = getVolumes(symbol);
   const mom = ind.momentum(closes, 10);
   const highs = history.map((p) => p.high);
   const lows = history.map((p) => p.low);
@@ -175,15 +272,23 @@ export function getTokenMomentumMetrics(symbol: string): {
   const price = closes.length > 0 ? closes[closes.length - 1] : null;
   const atrPct =
     atrVal !== null && price !== null && price > 0 ? (atrVal / price) * 100 : null;
-  return { momentum: mom, atrPct };
+  const volumeRatio = ind.volumeRatio(volumes, 20);
+  return { momentum: mom, atrPct, volumeRatio };
 }
 
 export function generateSignal(
   market: MarketData,
   signals: TechnicalSignals,
   fearGreed: number | null,
-  newsSentiment?: NewsSentiment | null
+  newsSentiment?: NewsSentiment | null,
+  strategy?: StrategyProfile | string | null
 ): TradeSignal {
+  const profile =
+    strategy && typeof strategy === "object"
+      ? strategy
+      : getStrategyProfile(strategy ?? DEFAULT_STRATEGY);
+  const weights = profile.signalWeights;
+
   if (isStablecoin(market.symbol)) {
     return {
       symbol: market.symbol,
@@ -202,37 +307,61 @@ export function generateSignal(
     scoreBollinger(signals.bollingerBands, market.price),
     scoreEma(signals.ema),
     scoreMomentum(market.symbol),
+    scoreVolume(signals.volumeRatio),
+    scoreMcapVolRatio(market.volume24h, market.marketCap),
     scoreSentiment(fearGreed),
     scoreNews(newsSentiment),
   ];
 
-  const activeComponents = components.filter((c) => c.weight > 0);
-  const totalWeight = activeComponents.reduce((s, c) => s + c.weight, 0);
+  // Active components weighted by the chosen strategy profile.
+  const activeComponents = components.filter((c) => c.active && weights[c.key] > 0);
+  const totalWeight = activeComponents.reduce((s, c) => s + weights[c.key], 0);
 
   let totalScore = 0;
   if (totalWeight > 0) {
-    totalScore = activeComponents.reduce((s, c) => s + (c.score * c.weight) / totalWeight, 0);
+    totalScore = activeComponents.reduce(
+      (s, c) => s + (c.score * weights[c.key]) / totalWeight,
+      0
+    );
   }
 
-  const strength = classifyStrength(totalScore);
-  const action =
+  let strength = classifyStrength(totalScore, profile.thresholds);
+  let action: TradeSignal["action"] =
     strength === "strong_buy" || strength === "buy"
       ? "buy"
       : strength === "strong_sell" || strength === "sell"
         ? "sell"
         : "hold";
 
-  const confidence = Math.min(1, activeComponents.length / 6);
+  const reasons = activeComponents.map((c) => c.reason);
+
+  // Safety gate: never buy into a confirmed downtrend without reversal proof.
+  // SafeTrade/Medium enforce it; Momentum allows earlier breakout entries.
+  if (
+    action === "buy" &&
+    profile.requireReversalConfirmation &&
+    isFallingKnife(signals, market.symbol)
+  ) {
+    action = "hold";
+    strength = "neutral";
+    totalScore = Math.min(totalScore, 0);
+    reasons.unshift("Buy vetoed — confirmed downtrend, no reversal confirmation");
+  }
+
+  // Confidence scales with how much of the strategy's weight is backed by data.
+  const totalProfileWeight = components.reduce((s, c) => s + weights[c.key], 0);
+  const confidence = totalProfileWeight > 0
+    ? Math.min(1, totalWeight / totalProfileWeight + 0.15)
+    : 0;
 
   let targetAllocation = 0;
   if (action === "buy") {
-    targetAllocation = strength === "strong_buy" ? 20 : 10;
+    targetAllocation = strength === "strong_buy" ? profile.alloc.strongBuy : profile.alloc.buy;
   }
-
-  const reasons = activeComponents.map((c) => c.reason);
 
   logger.signal("Signal generated", {
     symbol: market.symbol,
+    strategy: profile.name,
     score: Math.round(totalScore),
     strength,
     action,

@@ -44,6 +44,14 @@ export interface TradeSignal {
   reasons: string[];
   targetAllocationPct: number;
   confidence: number;
+  /** LLM technical analysis overlay (optional). */
+  ai?: {
+    summary: string;
+    verdict: "bullish" | "bearish" | "neutral" | "caution";
+    agreesWithSignal: boolean;
+    risks: string[];
+    confidence: number;
+  };
 }
 
 export interface TradeOrder {
@@ -52,6 +60,8 @@ export interface TradeOrder {
   symbol: string;
   side: "buy" | "sell";
   amountUsd: number;
+  /** For sells: full token quantity to swap (TWAK expects token units, not USD). */
+  fromTokenAmount?: number;
   fromToken: string;
   toToken: string;
   slippage: number;
@@ -68,6 +78,8 @@ export interface TradeResult {
   priceAtExecution: number;
   timestamp: number;
   error?: string;
+  /** Realized PnL (USD) booked when this trade closes/reduces a position. */
+  realizedPnl?: number;
 }
 
 export interface PortfolioPosition {
@@ -88,6 +100,8 @@ export interface PortfolioSnapshot {
   dailyPnl: number;
   totalPnl: number;
   totalPnlPct: number;
+  realizedPnl: number;
+  gasReserveUsd?: number;
   maxDrawdownPct: number;
   tradeCount: number;
 }
@@ -102,15 +116,57 @@ export interface RiskCheck {
 
 export interface AgentConfig {
   mode: "live" | "paper";
+  /** Active risk-tiered strategy preset: safe | medium | momentum. */
+  strategy: "safe" | "medium" | "momentum";
+  /** Multiplier on computed position size (set by the strategy preset). */
+  positionSizeMultiplier: number;
   tradeIntervalMs: number;
   maxPositionSizeUsd: number;
   maxDailyTrades: number;
   maxDrawdownPct: number;
   slippageTolerance: number;
   baseCurrency: string;
+  /** Currencies used to fund buys (USDT first, then BNB). Sells settle to baseCurrency. */
+  swapCurrencies: string[];
   maxPortfolioTokens: number;
   minTradeAmountUsd: number;
   rebalanceThresholdPct: number;
+  /** Hard stop-loss: exit a position once it falls this % below entry. */
+  stopLossPct: number;
+  /** Take-profit: lock gains once a position rises this % above entry. */
+  takeProfitPct: number;
+  /** Trailing stop activates once unrealized gain exceeds this %. */
+  trailingActivatePct: number;
+  /** Once active, exit if price gives back this many % points from peak gain. */
+  trailingGivebackPct: number;
+  /** Min confidence (0-1) required to open a new position. */
+  minBuyConfidence: number;
+  /** Block autonomous trades for this long after start/restart (ms). Manual trades bypass. */
+  startupCooldownMs: number;
+  /** When false, skip stop-loss / take-profit / trailing auto-sells each cycle. */
+  autoExitEnabled: boolean;
+  /** After a failed autonomous swap, block retries for this symbol (ms). */
+  failedSwapCooldownMs: number;
+  /** Max autonomous swap executions per trading cycle (manual bypasses). */
+  maxAutonomousTradesPerCycle: number;
+  /** Max estimated on-chain txs per UTC day for autonomous swaps (~2 per swap: approve + swap). */
+  maxOnChainTxPerDay: number;
+}
+
+export interface PortfolioHolding {
+  symbol: string;
+  amount: number;
+  priceUsd?: number;
+  valueUsd?: number;
+}
+
+export type ExitKind = "stop_loss" | "take_profit" | "trailing_stop";
+
+export interface RiskExit {
+  symbol: string;
+  kind: ExitKind;
+  reason: string;
+  pnlPct: number;
 }
 
 export interface LogEntry {

@@ -12,14 +12,15 @@ import { RiskPanel } from "@/components/dashboard/RiskPanel";
 import { ActivityFeed } from "@/components/dashboard/ActivityFeed";
 import { WalletPanel } from "@/components/dashboard/WalletPanel";
 import { AgentControls } from "@/components/dashboard/AgentControls";
+import { CommandPanel } from "@/components/dashboard/CommandPanel";
 import { useAgentConnection } from "@/hooks/useAgentConnection";
 
 const EquityChart = dynamic(
   () => import("@/components/dashboard/EquityChart").then((m) => m.EquityChart),
   { ssr: false }
 );
-const DrawdownChart = dynamic(
-  () => import("@/components/dashboard/DrawdownChart").then((m) => m.DrawdownChart),
+const AllocationChart = dynamic(
+  () => import("@/components/dashboard/AllocationChart").then((m) => m.AllocationChart),
   { ssr: false }
 );
 
@@ -93,8 +94,10 @@ export default function DashboardPage() {
     wallet,
     agentConfig,
     error,
+    handleStart,
     handleStop,
     handleSyncWallet,
+    handleResync,
     handleRegister,
     handleSwitchWallet,
     handleSaveConfig,
@@ -126,7 +129,8 @@ export default function DashboardPage() {
           <div className="relative z-10">
             <Header
               state={state}
-              onToggle={handleStop}
+              onStart={handleStart}
+              onStop={handleStop}
               connected={connected}
               error={error}
             />
@@ -143,7 +147,7 @@ export default function DashboardPage() {
               {/* Charts row */}
               <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
                 <EquityChart state={state} />
-                <DrawdownChart state={state} />
+                <AllocationChart state={state} onRefresh={handleResync} />
               </div>
 
               {/* Trades + Live Logs — main monitoring area */}
@@ -151,6 +155,9 @@ export default function DashboardPage() {
                 <TradeHistory trades={state.trades} />
                 <ActivityFeed activity={state.activity} />
               </div>
+
+              {/* Open Positions — grouped with trade monitoring */}
+              <PositionsTable positions={state.positions} />
 
               {/* Wallet + Risk */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -165,22 +172,23 @@ export default function DashboardPage() {
                 <RiskPanel state={state} />
               </div>
 
-              {/* Signals + Positions */}
+              {/* Signals */}
               <SignalMonitor signals={state.signals} />
-              <PositionsTable positions={state.positions} />
 
               {/* Agent Controls */}
               <AgentControls
                 connected={connected}
                 config={agentConfig ? {
                   mode: agentConfig.mode || state.mode,
+                  strategy: agentConfig.strategy,
                   maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 100,
-                  tradeIntervalMs: agentConfig.tradeIntervalMs ?? 300000,
+                  tradeIntervalMs: agentConfig.tradeIntervalMs ?? 3600000,
                   maxDrawdownPct: agentConfig.maxDrawdownPct,
-                  slippageTolerance: agentConfig.slippageTolerance ?? 1.5,
+                  slippageTolerance: agentConfig.slippageTolerance ?? 1,
                   maxDailyTrades: agentConfig.maxDailyTrades,
-                  maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 5,
+                  maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 3,
                   baseCurrency: agentConfig.baseCurrency,
+                  swapCurrencies: agentConfig.swapCurrencies,
                 } : null}
                 onSave={handleSaveConfig}
               />
@@ -195,6 +203,9 @@ export default function DashboardPage() {
               </footer>
             </main>
           </div>
+
+          {/* Floating Command Assistant */}
+          <CommandPanel connected={connected} />
         </div>
       )}
     </>

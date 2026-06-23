@@ -21,7 +21,7 @@ export function analyzeMarkets(
 
     const technicals = computeSignals(market.symbol);
     const news = newsSentiment?.get(market.symbol) ?? null;
-    const signal = generateSignal(market, technicals, fearGreedIndex, news);
+    const signal = generateSignal(market, technicals, fearGreedIndex, news, config.strategy);
     signals.push(signal);
   }
 
@@ -46,6 +46,12 @@ export function analyzeMarkets(
 
 /**
  * Select the best trades to execute this cycle, respecting portfolio limits.
+ *
+ * Holding policy: positions are HELD, not churned. We never sell an existing
+ * position just to free a slot for a new entry. Signal-driven exits require a
+ * decisive `strong_sell` (clear reversal); mild weakness is held and left to
+ * the protective exits (stop-loss / take-profit / trailing) to manage. When all
+ * slots are full, new buys are simply skipped — no forced rotation.
  */
 export function selectTrades(
   signals: TradeSignal[],
@@ -54,20 +60,29 @@ export function selectTrades(
 ): TradeSignal[] {
   const selected: TradeSignal[] = [];
 
-  // Priority 1: sells for existing positions with sell signals
+  // Priority 1: close positions only on a decisive reversal (strong_sell).
+  // Protective exits (stop/TP/trailing) are injected separately by the agent.
   const sells = signals.filter(
-    (s) => s.action === "sell" && existingPositions.has(s.symbol)
+    (s) =>
+      s.action === "sell" &&
+      s.strength === "strong_sell" &&
+      existingPositions.has(s.symbol)
   );
   selected.push(...sells);
 
-  // Priority 2: buys — strongest signals first, up to available slots
+  // Priority 2: buys — only into genuinely free slots. A position leaving via
+  // a strong_sell this cycle frees its slot, but we never sell to make room.
   const buys = signals.filter((s) => s.action === "buy");
-  const availableSlots = config.maxPortfolioTokens - existingPositions.size + sells.length;
+  const openAfterSells = existingPositions.size - sells.length;
+  const availableSlots = Math.max(0, config.maxPortfolioTokens - openAfterSells);
 
+  let buysAdded = 0;
+  const maxBuysPerCycle = Math.max(0, config.maxAutonomousTradesPerCycle);
   for (const buy of buys) {
-    if (selected.filter((s) => s.action === "buy").length >= availableSlots) break;
-    if (selected.filter((s) => s.action === "buy").length >= 2) break; // Max 2 buys per cycle
+    if (buysAdded >= availableSlots) break;
+    if (buysAdded >= maxBuysPerCycle) break;
     selected.push(buy);
+    buysAdded++;
   }
 
   return selected;

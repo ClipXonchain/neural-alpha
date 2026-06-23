@@ -8,9 +8,11 @@ import {
   Check,
   RefreshCw,
   Shield,
-  Smartphone,
   ExternalLink,
   ArrowDownToLine,
+  Coins,
+  TrendingUp,
+  TrendingDown,
 } from "lucide-react";
 import { cn, formatUsd, formatMetric, shortenHash } from "@/lib/utils";
 import type { WalletSnapshot } from "@/lib/agent-api";
@@ -30,7 +32,6 @@ export function WalletPanel({
   connected,
   onSync,
   onRegister,
-  onSwitchMode,
 }: WalletPanelProps) {
   const [copied, setCopied] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -163,6 +164,9 @@ export function WalletPanel({
         </div>
       </div>
 
+      {/* Token holdings — scanned via Binance Web3 public API */}
+      <TokenHoldings positions={wallet?.binancePositions} />
+
       {/* Deposit instructions */}
       <div className="rounded-lg border border-cyan/15 bg-cyan/5 p-3 mb-4">
         <div className="flex items-start gap-2">
@@ -171,8 +175,7 @@ export function WalletPanel({
             <p className="text-xs font-semibold text-text-primary mb-1">Fund your agent</p>
             <p className="text-[11px] text-text-secondary leading-relaxed">
               Send <strong className="text-neon">USDT</strong> on BSC to the address above, then click
-              Sync Balance. Keep some <strong>BNB</strong> for gas. Set{" "}
-              <code className="text-cyan">AGENT_MODE=live</code> in .env for real swaps via TWAK.
+              Sync Balance. Keep some <strong>BNB</strong> for gas.
             </p>
           </div>
         </div>
@@ -188,16 +191,6 @@ export function WalletPanel({
         >
           <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
           Sync Balance
-        </button>
-
-        <button
-          onClick={() => onSwitchMode("walletconnect")}
-          disabled={!connected}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-surface-overlay text-text-secondary border border-border-dim hover:text-text-primary disabled:opacity-40 transition-colors"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          <Smartphone className="size-3.5" />
-          Trust Wallet
         </button>
 
         <button
@@ -228,11 +221,100 @@ export function WalletPanel({
           {actionMsg}
         </p>
       )}
-
-      <p className="text-[9px] text-text-muted mt-3 leading-relaxed">
-        Self-custody: all trades signed locally via TWAK. Keys never leave your wallet.
-        Optional phone signing via Trust Wallet (WalletConnect).
-      </p>
     </motion.div>
+  );
+}
+
+type BinancePosition = NonNullable<WalletSnapshot["binancePositions"]>[number];
+
+/** Match backend / portfolio MIN_POSITION_VALUE_USD — hide dust & airdrop spam. */
+const DUST_THRESHOLD_USD = 1;
+
+function TokenHoldings({ positions }: { positions?: BinancePosition[] }) {
+  if (!positions || positions.length === 0) return null;
+
+  const withValue = positions.map((p) => ({
+    ...p,
+    valueUsd: p.valueUsd > 0 ? p.valueUsd : p.remainQty * p.price,
+  }));
+  const sorted = [...withValue].sort((a, b) => b.valueUsd - a.valueUsd);
+  const visible = sorted.filter((p) => p.valueUsd >= DUST_THRESHOLD_USD);
+  const dustCount = sorted.length - visible.length;
+  const totalUsd = visible.reduce((sum, p) => sum + p.valueUsd, 0);
+
+  return (
+    <div className="rounded-lg bg-surface-overlay/40 p-3 mb-4">
+      <div className="flex items-center justify-between mb-2.5">
+        <div className="flex items-center gap-1.5">
+          <Coins className="size-3.5 text-cyan" />
+          <p className="text-[10px] text-text-muted uppercase tracking-wider">
+            Token Holdings
+          </p>
+        </div>
+        <span
+          className="text-[10px] text-text-secondary tabular-nums font-semibold"
+          style={{ fontFamily: "var(--font-mono)" }}
+        >
+          {formatUsd(totalUsd)}
+        </span>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        {visible.map((p) => {
+          const up = p.percentChange24h >= 0;
+          return (
+            <div
+              key={`${p.symbol}-${p.contractAddress}`}
+              className="flex items-center justify-between gap-2 py-1 border-b border-border-dim/40 last:border-b-0"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <span
+                  className="text-[12px] font-semibold text-text-primary truncate max-w-[110px]"
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  {p.symbol}
+                </span>
+                <span
+                  className="text-[10px] text-text-muted tabular-nums"
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  {formatMetric(p.remainQty, 4)}
+                </span>
+              </div>
+              <div className="flex items-center gap-2.5 shrink-0">
+                <span
+                  className={cn(
+                    "flex items-center gap-0.5 text-[10px] tabular-nums",
+                    up ? "text-neon" : "text-danger"
+                  )}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  {up ? <TrendingUp className="size-2.5" /> : <TrendingDown className="size-2.5" />}
+                  {Math.abs(p.percentChange24h).toFixed(1)}%
+                </span>
+                <span
+                  className="text-[11px] text-text-primary tabular-nums font-semibold w-12 text-right"
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  {formatUsd(p.valueUsd)}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {dustCount > 0 && (
+        <p
+          className="text-[9px] text-text-muted mt-2"
+          style={{ fontFamily: "var(--font-mono)" }}
+        >
+          +{dustCount} dust/spam token{dustCount > 1 ? "s" : ""} hidden (&lt; $1)
+        </p>
+      )}
+      <p className="text-[9px] text-text-muted mt-1.5 leading-relaxed">
+        Live scan via Binance Web3 public API · no API key required
+      </p>
+    </div>
   );
 }

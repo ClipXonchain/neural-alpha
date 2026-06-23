@@ -7,6 +7,7 @@ dotenvConfig({ path: resolve(import.meta.dirname, "../../.env") });
 import { TradingAgent } from "./agent.js";
 import { createBridge } from "./integrations/create-bridge.js";
 import { logger } from "./utils/logger.js";
+import { initAgentStore } from "./db/store.js";
 import { startDashboard } from "./web/server.js";
 
 /**
@@ -36,6 +37,21 @@ import { startDashboard } from "./web/server.js";
  *   TRADE_INTERVAL_MS         - Cycle interval in ms
  *   DASHBOARD_PORT            - Web UI port (default: 3847)
  */
+
+// Prevent TWAK stdio transport EPIPE from crashing the process.
+// Also suppress EADDRINUSE (handled by server.on('error')).
+process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
+  if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") {
+    logger.warn("Pipe error (TWAK transport) — suppressed", { code: err.code });
+    return;
+  }
+  if (err.code === "EADDRINUSE") {
+    logger.warn("Port in use — handled by server retry logic", { code: err.code });
+    return;
+  }
+  logger.error("Uncaught exception", { error: String(err) });
+  process.exit(1);
+});
 
 async function main() {
   const mode = process.env.AGENT_MODE || "paper";
@@ -78,18 +94,25 @@ async function main() {
     cmcIntegration: "https://coinmarketcap.com/api/agent/#dev-steps",
   });
 
+  await initAgentStore();
+
   const agent = new TradingAgent(bridge, initialCash, source);
   startDashboard(agent);
 
-  process.on("SIGINT", () => {
-    logger.info("Received SIGINT — shutting down gracefully");
+  let shuttingDown = false;
+  const gracefulShutdown = (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    logger.info(`Received ${signal} — shutting down gracefully`);
     agent.stop();
-  });
+    setTimeout(() => {
+      logger.warn("Graceful shutdown timeout — forcing exit");
+      process.exit(1);
+    }, 10_000).unref();
+  };
 
-  process.on("SIGTERM", () => {
-    logger.info("Received SIGTERM — shutting down");
-    agent.stop();
-  });
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 
   await agent.start();
 
@@ -97,15 +120,11 @@ async function main() {
   const trades = portfolio.getTradeHistory();
   const snapshots = portfolio.getSnapshots();
 
-  console.log("\n=== Final Summary ===");
-  console.log(`Total trades: ${trades.length}`);
-  console.log(`Successful: ${trades.filter((t) => t.success).length}`);
-  if (snapshots.length > 0) {
-    const final = snapshots[snapshots.length - 1];
-    console.log(`Final portfolio value: $${final.totalValueUsd.toFixed(2)}`);
-    console.log(`Total PnL: $${final.totalPnl.toFixed(2)} (${final.totalPnlPct.toFixed(2)}%)`);
-    console.log(`Max drawdown: ${final.maxDrawdownPct.toFixed(2)}%`);
-  }
+  logger.info("Agent loop finished", {
+    totalTrades: trades.length,
+    successful: trades.filter((t) => t.success).length,
+    finalValue: snapshots.length > 0 ? snapshots[snapshots.length - 1].totalValueUsd : 0,
+  });
 }
 
 main().catch((err) => {

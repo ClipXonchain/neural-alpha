@@ -11,6 +11,9 @@ out/
 # TypeScript
 *.tsbuildinfo
 
+# Runtime agent port (written by agent on startup — do not commit)
+.agent-api-port
+
 # Environment & secrets — NEVER commit
 .env
 .env.local
@@ -55,3 +58,10 @@ Thumbs.db
 
 # Cursor local state
 .cursor/
+
+# PM2
+.pm2/
+
+# Agent runtime state
+tmp-state.json
+.agent-api-port

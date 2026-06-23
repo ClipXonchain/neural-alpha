@@ -19,7 +19,15 @@ async function cmcFetch(path: string, apiKey: string): Promise<Record<string, un
     }
     return (await res.json()) as Record<string, unknown>;
   } catch (err) {
-    logger.warn("CMC Pro API fetch failed", { url, error: String(err) });
+    const cause =
+      err instanceof Error && "cause" in err && err.cause != null
+        ? String(err.cause)
+        : undefined;
+    logger.warn("CMC Pro API fetch failed", {
+      url,
+      error: String(err),
+      ...(cause ? { cause } : {}),
+    });
     return null;
   }
 }

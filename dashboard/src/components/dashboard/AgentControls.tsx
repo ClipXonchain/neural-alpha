@@ -8,11 +8,17 @@ import {
   Check,
   AlertTriangle,
   RotateCcw,
+  Shield,
+  Scale,
+  Rocket,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
+type StrategyName = "safe" | "medium" | "momentum";
+
 interface AgentConfig {
   mode: string;
+  strategy?: StrategyName;
   maxPositionSizeUsd: number;
   tradeIntervalMs: number;
   maxDrawdownPct: number;
@@ -20,6 +26,104 @@ interface AgentConfig {
   maxDailyTrades: number;
   maxPortfolioTokens: number;
   baseCurrency: string;
+  swapCurrencies?: string[];
+}
+
+const STRATEGY_OPTIONS: {
+  id: StrategyName;
+  label: string;
+  desc: string;
+  icon: typeof Shield;
+  accent: string;
+}[] = [
+  {
+    id: "safe",
+    label: "SafeTrade",
+    desc: "Lowest drawdown · tight stops · smallest size",
+    icon: Shield,
+    accent: "neon",
+  },
+  {
+    id: "medium",
+    label: "Medium",
+    desc: "Balanced risk/return · moderate stops",
+    icon: Scale,
+    accent: "cyan",
+  },
+  {
+    id: "momentum",
+    label: "Momentum",
+    desc: "Highest ROI · chases volume · wider stops",
+    icon: Rocket,
+    accent: "amber-400",
+  },
+];
+
+function StrategySelector({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: StrategyName;
+  onChange: (v: StrategyName) => void;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-2 mb-4">
+      <label
+        className="text-[11px] text-text-secondary font-medium"
+        style={{ fontFamily: "var(--font-body)" }}
+      >
+        Strategy Preset
+        <span className="text-text-muted ml-1.5">
+          (SafeTrade &lt; Medium &lt; Momentum — risk &amp; expected ROI rise left→right)
+        </span>
+      </label>
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+        {STRATEGY_OPTIONS.map((opt) => {
+          const Icon = opt.icon;
+          const selected = value === opt.id;
+          return (
+            <button
+              key={opt.id}
+              type="button"
+              disabled={disabled}
+              onClick={() => onChange(opt.id)}
+              className={cn(
+                "flex flex-col gap-1.5 text-left rounded-lg border px-3 py-2.5 transition-all",
+                "disabled:opacity-30 disabled:cursor-not-allowed",
+                selected
+                  ? "bg-neon/8 border-neon/40 ring-1 ring-neon/10"
+                  : "bg-surface border-border-dim hover:border-border-glow"
+              )}
+            >
+              <div className="flex items-center gap-2">
+                <Icon
+                  className={cn(
+                    "size-3.5",
+                    selected ? "text-neon" : "text-text-muted"
+                  )}
+                />
+                <span
+                  className={cn(
+                    "text-[12px] font-semibold",
+                    selected ? "text-text-primary" : "text-text-secondary"
+                  )}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  {opt.label}
+                </span>
+                {selected && <Check className="size-3 text-neon ml-auto" />}
+              </div>
+              <span className="text-[10px] text-text-muted leading-tight">
+                {opt.desc}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 interface AgentControlsProps {
@@ -122,18 +226,20 @@ function ReadonlyField({
 }
 
 export function AgentControls({ connected, config, onSave }: AgentControlsProps) {
+  const [strategy, setStrategy] = useState<StrategyName>("medium");
   const [maxPos, setMaxPos] = useState(100);
-  const [interval, setInterval_] = useState(5);
-  const [drawdown, setDrawdown] = useState(25);
-  const [slippage, setSlippage] = useState(1.5);
-  const [maxDaily, setMaxDaily] = useState(10);
-  const [maxPositions, setMaxPositions] = useState(5);
+  const [interval, setInterval_] = useState(60);
+  const [drawdown, setDrawdown] = useState(20);
+  const [slippage, setSlippage] = useState(1);
+  const [maxDaily, setMaxDaily] = useState(5);
+  const [maxPositions, setMaxPositions] = useState(3);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
   const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     if (config && !dirty) {
+      if (config.strategy) setStrategy(config.strategy);
       setMaxPos(config.maxPositionSizeUsd);
       setInterval_(config.tradeIntervalMs / 60000);
       setDrawdown(config.maxDrawdownPct);
@@ -160,6 +266,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
     setMessage(null);
     try {
       const result = await onSave({
+        strategy,
         maxPositionSizeUsd: maxPos,
         tradeIntervalMs: interval * 60000,
         maxDrawdownPct: drawdown,
@@ -212,6 +319,17 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
           changes apply next cycle
         </span>
       </div>
+
+      {/* Strategy preset selector */}
+      <StrategySelector
+        value={strategy}
+        disabled={!connected}
+        onChange={(v) => {
+          setStrategy(v);
+          setDirty(true);
+          setMessage(null);
+        }}
+      />
 
       {/* Controls Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 mb-4">
@@ -285,14 +403,14 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
           disabled={!connected}
         />
         <ReadonlyField
-          label="Base Currency"
-          value={config?.baseCurrency || "USDT"}
-          hint="Quote asset for trades"
+          label="Swap Currencies"
+          value={(config?.swapCurrencies || ["USDT"]).join(" + ")}
+          hint={`All buys and sells use USDT only; BNB reserved for gas`}
         />
         <ReadonlyField
-          label="Emergency Mode"
-          value={config ? "OFF" : "—"}
-          hint="Triggers at 80% of drawdown"
+          label="Risk Guard"
+          value={`${drawdown}%`}
+          hint="New buys pause near limit"
           color="text-neon"
         />
       </div>

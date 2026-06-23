@@ -4,10 +4,10 @@ import { motion } from "framer-motion";
 import {
   Activity,
   Cpu,
-  Pause,
   Play,
   Radio,
   Settings,
+  Square,
   Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -15,14 +15,14 @@ import type { AgentState } from "@/lib/mock-data";
 
 interface HeaderProps {
   state: AgentState;
-  onToggle: () => void;
+  onStart: () => void;
+  onStop: () => void;
   connected?: boolean;
   error?: string | null;
 }
 
-export function Header({ state, onToggle, connected }: HeaderProps) {
+export function Header({ state, onStart, onStop, connected }: HeaderProps) {
   const isRunning = state.status === "running";
-  const isEmergency = state.status === "emergency";
 
   const uptimeHrs = Math.floor(state.uptime / 3600);
   const uptimeMin = Math.floor((state.uptime % 3600) / 60);
@@ -64,29 +64,26 @@ export function Header({ state, onToggle, connected }: HeaderProps) {
           transition={{ delay: 0.2 }}
           className={cn(
             "relative flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono font-medium",
-            isEmergency
-              ? "bg-danger/10 text-danger border border-danger/30"
-              : isRunning
-                ? "bg-neon/10 text-neon border border-neon/20"
-                : "bg-warning/10 text-warning border border-warning/20"
+            isRunning
+              ? "bg-neon/10 text-neon border border-neon/20"
+              : "bg-warning/10 text-warning border border-warning/20"
           )}
         >
           <span className="relative flex size-2">
             <span
               className={cn(
                 "absolute inline-flex size-full rounded-full opacity-75",
-                isRunning && "animate-ping bg-neon",
-                isEmergency && "animate-ping bg-danger"
+                isRunning && "animate-ping bg-neon"
               )}
             />
             <span
               className={cn(
                 "relative inline-flex size-2 rounded-full",
-                isRunning ? "bg-neon" : isEmergency ? "bg-danger" : "bg-warning"
+                isRunning ? "bg-neon" : "bg-warning"
               )}
             />
           </span>
-          {state.status.toUpperCase()}
+          {isRunning ? "RUNNING" : "STOPPED"}
         </motion.div>
 
         <div className="hidden md:flex items-center gap-3 text-xs font-mono text-text-secondary">
@@ -159,7 +156,7 @@ export function Header({ state, onToggle, connected }: HeaderProps) {
         <motion.button
           whileHover={{ scale: 1.05 }}
           whileTap={{ scale: 0.95 }}
-          onClick={onToggle}
+          onClick={isRunning ? onStop : onStart}
           className={cn(
             "flex items-center gap-2 px-4 py-2 rounded-lg font-mono text-xs font-semibold transition-all",
             isRunning
@@ -169,7 +166,7 @@ export function Header({ state, onToggle, connected }: HeaderProps) {
         >
           {isRunning ? (
             <>
-              <Pause className="size-3.5" /> PAUSE
+              <Square className="size-3.5" /> STOP
             </>
           ) : (
             <>

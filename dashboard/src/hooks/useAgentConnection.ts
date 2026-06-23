@@ -9,13 +9,15 @@ import {
   fetchWallet,
   fetchLogs,
   subscribeAgentEvents,
+  startAgent,
   stopAgent,
+  resyncAgent,
   syncWallet,
   registerCompetition,
   switchWalletMode,
   saveAgentConfig,
 } from "@/lib/agent-api";
-import { mapTrack1ToDashboard } from "@/lib/map-agent-state";
+import { mapTrack1ToDashboard, enrichStateWithWallet } from "@/lib/map-agent-state";
 import { generateMockState } from "@/lib/mock-data";
 
 export function useAgentConnection() {
@@ -27,18 +29,26 @@ export function useAgentConnection() {
   const [error, setError] = useState<string | null>(null);
   const [agentConfig, setAgentConfig] = useState<Track1Snapshot["config"] | null>(null);
   const connectedRef = useRef(false);
+  const walletRef = useRef<WalletSnapshot | null>(null);
 
   const refreshWallet = useCallback(async () => {
     if (!connectedRef.current) return;
     try {
       const w = await fetchWallet();
       setWallet(w);
-    } catch { /* agent may not have TWAK */ }
+      walletRef.current = w;
+      setState((prev) =>
+        prev ? enrichStateWithWallet(prev, w?.binancePositions) : prev
+      );
+    } catch {
+      /* agent may not have TWAK */
+    }
   }, []);
 
   useEffect(() => {
     let unsub: (() => void) | undefined;
     let cancelled = false;
+    let walletPoll: ReturnType<typeof setInterval> | undefined;
 
     (async () => {
       const ok = await checkAgentConnection();
@@ -58,10 +68,26 @@ export function useAgentConnection() {
           setAgentConfig(snap.config);
           await refreshWallet();
 
+          // Keep the Binance Web3 holdings overlay fresh.
+          // Use a shorter initial interval to catch the first successful response
+          // after the agent finishes its initial sync, then switch to 30s.
+          let pollCount = 0;
+          walletPoll = setInterval(() => {
+            pollCount++;
+            void refreshWallet();
+            if (pollCount >= 6 && walletPoll) {
+              clearInterval(walletPoll);
+              walletPoll = setInterval(() => { void refreshWallet(); }, 30000);
+            }
+          }, 5000);
+
           unsub = subscribeAgentEvents(
             (liveSnap) => {
               setState((prev) => {
-                const next = mapTrack1ToDashboard(liveSnap, logs);
+                const next = enrichStateWithWallet(
+                  mapTrack1ToDashboard(liveSnap, logs),
+                  walletRef.current?.binancePositions
+                );
                 if (prev && next.activity.length <= 1) {
                   next.activity = prev.activity;
                 }
@@ -103,17 +129,28 @@ export function useAgentConnection() {
     return () => {
       cancelled = true;
       unsub?.();
+      if (walletPoll) clearInterval(walletPoll);
     };
   }, [refreshWallet]);
+
+  const handleStart = useCallback(async () => {
+    if (connectedRef.current) {
+      await startAgent();
+      const snap = await fetchAgentState();
+      setState(enrichStateWithWallet(mapTrack1ToDashboard(snap), walletRef.current?.binancePositions));
+    } else {
+      setState((prev) =>
+        prev ? { ...prev, status: "running" } : prev
+      );
+    }
+  }, []);
 
   const handleStop = useCallback(async () => {
     if (connectedRef.current) {
       await stopAgent();
       setState((prev) => (prev ? { ...prev, status: "paused" } : prev));
     } else {
-      setState((prev) =>
-        prev ? { ...prev, status: prev.status === "running" ? "paused" : "running" } : prev
-      );
+      setState((prev) => (prev ? { ...prev, status: "paused" } : prev));
     }
   }, []);
 
@@ -121,8 +158,23 @@ export function useAgentConnection() {
     const result = await syncWallet();
     await refreshWallet();
     const snap = await fetchAgentState();
-    setState(mapTrack1ToDashboard(snap));
+    setState(enrichStateWithWallet(mapTrack1ToDashboard(snap), walletRef.current?.binancePositions));
     return result;
+  }, [refreshWallet]);
+
+  const handleResync = useCallback(async () => {
+    if (!connectedRef.current) return;
+    await resyncAgent();
+    await refreshWallet();
+    const snap = await fetchAgentState();
+    setState((prev) => {
+      const next = enrichStateWithWallet(
+        mapTrack1ToDashboard(snap),
+        walletRef.current?.binancePositions
+      );
+      if (prev) next.activity = prev.activity;
+      return next;
+    });
   }, [refreshWallet]);
 
   const handleRegister = useCallback(async () => {
@@ -155,8 +207,10 @@ export function useAgentConnection() {
     bridgeSource,
     agentConfig,
     error,
+    handleStart,
     handleStop,
     handleSyncWallet,
+    handleResync,
     handleRegister,
     handleSwitchWallet,
     handleSaveConfig,

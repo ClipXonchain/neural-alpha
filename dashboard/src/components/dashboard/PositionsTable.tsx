@@ -2,7 +2,7 @@
 
 import { motion, AnimatePresence } from "framer-motion";
 import { Layers, ExternalLink } from "lucide-react";
-import { cn, formatUsd, formatPct } from "@/lib/utils";
+import { cn, formatUsd, formatPct, formatTradePrice } from "@/lib/utils";
 import type { Position } from "@/lib/mock-data";
 
 const TOKEN_COLORS: Record<string, string> = {
@@ -98,10 +98,10 @@ export function PositionsTable({ positions }: { positions: Position[] }) {
                     {pos.amount.toFixed(4)}
                   </td>
                   <td className="text-right py-3 pr-4 text-text-secondary tabular-nums">
-                    {formatUsd(pos.entryPrice)}
+                    {formatTradePrice(pos.entryPrice)}
                   </td>
                   <td className="text-right py-3 pr-4 text-text-primary tabular-nums">
-                    {formatUsd(pos.currentPrice)}
+                    {formatTradePrice(pos.currentPrice)}
                   </td>
                   <td className="text-right py-3 pr-4">
                     <div className="flex flex-col items-end">
