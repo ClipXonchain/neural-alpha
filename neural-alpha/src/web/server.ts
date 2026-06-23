@@ -173,8 +173,10 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
     return true;
   }
 
-  // All other endpoints require authentication
-  if (!isAuthenticated(req)) {
+  // Monitoring (GET) is public; any state-changing request (POST) requires the
+  // API secret. This keeps a public dashboard read-only while blocking anyone
+  // from starting/stopping/trading/configuring the live agent.
+  if (req.method !== "GET" && !isAuthenticated(req)) {
     json(req, res, { error: "Unauthorized" }, 401);
     return true;
   }

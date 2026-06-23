@@ -24,6 +24,7 @@ interface WalletPanelProps {
   onSync: () => Promise<{ usdtBalance: number; synced: boolean }>;
   onRegister: () => Promise<Record<string, unknown>>;
   onSwitchMode: (mode: "local" | "walletconnect") => Promise<Record<string, unknown>>;
+  readOnly?: boolean;
 }
 
 export function WalletPanel({
@@ -32,6 +33,7 @@ export function WalletPanel({
   connected,
   onSync,
   onRegister,
+  readOnly,
 }: WalletPanelProps) {
   const [copied, setCopied] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -167,41 +169,47 @@ export function WalletPanel({
       {/* Token holdings — scanned via Binance Web3 public API */}
       <TokenHoldings positions={wallet?.binancePositions} />
 
-      {/* Deposit instructions */}
-      <div className="rounded-lg border border-cyan/15 bg-cyan/5 p-3 mb-4">
-        <div className="flex items-start gap-2">
-          <ArrowDownToLine className="size-4 text-cyan shrink-0 mt-0.5" />
-          <div>
-            <p className="text-xs font-semibold text-text-primary mb-1">Fund your agent</p>
-            <p className="text-[11px] text-text-secondary leading-relaxed">
-              Send <strong className="text-neon">USDT</strong> on BSC to the address above, then click
-              Sync Balance. Keep some <strong>BNB</strong> for gas.
-            </p>
+      {/* Deposit instructions — hidden on public/read-only deployments */}
+      {!readOnly && (
+        <div className="rounded-lg border border-cyan/15 bg-cyan/5 p-3 mb-4">
+          <div className="flex items-start gap-2">
+            <ArrowDownToLine className="size-4 text-cyan shrink-0 mt-0.5" />
+            <div>
+              <p className="text-xs font-semibold text-text-primary mb-1">Fund your agent</p>
+              <p className="text-[11px] text-text-secondary leading-relaxed">
+                Send <strong className="text-neon">USDT</strong> on BSC to the address above, then click
+                Sync Balance. Keep some <strong>BNB</strong> for gas.
+              </p>
+            </div>
           </div>
         </div>
-      </div>
+      )}
 
       {/* Actions */}
       <div className="flex flex-wrap gap-2">
-        <button
-          onClick={handleSync}
-          disabled={!connected || syncing}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-neon/10 text-neon border border-neon/20 hover:bg-neon/20 disabled:opacity-40 transition-colors"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
-          Sync Balance
-        </button>
+        {!readOnly && (
+          <button
+            onClick={handleSync}
+            disabled={!connected || syncing}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-neon/10 text-neon border border-neon/20 hover:bg-neon/20 disabled:opacity-40 transition-colors"
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
+            <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
+            Sync Balance
+          </button>
+        )}
 
-        <button
-          onClick={handleRegister}
-          disabled={!connected || registering || wallet?.registered}
-          className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-cyan/10 text-cyan border border-cyan/20 hover:bg-cyan/20 disabled:opacity-40 transition-colors"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          <Shield className="size-3.5" />
-          {wallet?.registered ? "Registered" : "Register Competition"}
-        </button>
+        {!readOnly && (
+          <button
+            onClick={handleRegister}
+            disabled={!connected || registering || wallet?.registered}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-cyan/10 text-cyan border border-cyan/20 hover:bg-cyan/20 disabled:opacity-40 transition-colors"
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
+            <Shield className="size-3.5" />
+            {wallet?.registered ? "Registered" : "Register Competition"}
+          </button>
+        )}
 
         {wallet?.address && (
           <a

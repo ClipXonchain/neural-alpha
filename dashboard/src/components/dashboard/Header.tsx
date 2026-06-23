@@ -4,6 +4,7 @@ import { motion } from "framer-motion";
 import {
   Activity,
   Cpu,
+  Eye,
   Play,
   Radio,
   Settings,
@@ -19,9 +20,10 @@ interface HeaderProps {
   onStop: () => void;
   connected?: boolean;
   error?: string | null;
+  readOnly?: boolean;
 }
 
-export function Header({ state, onStart, onStop, connected }: HeaderProps) {
+export function Header({ state, onStart, onStop, connected, readOnly }: HeaderProps) {
   const isRunning = state.status === "running";
 
   const uptimeHrs = Math.floor(state.uptime / 3600);
@@ -152,32 +154,43 @@ export function Header({ state, onStart, onStop, connected }: HeaderProps) {
           </span>
         </motion.div>
 
-        {/* Controls */}
-        <motion.button
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          onClick={isRunning ? onStop : onStart}
-          className={cn(
-            "flex items-center gap-2 px-4 py-2 rounded-lg font-mono text-xs font-semibold transition-all",
-            isRunning
-              ? "bg-warning/10 text-warning border border-warning/30 hover:bg-warning/20"
-              : "bg-neon/10 text-neon border border-neon/30 hover:bg-neon/20"
-          )}
-        >
-          {isRunning ? (
-            <>
-              <Square className="size-3.5" /> STOP
-            </>
-          ) : (
-            <>
-              <Play className="size-3.5" /> START
-            </>
-          )}
-        </motion.button>
+        {/* Controls — hidden on public/read-only deployments */}
+        {readOnly ? (
+          <span
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg glass-raised text-[11px] font-mono text-text-muted"
+            title="Public dashboard — monitoring only"
+          >
+            <Eye className="size-3.5" /> MONITORING
+          </span>
+        ) : (
+          <>
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={isRunning ? onStop : onStart}
+              className={cn(
+                "flex items-center gap-2 px-4 py-2 rounded-lg font-mono text-xs font-semibold transition-all",
+                isRunning
+                  ? "bg-warning/10 text-warning border border-warning/30 hover:bg-warning/20"
+                  : "bg-neon/10 text-neon border border-neon/30 hover:bg-neon/20"
+              )}
+            >
+              {isRunning ? (
+                <>
+                  <Square className="size-3.5" /> STOP
+                </>
+              ) : (
+                <>
+                  <Play className="size-3.5" /> START
+                </>
+              )}
+            </motion.button>
 
-        <button className="flex items-center justify-center size-9 rounded-lg glass-raised text-text-secondary hover:text-text-primary transition-colors">
-          <Settings className="size-4" />
-        </button>
+            <button className="flex items-center justify-center size-9 rounded-lg glass-raised text-text-secondary hover:text-text-primary transition-colors">
+              <Settings className="size-4" />
+            </button>
+          </>
+        )}
       </div>
     </header>
   );

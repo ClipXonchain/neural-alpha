@@ -14,6 +14,7 @@ import { WalletPanel } from "@/components/dashboard/WalletPanel";
 import { AgentControls } from "@/components/dashboard/AgentControls";
 import { CommandPanel } from "@/components/dashboard/CommandPanel";
 import { useAgentConnection } from "@/hooks/useAgentConnection";
+import { READ_ONLY } from "@/lib/utils";
 
 const EquityChart = dynamic(
   () => import("@/components/dashboard/EquityChart").then((m) => m.EquityChart),
@@ -133,6 +134,7 @@ export default function DashboardPage() {
               onStop={handleStop}
               connected={connected}
               error={error}
+              readOnly={READ_ONLY}
             />
 
             <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
@@ -147,7 +149,7 @@ export default function DashboardPage() {
               {/* Charts row */}
               <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
                 <EquityChart state={state} />
-                <AllocationChart state={state} onRefresh={handleResync} />
+                <AllocationChart state={state} onRefresh={READ_ONLY ? undefined : handleResync} />
               </div>
 
               {/* Trades + Live Logs — main monitoring area */}
@@ -168,6 +170,7 @@ export default function DashboardPage() {
                   onSync={handleSyncWallet}
                   onRegister={handleRegister}
                   onSwitchMode={handleSwitchWallet}
+                  readOnly={READ_ONLY}
                 />
                 <RiskPanel state={state} />
               </div>
@@ -175,23 +178,25 @@ export default function DashboardPage() {
               {/* Signals */}
               <SignalMonitor signals={state.signals} />
 
-              {/* Agent Controls */}
-              <AgentControls
-                connected={connected}
-                config={agentConfig ? {
-                  mode: agentConfig.mode || state.mode,
-                  strategy: agentConfig.strategy,
-                  maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 100,
-                  tradeIntervalMs: agentConfig.tradeIntervalMs ?? 3600000,
-                  maxDrawdownPct: agentConfig.maxDrawdownPct,
-                  slippageTolerance: agentConfig.slippageTolerance ?? 1,
-                  maxDailyTrades: agentConfig.maxDailyTrades,
-                  maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 3,
-                  baseCurrency: agentConfig.baseCurrency,
-                  swapCurrencies: agentConfig.swapCurrencies,
-                } : null}
-                onSave={handleSaveConfig}
-              />
+              {/* Agent Controls — hidden on public/read-only deployments */}
+              {!READ_ONLY && (
+                <AgentControls
+                  connected={connected}
+                  config={agentConfig ? {
+                    mode: agentConfig.mode || state.mode,
+                    strategy: agentConfig.strategy,
+                    maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 100,
+                    tradeIntervalMs: agentConfig.tradeIntervalMs ?? 3600000,
+                    maxDrawdownPct: agentConfig.maxDrawdownPct,
+                    slippageTolerance: agentConfig.slippageTolerance ?? 1,
+                    maxDailyTrades: agentConfig.maxDailyTrades,
+                    maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 3,
+                    baseCurrency: agentConfig.baseCurrency,
+                    swapCurrencies: agentConfig.swapCurrencies,
+                  } : null}
+                  onSave={handleSaveConfig}
+                />
+              )}
 
               <footer className="flex flex-wrap items-center justify-between gap-2 py-4 border-t border-border-dim text-[10px] font-mono text-text-muted">
                 <span>Neural Alpha</span>
@@ -204,8 +209,8 @@ export default function DashboardPage() {
             </main>
           </div>
 
-          {/* Floating Command Assistant */}
-          <CommandPanel connected={connected} />
+          {/* Floating Command Assistant — hidden on public/read-only deployments */}
+          {!READ_ONLY && <CommandPanel connected={connected} />}
         </div>
       )}
     </>
