@@ -341,6 +341,9 @@ export async function createTwakMcpBridge(): Promise<McpBridge> {
     logger.warn("Could not list TWAK MCP tools", { error: String(err) });
   }
 
+  /** Log each distinct TWAK tool error once — dashboard polling otherwise spams logs. */
+  const loggedToolErrors = new Set<string>();
+
   const callTool = async (
     name: string,
     args: Record<string, unknown>
@@ -349,18 +352,46 @@ export async function createTwakMcpBridge(): Promise<McpBridge> {
       const result = (await client.callTool({ name, arguments: args })) as ToolResult;
       if (result.isError) {
         const errBody = parseToolResult(result);
-        logger.warn(`TWAK MCP tool error: ${name}`, {
-          args,
-          error: errBody?.message ?? errBody?.code ?? errBody,
-        });
+        const errMsg = String(errBody?.message ?? errBody?.code ?? errBody ?? "unknown");
+        const errKey = `${name}:${errMsg.slice(0, 160)}`;
+        if (!loggedToolErrors.has(errKey)) {
+          loggedToolErrors.add(errKey);
+          logger.warn(`TWAK MCP tool error: ${name}`, { args, error: errMsg });
+        }
         return null;
       }
       return parseToolResult(result);
     } catch (err) {
-      logger.warn(`TWAK MCP call failed: ${name}`, { error: String(err) });
+      const errKey = `${name}:exception:${String(err).slice(0, 160)}`;
+      if (!loggedToolErrors.has(errKey)) {
+        loggedToolErrors.add(errKey);
+        logger.warn(`TWAK MCP call failed: ${name}`, { error: String(err) });
+      }
       return null;
     }
   };
+
+  // TWAK MCP starts with no wallet mode until switch_wallet_mode is called.
+  // Production agents must bind the local HD wallet non-interactively on boot.
+  const walletModeEnv = (process.env.TWAK_WALLET_MODE ?? "local").trim().toLowerCase();
+  if (walletModeEnv !== "skip" && walletModeEnv !== "none") {
+    const mode = walletModeEnv === "walletconnect" ? "walletconnect" : "local";
+    if (availableTools.length === 0 || availableTools.includes("switch_wallet_mode")) {
+      const bound = await callTool("switch_wallet_mode", { mode });
+      if (bound) {
+        const addr = bound.address ?? bound.walletAddress;
+        logger.info("TWAK wallet mode bound at startup", {
+          mode,
+          ...(addr ? { address: String(addr) } : {}),
+        });
+      } else {
+        logger.error(
+          "TWAK wallet bind failed — on the VPS run: twak wallet create && twak wallet address --chain bsc",
+          { mode }
+        );
+      }
+    }
+  }
 
   // Cache symbol → contract address so we resolve each token at most once.
   const addressCache = new Map<string, string>();

@@ -54,6 +54,26 @@ Required `.env` variables:
 | `DATABASE_URL` | Recommended | Neon Postgres connection string |
 | `OPENAI_API_KEY` | Optional | For AI assistant commands |
 | `CORS_ORIGINS` | Optional | Extra allowed origins (comma-separated) |
+| `TWAK_WALLET_MODE` | Optional | `local` (default) — auto-binds TWAK HD wallet on agent start |
+| `NEXT_PUBLIC_READONLY` | **YES (public)** | Set `true` on agents.clipx.app — hides control UI |
+| `READONLY` | **YES (public)** | Set `true` on agents.clipx.app — blocks proxy auth injection |
+
+### 1b. TWAK wallet on VPS (required for live trading)
+
+The agent spawns `twak serve` via MCP. TWAK needs a **local wallet created on the same machine** as PM2:
+
+```bash
+# On the VPS (once, as the same user PM2 runs as — usually root)
+twak wallet create
+twak wallet address --chain bsc    # copy into AGENT_WALLET_ADDRESS in .env
+twak wallet balance --chain bsc     # fund with USDT + BNB
+
+# Restart agent after wallet exists
+pm2 restart neural-agent
+```
+
+If you see `No wallet mode selected` in logs, the wallet was never created or `switch_wallet_mode` failed.
+The agent now calls `switch_wallet_mode({ mode: "local" })` automatically on startup.
 
 ### 2. Install & Build
 
