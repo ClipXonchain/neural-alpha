@@ -1,7 +1,7 @@
 import type { TradeResult } from "../utils/types.js";
 import { fetchBinanceWeb3TradeActivity } from "./binance-web3-trade-history.js";
 import { fetchOnChainTradeHistory as fetchBscScanTradeHistory } from "./bsc-trade-history.js";
-import { fetchRpcTradeHistory } from "./bsc-rpc-trade-history.js";
+import { fetchRpcRecentTradeHistory, fetchRpcTradeHistory } from "./bsc-rpc-trade-history.js";
 import { logger } from "../utils/logger.js";
 
 function mergeByOrderId(primary: TradeResult[], secondary: TradeResult[]): TradeResult[] {
@@ -36,26 +36,31 @@ export async function fetchWalletTradeHistory(
   walletAddress: string,
   limit = 50
 ): Promise<TradeResult[]> {
+  const recent = await fetchRpcRecentTradeHistory(walletAddress, limit);
+
   const bsc = await fetchBscScanTradeHistory(walletAddress, limit);
-  if (bsc.length >= limit) return bsc;
+  if (bsc.length >= limit) return mergeByOrderId(recent, bsc).slice(0, limit);
 
   const rpc = await fetchRpcTradeHistory(walletAddress, limit);
-  if (rpc.length >= limit) return dropBinanceAggregateIfRealPresent(mergeByOrderId(bsc, rpc)).slice(0, limit);
+  let merged = dropBinanceAggregateIfRealPresent(mergeByOrderId(mergeByOrderId(recent, bsc), rpc));
+
+  if (merged.length >= limit) return merged.slice(0, limit);
 
   const binance = await fetchBinanceWeb3TradeActivity(walletAddress, limit);
-  if (bsc.length === 0 && rpc.length === 0 && binance.length === 0) {
+  if (recent.length === 0 && bsc.length === 0 && rpc.length === 0 && binance.length === 0) {
     logger.info("No wallet trade history from BscScan, RPC, or Binance Web3", {
       wallet: walletAddress.slice(0, 10) + "…",
     });
     return [];
   }
 
-  const merged = dropBinanceAggregateIfRealPresent(mergeByOrderId(mergeByOrderId(bsc, rpc), binance));
+  merged = dropBinanceAggregateIfRealPresent(mergeByOrderId(merged, binance));
   logger.info("Wallet trade history merged", {
+    recent: recent.length,
     bsc: bsc.length,
     rpc: rpc.length,
     binance: binance.length,
     total: merged.length,
   });
-  return merged;
+  return merged.slice(0, limit);
 }

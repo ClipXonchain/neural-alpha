@@ -1,11 +1,11 @@
 import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot } from "./utils/types.js";
-import { loadConfig, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
-import { buildMarketData, getLatestPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, parseCmcQuotesBatch, parseCmcTrending, parseFearGreedIndex, unwrapX402Response } from "./data/market.js";
+import { loadConfig, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
+import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, parseCmcQuotesBatch, parseCmcTrending, parseFearGreedIndex, unwrapX402Response } from "./data/market.js";
 import { fetchNewsFeed } from "./data/news.js";
 import { analyzeMarkets, selectTrades } from "./strategy/index.js";
 import { getStrategyProfile, isStrategyName } from "./strategy/presets.js";
 import { resolveBscTokenAddress, hasBscSwapAddress } from "./integrations/bsc-token-addresses.js";
-import { computeSignals, getTokenMomentumMetrics } from "./strategy/signals.js";
+import { computeSignals, getTokenMomentumMetrics, getTokenDisplayMetrics } from "./strategy/signals.js";
 import { enrichSignalsWithAi, applyAiInsight } from "./strategy/ai-analyst.js";
 import type { AiSignalInsight } from "./strategy/ai-analyst.js";
 import { analyzeNewsSentiment, type NewsSentiment } from "./strategy/news-sentiment.js";
@@ -18,12 +18,23 @@ import {
   processSwapResult,
   applyTradeToPortfolio,
   isOnChainTxHash,
+  floorTokenAmount,
 } from "./execution/executor.js";
 import { logger } from "./utils/logger.js";
 import { getAgentStore } from "./db/store.js";
 import { fetchBscTokenBalances, scanWalletViaCliSubprocess } from "./integrations/bscscan.js";
 import { fetchWalletTradeHistory } from "./integrations/trade-history.js";
+import { fetchRpcRecentTradeHistory } from "./integrations/bsc-rpc-trade-history.js";
 import { fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
+import {
+  enrichSymbolsFromBinance,
+  iconFromWalletRow,
+  normalizeBinanceIcon,
+  listKnownBscTokenSymbols,
+  isPlausibleLivePrice,
+  type BinanceLiveQuote,
+} from "./integrations/binance-web3-market.js";
+import { knownBscAddress, trustWalletIconUrl } from "./integrations/bsc-token-addresses.js";
 
 /**
  * Core autonomous trading agent — Neural Alpha.
@@ -96,6 +107,22 @@ export class TradingAgent {
   /** Estimated autonomous on-chain txs sent today (approve + swap ≈ 2 each). */
   private autonomousOnChainTxToday = 0;
   private autonomousTxDay = "";
+  private cycleInProgress = false;
+  private lastCycleCompletedAt = 0;
+  private lastCycleDurationMs = 0;
+  private lastCycleTradesExecuted = 0;
+  private lastCycleSignalsQueued = 0;
+  private tradeHistoryBackfillRunning = false;
+  private tradeHistoryBackfillQueued = false;
+  private lastTradeHistoryBackfillAt = 0;
+  /** Independent signal refresh loop (decoupled from trade cycle). */
+  private signalRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  private signalRefreshInProgress = false;
+  private signalRefreshCount = 0;
+  private lastSignalRefreshAt = 0;
+  private tokenIcons = new Map<string, string>();
+  private livePrices = new Map<string, BinanceLiveQuote>();
+  private lastMarketData: MarketData[] = [];
 
   constructor(mcp: McpBridge, initialCashUsd = 1000, bridgeSource = "unknown") {
     this.config = loadConfig();
@@ -115,6 +142,7 @@ export class TradingAgent {
       maxDailyTrades: this.config.maxDailyTrades,
       maxPositionSize: this.config.maxPositionSizeUsd,
       tradeInterval: this.config.tradeIntervalMs,
+      signalRefresh: this.config.signalRefreshMs,
     });
   }
 
@@ -129,6 +157,9 @@ export class TradingAgent {
     this.startedAt = Date.now();
 
     await this.bootstrapPersistence();
+
+    // Fast CMC call — fetch before slow on-chain wallet reconcile so dashboard has F&G immediately.
+    await this.fetchSentiment().catch(() => undefined);
 
     // Live mode: import real on-chain holdings, then seed cash + NAV baseline.
     // Positions are imported first so the baseline reflects total wallet value.
@@ -146,10 +177,16 @@ export class TradingAgent {
         }
       }
 
-      if (this.portfolio.getTradeHistory().length === 0) {
-        this.scheduleTradeHistoryBackfill();
+      if (this.portfolio.hasPendingNavRestore()) {
+        const nav = this.portfolio.estimateNavUsd();
+        if (nav > 0) this.portfolio.applyPendingNavRestore(nav);
       }
+
+      this.scheduleTradeHistoryBackfill([], { force: true });
     }
+
+    // Signal refresh loop — populates dashboard before / between trade cycles.
+    this.startSignalRefreshLoop(generation);
 
     this.getWalletInfo().catch(() => {});
 
@@ -187,6 +224,10 @@ export class TradingAgent {
 
     this.running = false;
     this.runGeneration++;
+    if (this.signalRefreshTimer) {
+      clearInterval(this.signalRefreshTimer);
+      this.signalRefreshTimer = undefined;
+    }
     logger.info("Agent stop requested");
   }
 
@@ -203,24 +244,30 @@ export class TradingAgent {
     const startTime = Date.now();
     this.cycleCount++;
     const cycleId = this.cycleCount;
+    this.cycleInProgress = true;
 
     logger.info(`=== Cycle ${cycleId} ===`);
+
+    try {
 
     if (this.config.mode === "live") {
       await this.reconcileLivePortfolio();
     }
 
-    // Step 1: Fetch news sentiment (ClipX) — used by full scan + signals
-    const newsSentiment = await this.fetchNews();
+    // Step 1: Refresh market data + signals (full scan on cycle 1 and every N cycles).
+    const fullScan =
+      this.cycleCount <= 1 || this.cycleCount % FULL_SCAN_INTERVAL === 0;
+    const markets = await this.runMarketSignalRefresh({
+      fullScan,
+      updateSentiment: false,
+      force: true,
+    });
 
-    // Step 2: Fetch market data
-    const markets = await this.fetchMarketData();
-
-    // Step 3: Fetch macro sentiment (Fear & Greed via CMC x402)
+    // Step 2: Fetch macro sentiment (Fear & Greed via CMC x402) then re-score for trades.
     await this.fetchSentiment();
 
-    // Step 4: Analyze markets and generate signals
-    let signals = analyzeMarkets(markets, this.fearGreedIndex, this.config, newsSentiment);
+    // Step 3: Analyze markets and generate signals (includes updated F&G).
+    let signals = analyzeMarkets(markets, this.fearGreedIndex, this.config, this.lastNewsSentiment);
 
     // Step 4b: AI technical analysis on top actionable signals (optional)
     const technicalsMap = new Map(
@@ -344,7 +391,11 @@ export class TradingAgent {
     }
 
     // Step 7: Take portfolio snapshot
-    const snapshot = this.portfolio.snapshot(currentPrices);
+    const snapshot = this.portfolio.snapshot(currentPrices, {
+      stopLossPct: this.config.stopLossPct,
+      takeProfitPct: this.config.takeProfitPct,
+      trailingActivatePct: this.config.trailingActivatePct,
+    });
     await this.persistCycleSnapshot(cycleId, snapshot);
 
     // Step 8: Log risk summary
@@ -370,6 +421,24 @@ export class TradingAgent {
       logger.warn("No trades today yet — competition requires ≥1/day (June 22-28)", { hour });
     }
 
+    const duration = Date.now() - startTime;
+    this.lastCycleCompletedAt = Date.now();
+    this.lastCycleDurationMs = duration;
+    this.lastCycleTradesExecuted = tradeResults.length;
+    this.lastCycleSignalsQueued = tradesToExecute.length;
+
+    const autoStatus = this.buildAutonomousStatus();
+    logger.info("Autonomous cycle summary", {
+      phase: autoStatus.phase,
+      tradesExecuted: tradeResults.length,
+      queued: tradesToExecute.length,
+      tradesToday: autoStatus.tradesToday,
+      tradesLast24h: autoStatus.tradesLast24h,
+      txsToday: autoStatus.txsToday,
+      nextCycleInSec: autoStatus.nextCycleInSec,
+      blockReason: autoStatus.blockReason,
+    });
+
     return {
       cycleId,
       timestamp: Date.now(),
@@ -377,11 +446,204 @@ export class TradingAgent {
       signalsGenerated: signals,
       tradesExecuted: tradeResults,
       portfolioSnapshot: snapshot,
-      duration: Date.now() - startTime,
+      duration,
     };
+    } finally {
+      this.cycleInProgress = false;
+    }
   }
 
-  private async fetchMarketData(): Promise<MarketData[]> {
+  /**
+   * Background signal refresh — decoupled from the trade cycle.
+   */
+  private startSignalRefreshLoop(generation: number) {
+    void this.runMarketSignalRefresh({ fullScan: true, updateSentiment: false, force: true });
+
+    this.signalRefreshTimer = setInterval(() => {
+      if (!this.running || generation !== this.runGeneration) return;
+      if (this.signalRefreshInProgress || this.cycleInProgress) return;
+      this.signalRefreshCount++;
+      const fullScan = this.signalRefreshCount % 3 === 0;
+      void this.runMarketSignalRefresh({ fullScan, updateSentiment: false });
+    }, this.config.signalRefreshMs);
+
+    logger.info("Signal refresh loop started", {
+      intervalSec: this.config.signalRefreshMs / 1000,
+    });
+  }
+
+  /**
+   * Fetch quotes, Binance OHLCV/logos/live prices, and recompute signals.
+   */
+  private async runMarketSignalRefresh(opts: {
+    fullScan?: boolean;
+    updateSentiment?: boolean;
+    force?: boolean;
+  } = {}): Promise<MarketData[]> {
+    if (this.signalRefreshInProgress && !opts.force) {
+      return this.lastMarketData;
+    }
+
+    this.signalRefreshInProgress = true;
+    const started = Date.now();
+    try {
+      if (opts.updateSentiment) {
+        await this.fetchSentiment().catch(() => undefined);
+      }
+
+      await this.fetchNews();
+      const markets = await this.collectMarketData(!!opts.fullScan);
+      await this.applyBinanceEnrichment(markets, !!opts.fullScan);
+      this.runSignalAnalysis(markets);
+      this.lastMarketData = markets;
+      this.lastSignalRefreshAt = Date.now();
+
+      logger.info("Market signals refreshed", {
+        tokens: markets.length,
+        scored: this.lastSignals.size,
+        fullScan: !!opts.fullScan,
+        durationMs: Date.now() - started,
+      });
+      return markets;
+    } catch (err) {
+      logger.warn("Market signal refresh failed", { error: String(err) });
+      return this.lastMarketData;
+    } finally {
+      this.signalRefreshInProgress = false;
+    }
+  }
+
+  private runSignalAnalysis(markets: MarketData[]) {
+    const signals = analyzeMarkets(
+      markets,
+      this.fearGreedIndex,
+      this.config,
+      this.lastNewsSentiment
+    );
+    for (const s of signals) {
+      this.lastSignals.set(s.symbol, s.score);
+      this.lastSignalConfidence.set(s.symbol, s.confidence);
+    }
+    for (const md of markets) {
+      if (!isTradableToken(md.symbol, md.price)) {
+        this.lastSignals.delete(md.symbol);
+        this.lastSignalConfidence.delete(md.symbol);
+        continue;
+      }
+      if (!this.lastSignals.has(md.symbol)) {
+        this.lastSignals.set(md.symbol, 0);
+        this.lastSignalConfidence.set(md.symbol, 0.3);
+      }
+    }
+  }
+
+  private async applyBinanceEnrichment(markets: MarketData[], fullScan: boolean) {
+    const enrichTargets = [
+      ...new Set([
+        ...markets.map((m) => m.symbol),
+        ...this.watchlist,
+        ...this.lastSignals.keys(),
+        ...this.portfolio.getAllPositions().keys(),
+        ...(fullScan ? listKnownBscTokenSymbols() : []),
+      ]),
+    ].filter((s) => {
+      const md = markets.find((m) => m.symbol === s);
+      return isTradableToken(s, md?.price ?? getLatestPrice(s));
+    });
+
+    const ohlcvSymbols = fullScan
+      ? enrichTargets.filter((s) => knownBscAddress(s))
+      : enrichTargets.filter(
+          (s) =>
+            knownBscAddress(s) &&
+            (this.watchlist.includes(s) ||
+              this.portfolio.getAllPositions().has(s))
+        );
+
+    const { liveQuotes, icons, ohlcvLoaded } = await enrichSymbolsFromBinance(
+      enrichTargets,
+      {
+        fetchLive: true,
+        fetchIcons: true,
+        fetchOhlcv: true,
+        ohlcvSymbols,
+      }
+    );
+
+    for (const [symbol, icon] of icons) this.tokenIcons.set(symbol, icon);
+
+    if (this._cachedWalletInfo?.binancePositions) {
+      for (const p of this._cachedWalletInfo.binancePositions) {
+        const icon = iconFromWalletRow(p.icon);
+        if (icon) this.tokenIcons.set(p.symbol.toUpperCase(), icon);
+      }
+    }
+
+    const marketBySymbol = new Map(markets.map((m) => [m.symbol, m]));
+
+    for (const [symbol, quote] of liveQuotes) {
+      const ref = marketBySymbol.get(symbol)?.price ?? getLatestPrice(symbol) ?? undefined;
+      if (isPlausibleLivePrice(ref, quote.price)) {
+        this.livePrices.set(symbol, quote);
+      } else {
+        this.livePrices.delete(symbol);
+      }
+    }
+
+    for (const symbol of enrichTargets) {
+      const sym = symbol.toUpperCase();
+      if (this.tokenIcons.has(sym)) continue;
+      const addr = knownBscAddress(sym);
+      if (addr) this.tokenIcons.set(sym, trustWalletIconUrl(addr));
+    }
+
+    for (const md of markets) {
+      this.mergeLiveQuoteIntoMarket(md, this.livePrices.get(md.symbol));
+    }
+
+    for (const [symbol, quote] of this.livePrices) {
+      if (!marketBySymbol.has(symbol)) {
+        markets.push(
+          buildMarketData(symbol, quote.price, {
+            change24h: quote.change24hPct,
+            volume24h: quote.volume24h,
+          })
+        );
+      }
+    }
+
+    for (const md of markets) {
+      if (!hasRealHistory(md.symbol)) {
+        seedPriceHistory(md.symbol, md.price, 50, 3.5);
+      }
+    }
+
+    if (liveQuotes.size > 0 || ohlcvLoaded.length > 0) {
+      logger.info("Binance Web3 enrichment applied", {
+        targets: enrichTargets.length,
+        liveQuotes: liveQuotes.size,
+        icons: this.tokenIcons.size,
+        ohlcvLoaded: ohlcvLoaded.length,
+        fullScan,
+      });
+    }
+  }
+
+  private mergeLiveQuoteIntoMarket(
+    md: MarketData,
+    live: BinanceLiveQuote | undefined
+  ) {
+    const ref = md.price > 0 ? md.price : undefined;
+    if (live && live.price > 0 && isPlausibleLivePrice(ref, live.price)) {
+      md.price = live.price;
+      if (Number.isFinite(live.change24hPct)) md.change24h = live.change24hPct;
+      recordPrice(md.symbol, live.price, live.volume24h || md.volume24h);
+    } else {
+      recordPrice(md.symbol, md.price, md.volume24h);
+    }
+  }
+
+  private async collectMarketData(fullScan: boolean): Promise<MarketData[]> {
     const markets: MarketData[] = [];
     let trendingTokens: Array<{ symbol: string }> | null = null;
 
@@ -391,9 +653,8 @@ export class TradingAgent {
     ]);
     const symbols = [...tokensToCheck];
 
-    // Tier 2: full eligible-token scan every N cycles — and once up-front on
-    // the first cycle so the dashboard (incl. Binance Alpha) populates fast.
-    if (this.cycleCount <= 1 || this.cycleCount % FULL_SCAN_INTERVAL === 0) {
+    // Tier 2: full eligible-token scan when requested.
+    if (fullScan) {
       await this.runFullTokenScan(markets);
     }
 
@@ -409,7 +670,7 @@ export class TradingAgent {
       try {
         const priceData = await this.mcp.getTokenPrice(BSC_CHAIN, symbol);
         if (priceData) {
-          if (getHistoryLength(symbol) < 40) {
+          if (!hasRealHistory(symbol) && getHistoryLength(symbol) < 40) {
             seedPriceHistory(symbol, priceData.price, 50, 3.5);
           }
           markets.push(buildMarketData(symbol, priceData.price));
@@ -440,7 +701,7 @@ export class TradingAgent {
 
     if (trendingTokens) {
       const newSymbols = trendingTokens
-        .filter((t) => isEligibleToken(t.symbol) && !tokensToCheck.has(t.symbol))
+        .filter((t) => isTradableToken(t.symbol, getLatestPrice(t.symbol)) && !tokensToCheck.has(t.symbol))
         .map((t) => t.symbol);
 
       const trendingQuotes = await this.fetchCmcQuotes(newSymbols);
@@ -453,7 +714,7 @@ export class TradingAgent {
         try {
           const priceData = await this.mcp.getTokenPrice(BSC_CHAIN, symbol);
           if (priceData) {
-            if (getHistoryLength(symbol) < 40) {
+            if (!hasRealHistory(symbol) && getHistoryLength(symbol) < 40) {
               seedPriceHistory(symbol, priceData.price, 50, 4);
             }
             markets.push(buildMarketData(symbol, priceData.price));
@@ -472,9 +733,16 @@ export class TradingAgent {
       cmcQuotes: cmcQuotes.size,
       bridge: this.bridgeSource,
       dataSource: "cmc-agent-hub-x402",
-      fullScanCycle: this.cycleCount % FULL_SCAN_INTERVAL === 0,
+      fullScanCycle: fullScan,
     });
     return markets;
+  }
+
+  /** @deprecated Use collectMarketData via runMarketSignalRefresh */
+  private async fetchMarketData(): Promise<MarketData[]> {
+    const fullScan =
+      this.cycleCount <= 1 || this.cycleCount % FULL_SCAN_INTERVAL === 0;
+    return this.collectMarketData(fullScan);
   }
 
   /**
@@ -482,7 +750,7 @@ export class TradingAgent {
    * promote top movers into the active watchlist.
    */
   private async runFullTokenScan(existingMarkets: MarketData[]) {
-    const tradable = ELIGIBLE_TOKENS.filter((s) => !isStablecoin(s));
+    const tradable = ELIGIBLE_TOKENS.filter((s) => isTradableToken(s));
     const already = new Set(existingMarkets.map((m) => m.symbol));
     const allQuotes = new Map<string, MarketData>();
 
@@ -495,6 +763,7 @@ export class TradingAgent {
       const batch = tradable.slice(i, i + FULL_SCAN_BATCH_SIZE);
       const quotes = await this.fetchCmcQuotes(batch);
       for (const [symbol, md] of quotes) {
+        if (!isTradableToken(symbol, md.price)) continue;
         allQuotes.set(symbol, md);
         if (!already.has(symbol)) {
           existingMarkets.push(md);
@@ -542,9 +811,6 @@ export class TradingAgent {
         const body = unwrapX402Response(raw);
         const parsed = parseCmcQuotesBatch(body, batch);
         for (const [symbol, md] of parsed) {
-          if (getHistoryLength(symbol) < 40) {
-            seedPriceHistory(symbol, md.price, 50, 3.5);
-          }
           out.set(symbol, md);
         }
       } catch (err) {
@@ -564,20 +830,22 @@ export class TradingAgent {
   ) {
     const positions = new Set(this.portfolio.getAllPositions().keys());
     const next = new Set<string>([
-      ...MOMENTUM_CORE,
-      ...ANCHOR_TOKENS,
+      ...MOMENTUM_CORE.filter((s) => isTradableToken(s)),
+      ...ANCHOR_TOKENS.filter((s) => isTradableToken(s)),
       ...positions,
-      ...this.watchlist,
+      ...this.watchlist.filter((s) => isTradableToken(s, getLatestPrice(s))),
     ]);
 
     if (trending) {
       for (const t of trending) {
-        if (isEligibleToken(t.symbol)) next.add(t.symbol);
+        if (isTradableToken(t.symbol, getLatestPrice(t.symbol))) next.add(t.symbol);
       }
     }
 
     for (const m of markets) {
-      if (MOMENTUM_VOLATILE.includes(m.symbol)) next.add(m.symbol);
+      if (MOMENTUM_VOLATILE.includes(m.symbol) && isTradableToken(m.symbol, m.price)) {
+        next.add(m.symbol);
+      }
     }
 
     if (next.size > MAX_WATCHLIST_SIZE) {
@@ -604,14 +872,20 @@ export class TradingAgent {
         CMC_ENDPOINTS.fearGreed(),
         this.x402Payment
       );
-      const value = parseFearGreedIndex(unwrapX402Response(result) ?? {});
+      const unwrapped = unwrapX402Response(result) ?? result ?? {};
+      const value = parseFearGreedIndex(unwrapped);
       if (value !== null) {
         this.fearGreedIndex = value;
-        logger.info("Fear & Greed Index updated (CMC x402)", { value });
+        logger.info("Fear & Greed Index updated", { value, source: this.bridgeSource });
+      } else {
+        logger.warn("Fear & Greed response had no parseable value", {
+          keys: result ? Object.keys(result) : [],
+        });
       }
-    } catch {
+    } catch (err) {
       logger.warn("Failed to fetch Fear & Greed — using last known value", {
         lastKnown: this.fearGreedIndex,
+        error: String(err),
       });
     }
   }
@@ -694,7 +968,13 @@ export class TradingAgent {
 
   private async executeTrade(
     signal: import("./utils/types.js").TradeSignal,
-    opts: { manual?: boolean; order?: import("./utils/types.js").TradeOrder } = {}
+    opts: {
+      manual?: boolean;
+      order?: import("./utils/types.js").TradeOrder;
+      /** Sell entire on-chain balance (not a partial $-denominated slice). */
+      sellAll?: boolean;
+      amountUsd?: number;
+    } = {}
   ): Promise<TradeResult | null> {
     if (!opts.manual && this.isInStartupCooldown()) {
       logger.info("Trade deferred — startup cooldown active", {
@@ -768,23 +1048,27 @@ export class TradingAgent {
 
     // Live mode: get quote first, then execute
     try {
-      // For sells, settle the swap amount against the wallet's ACTUAL
-      // transferable balance. The internally tracked position amount can drift
-      // above the on-chain balance (stale sync, rounding, dust), which makes
-      // TWAK revert with "BEP20: transfer amount exceeds balance". Always sell
-      // the real available balance (minus a tiny margin for precision).
+      // For sells, use the wallet's actual transferable balance. Partial sells
+      // only when the operator specifies an explicit USD amount.
       if (order.side === "sell") {
         const onChainBalance = await this.getOnChainTokenBalance(order.fromToken);
         if (onChainBalance !== null && onChainBalance > 0) {
+          const partialUsd =
+            opts.amountUsd !== undefined && opts.amountUsd > 0;
+          const sellAll = !partialUsd || opts.sellAll === true;
           const tracked = order.fromTokenAmount ?? onChainBalance;
-          // Never sell more than the wallet actually holds.
-          const sellable = Math.min(tracked, onChainBalance);
-          // 0.1% haircut absorbs decimal/precision mismatches so the transfer
-          // can never round above the true balance.
-          const safeAmount = sellable * 0.999;
-          if (safeAmount > 0 && safeAmount !== order.fromTokenAmount) {
+          const sellable = sellAll
+            ? onChainBalance
+            : Math.min(tracked, onChainBalance);
+          // Full exits: floor to 8 decimals (no 0.1% haircut — that left ~$0.05
+          // dust on every ~$50 sell). Partial sells keep a tiny margin.
+          const safeAmount = sellAll
+            ? floorTokenAmount(sellable, 8)
+            : floorTokenAmount(sellable * 0.999, 8);
+          if (safeAmount > 0) {
             logger.info("Reconciled sell amount to on-chain balance", {
               symbol: order.symbol,
+              sellAll,
               trackedAmount: tracked,
               onChainBalance,
               sellAmount: safeAmount,
@@ -836,6 +1120,9 @@ export class TradingAgent {
           await this.syncWalletCapital();
         } catch (err) {
           logger.warn("Post-trade wallet sync failed", { error: String(err) });
+        }
+        if (opts.manual) {
+          this.scheduleTradeHistoryBackfill([], { force: true });
         }
       } else {
         logger.warn("Live swap not confirmed on-chain — portfolio unchanged", {
@@ -916,15 +1203,24 @@ export class TradingAgent {
 
   async executeManualTrade(
     signal: import("./utils/types.js").TradeSignal,
-    opts: { amountUsd?: number } = {}
+    opts: { amountUsd?: number; sellAll?: boolean } = {}
   ): Promise<{
     result: TradeResult | null;
     violations?: string[];
     tradeSizeUsd: number;
   }> {
+    const sellAll =
+      opts.sellAll ??
+      (signal.action === "sell" &&
+        !(opts.amountUsd !== undefined && opts.amountUsd > 0));
+
     // Resolve contract + price up-front so any eligible token is tradable,
     // not just ones currently on the watchlist.
     await this.primeTokenForTrade(signal.symbol);
+
+    if (sellAll) {
+      await this.ensureTrackedPosition(signal.symbol);
+    }
 
     // Manual = operator-initiated (assistant / NL command). Bypasses the
     // autonomous daily-trade pacing cap, but still respects hard safety
@@ -943,6 +1239,8 @@ export class TradingAgent {
     const result = await this.executeTrade(signal, {
       manual: true,
       order: validation.order,
+      sellAll,
+      amountUsd: opts.amountUsd,
     });
     return { result, tradeSizeUsd: validation.order.amountUsd };
   }
@@ -974,7 +1272,9 @@ export class TradingAgent {
       this.config.strategy = profile.name;
       this.config.positionSizeMultiplier = profile.positionSizeMultiplier;
       this.config.maxDrawdownPct = profile.risk.maxDrawdownPct;
-      this.config.maxDailyTrades = profile.risk.maxDailyTrades;
+      if (!process.env.MAX_DAILY_TRADES?.trim()) {
+        this.config.maxDailyTrades = profile.risk.maxDailyTrades;
+      }
       this.config.maxPortfolioTokens = profile.risk.maxPortfolioTokens;
       this.config.minBuyConfidence = profile.risk.minBuyConfidence;
       this.config.stopLossPct = profile.risk.stopLossPct;
@@ -1102,6 +1402,18 @@ export class TradingAgent {
           const binanceBnb = binancePositions.find((p) => p.symbol === "BNB");
           if (binanceBnb && binanceBnb.remainQty > 0) {
             bnbBalance = binanceBnb.remainQty;
+          }
+          for (const p of binancePositions) {
+            const icon = iconFromWalletRow(p.icon);
+            if (icon) this.tokenIcons.set(p.symbol.toUpperCase(), icon);
+            if (p.price > 0) {
+              this.livePrices.set(p.symbol.toUpperCase(), {
+                price: p.price,
+                change24hPct: p.percentChange24h,
+                volume24h: 0,
+                updatedAt: Date.now(),
+              });
+            }
           }
         }
       } catch (err) {
@@ -1233,6 +1545,7 @@ export class TradingAgent {
       if (this.portfolio.getPeakNav() > nav * 1.02) {
         this.portfolio.recalibratePeakToOnChainNav(nav, 1);
       }
+      this.portfolio.realignNavBaselineIfStale(nav);
     }
 
     const store = getAgentStore();
@@ -1245,7 +1558,14 @@ export class TradingAgent {
         positionsRemoved: syncMeta.removed,
         ...(gas.valueUsd > 0 ? { gas } : {}),
       });
+      void store.savePositionEntries(this.portfolio.exportPositionEntries());
     }
+
+    if (syncMeta.removed.length > 0) {
+      this.scheduleTradeHistoryBackfill([], { force: true });
+    }
+
+    this.scheduleTradeHistoryBackfill();
   }
 
   private async bootstrapPersistence() {
@@ -1257,8 +1577,14 @@ export class TradingAgent {
       if (navState) this.portfolio.restorePersistedNav(navState);
 
       const wallet = await this.resolveBootstrapWalletAddress();
-      dbTrades = await store.loadRecentTrades(50, wallet);
-      if (dbTrades.length > 0) this.portfolio.hydrateTradeHistory(dbTrades);
+      const entries = await store.loadPositionEntries();
+      if (entries) this.portfolio.restorePersistedEntries(entries);
+
+      dbTrades = await store.loadAllTradesForCostBasis(wallet);
+      if (dbTrades.length > 0) {
+        this.portfolio.hydrateTradeHistory(dbTrades);
+        this.portfolio.rebuildPositionsFromTrades({ seedAmounts: true });
+      }
     }
 
     this.scheduleTradeHistoryBackfill(dbTrades);
@@ -1266,11 +1592,44 @@ export class TradingAgent {
 
   /** Run chain backfill without blocking startup (RPC scan can take 1–2 min). */
   private scheduleTradeHistoryBackfill(
-    existing: import("./utils/types.js").TradeResult[] = []
+    existing: import("./utils/types.js").TradeResult[] = [],
+    opts: { force?: boolean } = {}
   ) {
-    void this.backfillTradeHistoryFromChain(existing).catch((err) => {
+    const minIntervalMs =
+      parseInt(process.env.TRADE_HISTORY_BACKFILL_MS || "120000", 10) || 120000;
+    if (
+      !opts.force &&
+      Date.now() - this.lastTradeHistoryBackfillAt < minIntervalMs
+    ) {
+      return;
+    }
+
+    if (this.tradeHistoryBackfillRunning) {
+      this.tradeHistoryBackfillQueued = true;
+      return;
+    }
+
+    void this.runTradeHistoryBackfill(existing).catch((err) => {
       logger.warn("Trade history backfill failed", { error: String(err) });
     });
+  }
+
+  private async runTradeHistoryBackfill(
+    existing: import("./utils/types.js").TradeResult[] = []
+  ) {
+    this.tradeHistoryBackfillRunning = true;
+    try {
+      await this.backfillTradeHistoryFromChain(existing);
+      this.lastTradeHistoryBackfillAt = Date.now();
+    } finally {
+      this.tradeHistoryBackfillRunning = false;
+      if (this.tradeHistoryBackfillQueued) {
+        this.tradeHistoryBackfillQueued = false;
+        void this.runTradeHistoryBackfill([]).catch((err) => {
+          logger.warn("Trade history backfill failed", { error: String(err) });
+        });
+      }
+    }
   }
 
   /**
@@ -1288,7 +1647,21 @@ export class TradingAgent {
       return;
     }
 
+    // Surface recent on-chain swaps quickly (e.g. both LINK sells) before the full scan.
+    const recentTrades = await fetchRpcRecentTradeHistory(wallet, 50);
+    if (recentTrades.length > 0) {
+      await this.mergeNovelChainTrades(recentTrades, existing, wallet);
+    }
+
     const chainTrades = await fetchWalletTradeHistory(wallet, 50);
+    await this.mergeNovelChainTrades(chainTrades, existing, wallet);
+  }
+
+  private async mergeNovelChainTrades(
+    chainTrades: import("./utils/types.js").TradeResult[],
+    existing: import("./utils/types.js").TradeResult[],
+    wallet: string
+  ) {
     const realChainTrades = chainTrades.filter(
       (t) => t.txHash && /^0x[a-fA-F0-9]{64}$/.test(t.txHash)
     );
@@ -1314,13 +1687,20 @@ export class TradingAgent {
       if (t.txHash) knownHashes.add(t.txHash.toLowerCase());
     }
 
-    const novel = chainTrades.filter(
-      (t) => t.txHash && !knownHashes.has(t.txHash.toLowerCase())
+    const withHash = chainTrades.filter(
+      (t) => t.txHash && /^0x[a-fA-F0-9]{64}$/.test(t.txHash)
+    );
+    const novel = withHash.filter(
+      (t) => !knownHashes.has(t.txHash!.toLowerCase())
+    );
+    const refreshed = withHash.filter((t) =>
+      knownHashes.has(t.txHash!.toLowerCase())
     );
 
-    if (novel.length === 0) {
+    if (withHash.length === 0) {
       if (this.portfolio.getTradeHistory().length === 0 && chainTrades.length > 0) {
         this.portfolio.hydrateTradeHistory(chainTrades);
+        this.portfolio.rebuildPositionsFromTrades({ seedAmounts: true });
         logger.info("Trade history hydrated from chain (memory only)", {
           count: chainTrades.length,
           wallet: wallet.slice(0, 10) + "…",
@@ -1329,17 +1709,26 @@ export class TradingAgent {
       return;
     }
 
-    this.portfolio.hydrateTradeHistory(novel);
+    for (const t of refreshed) {
+      this.portfolio.upsertChainTrade(t);
+    }
+    if (novel.length > 0) {
+      this.portfolio.hydrateTradeHistory(novel);
+    }
 
     const store = getAgentStore();
     if (store.enabled) {
-      await Promise.all(novel.map((t) => store.saveChainTrade(t, wallet)));
+      await Promise.all(withHash.map((t) => store.saveChainTrade(t, wallet)));
     }
 
-    logger.info("Trade history backfilled from chain", {
-      imported: novel.length,
-      wallet: wallet.slice(0, 10) + "…",
-    });
+    if (novel.length > 0 || refreshed.length > 0) {
+      this.portfolio.rebuildPositionsFromTrades();
+      logger.info("Trade history backfilled from chain", {
+        imported: novel.length,
+        refreshed: refreshed.length,
+        wallet: wallet.slice(0, 10) + "…",
+      });
+    }
   }
 
   /** Wallet address for DB scoping before TWAK cache is warm. */
@@ -1364,6 +1753,7 @@ export class TradingAgent {
     await store.saveTrade(order, result, this.config.mode, twakResponse, this.currentWalletAddress());
     if (result.success) {
       this.portfolio.markTradePersisted(result.orderId);
+      void store.savePositionEntries(this.portfolio.exportPositionEntries());
       logger.trade(
         `Trade persisted to DB — ${order.side.toUpperCase()} ${order.symbol}`,
         {
@@ -1380,18 +1770,15 @@ export class TradingAgent {
 
   /** Compute key agent stats for persistence (win rate, trades, sentiment, etc.). */
   private computeCycleStats(snap: PortfolioSnapshot): import("./db/store.js").CycleStats {
-    const trades = this.portfolio.getTradeHistory().filter((t) => t.success);
-    const closed = trades.filter((t) => t.realizedPnl !== undefined);
-    const wins = closed.filter((t) => (t.realizedPnl ?? 0) >= 0).length;
-    const winRate = closed.length > 0 ? (wins / closed.length) * 100 : 0;
+    const closed = this.portfolio.getClosedTradeStats();
 
     return {
-      realizedPnl: this.portfolio.realizedPnl,
+      realizedPnl: closed.realizedPnl,
       dailyPnl: snap.dailyPnl,
       positionsCount: snap.positions.length,
-      totalTrades: trades.length,
+      totalTrades: this.portfolio.getTradeHistory().filter((t) => t.success).length,
       todayTrades: this.portfolio.getTodayTradeCount(),
-      winRate: Math.round(winRate * 10) / 10,
+      winRate: Math.round(closed.winRate * 10) / 10,
       fearGreed: this.fearGreedIndex,
       emergencyMode: this.riskManager.isEmergencyMode(),
     };
@@ -1416,11 +1803,43 @@ export class TradingAgent {
   async forceResync(): Promise<AgentState> {
     if (this.config.mode === "live") {
       await this.reconcileLivePortfolio();
+      await this.runTradeHistoryBackfill();
     } else {
       await this.syncWalletCapital().catch(() => undefined);
     }
     logger.info("Manual portfolio resync requested");
     return this.getStateSnapshot();
+  }
+
+  /**
+   * Import a single held token into the portfolio without a full chain reconcile.
+   * Used by manual sell commands so the assistant does not block on CLI wallet scans.
+   */
+  async ensureTrackedPosition(symbol: string): Promise<boolean> {
+    const sym = symbol.toUpperCase();
+    const existing = this.portfolio.getPosition(sym);
+    if (existing && existing.amount > 0) return true;
+
+    const onChain = await this.getOnChainTokenBalance(sym);
+    if (onChain === null || onChain <= 0) return false;
+
+    let price = getLatestPrice(sym) ?? undefined;
+    if (!(price && price > 0)) {
+      try {
+        const quote = await this.mcp.getTokenPrice(BSC_CHAIN, sym);
+        if (quote?.price && quote.price > 0) price = quote.price;
+      } catch {
+        /* best-effort pricing */
+      }
+    }
+    if (!(price && price > 0)) return false;
+
+    this.portfolio.reconcileOnChainPositions(
+      new Map([[sym, onChain]]),
+      new Map([[sym, price]])
+    );
+    logger.info("Position imported for manual trade", { symbol: sym, amount: onChain });
+    return true;
   }
 
   /**
@@ -1713,13 +2132,16 @@ export class TradingAgent {
 
     this.portfolio.setCashUsd(stable.balance);
 
-    // Anchor the NAV baseline to real capital on the first successful sync.
-    // NAV = on-chain cash + current value of any tracked positions.
-    if (!this.portfolio.hasBaseline) {
-      const positionsValue = this.estimateTrackedPositionsValue();
-      this.portfolio.setBaselineNav(
-        stable.balance + positionsValue + this.portfolio.gasReserve.valueUsd
-      );
+    const positionsValue = this.estimateTrackedPositionsValue();
+    const navUsd =
+      stable.balance + positionsValue + this.portfolio.gasReserve.valueUsd;
+
+    if (this.portfolio.hasPendingNavRestore()) {
+      this.portfolio.applyPendingNavRestore(navUsd);
+    } else if (!this.portfolio.hasBaseline) {
+      this.portfolio.setBaselineNav(navUsd);
+    } else {
+      this.portfolio.realignNavBaselineIfStale(navUsd);
     }
 
     logger.info("Wallet capital synced from chain", {
@@ -1761,27 +2183,161 @@ export class TradingAgent {
   }
 
   /**
+   * Structured autonomous-mode status for dashboard / API.
+   */
+  buildAutonomousStatus(): AutonomousStatus {
+    this.resetAutonomousTxDayIfNeeded();
+    const risk = this.riskManager.riskSummary();
+    const tradesToday = this.portfolio.getTodayTradeCount();
+    const maxTradesToday = this.config.maxDailyTrades;
+    const txsToday = this.autonomousOnChainTxToday;
+    const maxTxsToday = this.config.maxOnChainTxPerDay;
+    const txRemaining = this.autonomousTxBudgetRemaining();
+    const swapsRemaining = Math.floor(txRemaining / TradingAgent.TX_PER_SWAP);
+    const tradesLast24h = this.portfolio.countSuccessfulTradesSince(
+      Date.now() - 24 * 60 * 60 * 1000
+    );
+    const cooldownSec = Math.ceil(this.getStartupCooldownRemainingMs() / 1000);
+    const emergencyMode = this.riskManager.isEmergencyMode();
+    const hourUtc = new Date().getUTCHours();
+
+    const failedSwapCooldowns: AutonomousStatus["failedSwapCooldowns"] = [];
+    for (const [symbol, until] of this.failedSwapUntil) {
+      const remainingMs = until - Date.now();
+      if (remainingMs > 0) {
+        failedSwapCooldowns.push({
+          symbol,
+          remainingMin: Math.ceil(remainingMs / 60_000),
+        });
+      }
+    }
+
+    let nextCycleInSec: number | null = null;
+    if (this.running && this.lastCycleCompletedAt > 0) {
+      const elapsed = Date.now() - this.lastCycleCompletedAt;
+      nextCycleInSec = Math.max(
+        0,
+        Math.ceil((this.config.tradeIntervalMs - elapsed) / 1000)
+      );
+    } else if (this.running && this.cycleInProgress) {
+      nextCycleInSec = null;
+    } else if (this.running) {
+      nextCycleInSec = Math.ceil(this.config.tradeIntervalMs / 1000);
+    }
+
+    let phase: AutonomousStatus["phase"] = "idle";
+    let blockReason: string | undefined;
+    let headline: string;
+
+    if (!this.running) {
+      phase = "stopped";
+      headline = "Autonomous engine stopped";
+      blockReason = "Start the agent to resume autonomous trading";
+    } else if (this.cycleInProgress) {
+      phase = "scanning";
+      headline = `Scanning markets — cycle #${this.cycleCount}`;
+    } else if (this.isInStartupCooldown()) {
+      phase = "warming";
+      headline = `Warming up — autonomous trades in ${cooldownSec}s`;
+      blockReason = `Startup cooldown (${cooldownSec}s remaining)`;
+    } else if (emergencyMode) {
+      phase = "blocked";
+      headline = "Emergency mode — new buys paused";
+      blockReason = `Drawdown ${Math.round(risk.drawdownPct as number)}% (limit ${this.config.maxDrawdownPct}%)`;
+    } else if (tradesToday >= maxTradesToday) {
+      phase = "blocked";
+      headline = "Daily trade cap reached";
+      blockReason = `${tradesToday}/${maxTradesToday} trades today`;
+    } else if (txRemaining < TradingAgent.TX_PER_SWAP) {
+      phase = "blocked";
+      headline = "On-chain tx budget exhausted";
+      blockReason = `${txsToday}/${maxTxsToday} estimated txs today`;
+    } else if (
+      (risk.positionCount as number) >= (risk.maxPositions as number) &&
+      (risk.positionCount as number) > 0
+    ) {
+      phase = "idle";
+      headline = "Position slots full — watching for exits";
+      blockReason = `${risk.positionCount}/${risk.maxPositions} positions`;
+    } else {
+      phase = "idle";
+      const next =
+        nextCycleInSec !== null
+          ? `next scan in ${formatDurationSec(nextCycleInSec)}`
+          : "awaiting first cycle";
+      headline = `Autonomous — ${next}`;
+    }
+
+    const ready =
+      this.running &&
+      !this.isInStartupCooldown() &&
+      !emergencyMode &&
+      tradesToday < maxTradesToday &&
+      txRemaining >= TradingAgent.TX_PER_SWAP;
+
+    const competitionNudge = tradesToday === 0 && hourUtc >= 18;
+
+    return {
+      phase,
+      ready,
+      headline,
+      blockReason,
+      tradesToday,
+      maxTradesToday,
+      tradesLast24h,
+      txsToday,
+      maxTxsToday,
+      swapsRemainingToday: swapsRemaining,
+      emergencyMode,
+      startupCooldownSec: cooldownSec,
+      nextCycleInSec,
+      lastCycleAt: this.lastCycleCompletedAt || null,
+      lastCycleDurationSec: this.lastCycleDurationMs
+        ? Math.round(this.lastCycleDurationMs / 1000)
+        : null,
+      lastCycleTrades: this.lastCycleTradesExecuted,
+      lastCycleQueued: this.lastCycleSignalsQueued,
+      tradeIntervalSec: Math.round(this.config.tradeIntervalMs / 1000),
+      maxPerCycle: this.config.maxAutonomousTradesPerCycle,
+      autoExitEnabled: this.config.autoExitEnabled,
+      strategy: this.config.strategy,
+      failedSwapCooldowns,
+      competitionNudge,
+    };
+  }
+
+  /**
    * Full agent state snapshot for dashboard / API consumers.
    */
   getStateSnapshot(): AgentState {
     // Report the full set of analyzed tokens (watchlist + every token scored in
     // the last cycle, incl. full-scan / Binance Alpha promotions), not just the
     // 15-token trading watchlist — so the dashboard can show all of them.
-    const reportSymbols = Array.from(
-      new Set<string>([...this.watchlist, ...this.lastSignals.keys()])
-    );
+    const held = new Set(this.portfolio.getAllPositions().keys());
+    const scanSymbols = new Set<string>([
+      ...this.watchlist,
+      ...this.lastSignals.keys(),
+      ...held,
+    ]);
 
     const currentPrices = new Map<string, number>();
-    for (const symbol of reportSymbols) {
+    for (const symbol of scanSymbols) {
       const price = getLatestPrice(symbol);
       if (price !== null) currentPrices.set(symbol, price);
     }
-    for (const symbol of this.portfolio.getAllPositions().keys()) {
-      const price = getLatestPrice(symbol);
-      if (price !== null) currentPrices.set(symbol, price);
+    for (const md of this.lastMarketData) {
+      if (md.price > 0) currentPrices.set(md.symbol, md.price);
     }
 
-    const portfolioSnap = this.portfolio.snapshot(currentPrices);
+    const reportSymbols = [...scanSymbols].filter((s) =>
+      isTradableToken(s, currentPrices.get(s))
+    );
+
+    const portfolioSnap = this.portfolio.snapshot(currentPrices, {
+      stopLossPct: this.config.stopLossPct,
+      takeProfitPct: this.config.takeProfitPct,
+      trailingActivatePct: this.config.trailingActivatePct,
+    });
     const snapshots = this.portfolio.getSnapshots();
 
     const tokenMetrics: Record<string, {
@@ -1794,6 +2350,9 @@ export class TradingAgent {
       confidence?: number | null;
       rsi: number | null;
       macd: number | null;
+      bbPosition: number | null;
+      vwapDev: number | null;
+      ohlcvReal?: boolean;
       aiSummary?: string;
       aiVerdict?: string;
       aiAgrees?: boolean;
@@ -1803,6 +2362,7 @@ export class TradingAgent {
       const sig = this.lastSignals.get(symbol);
       const news = this.lastNewsSentiment.get(symbol);
       const tech = computeSignals(symbol);
+      const display = getTokenDisplayMetrics(symbol, currentPrices.get(symbol));
       const ai = this.lastAiInsights.get(symbol.toUpperCase());
       tokenMetrics[symbol] = {
         momentum,
@@ -1813,7 +2373,11 @@ export class TradingAgent {
         newsScore: news?.score ?? null,
         newsArticles: news?.articles ?? 0,
         rsi: tech.rsi !== null ? Math.round(tech.rsi * 10) / 10 : null,
-        macd: tech.macd?.histogram ?? null,
+        macd: display.macdPct !== null ? Math.round(display.macdPct * 100) / 100 : null,
+        bbPosition:
+          display.bbPosition !== null ? Math.round(display.bbPosition * 10) / 10 : null,
+        vwapDev: display.vwapDev !== null ? Math.round(display.vwapDev * 100) / 100 : null,
+        ohlcvReal: hasRealHistory(symbol),
         ...(ai
           ? {
               aiSummary: ai.summary,
@@ -1828,7 +2392,11 @@ export class TradingAgent {
       mode: this.config.mode,
       running: this.running,
       cycleCount: this.cycleCount,
-      config: this.config,
+      config: {
+        ...this.config,
+        minTradablePriceUsd: MIN_TRADABLE_PRICE_USD,
+        excludedTokens: [...EXCLUDED_TOKENS],
+      },
       portfolio: portfolioSnap,
       snapshots,
       trades: this.portfolio.getTradeHistory(),
@@ -1839,9 +2407,27 @@ export class TradingAgent {
       bridgeSource: this.bridgeSource,
       tokenMetrics,
       newsCount: this.lastNewsCount,
+      lastSignalRefreshAt: this.lastSignalRefreshAt || null,
+      tokenIcons: Object.fromEntries(
+        [...this.tokenIcons.entries()].map(([sym, url]) => [
+          sym,
+          normalizeBinanceIcon(url) ?? url,
+        ])
+      ),
+      livePrices: Object.fromEntries(
+        [...this.livePrices.entries()].map(([sym, q]) => [
+          sym,
+          {
+            price: q.price,
+            change24hPct: q.change24hPct,
+            updatedAt: q.updatedAt,
+          },
+        ])
+      ),
       startedAt: this.startedAt,
       startupCooldownActive: this.isInStartupCooldown(),
       startupCooldownRemainingMs: this.getStartupCooldownRemainingMs(),
+      autonomous: this.buildAutonomousStatus(),
       ...(this._cachedWalletInfo?.binancePositions?.length
         ? { binancePositions: this._cachedWalletInfo.binancePositions }
         : {}),
@@ -1872,6 +2458,8 @@ export interface AgentState {
     confidence?: number | null;
     rsi?: number | null;
     macd?: number | null;
+    bbPosition?: number | null;
+    vwapDev?: number | null;
     aiSummary?: string;
     aiVerdict?: string;
     aiAgrees?: boolean;
@@ -1880,7 +2468,48 @@ export interface AgentState {
   startedAt?: number;
   startupCooldownActive?: boolean;
   startupCooldownRemainingMs?: number;
+  autonomous?: AutonomousStatus;
   binancePositions?: BinanceWeb3Position[];
+  lastSignalRefreshAt?: number | null;
+  tokenIcons?: Record<string, string>;
+  livePrices?: Record<
+    string,
+    { price: number; change24hPct: number; updatedAt: number }
+  >;
+}
+
+export interface AutonomousStatus {
+  phase: "stopped" | "warming" | "scanning" | "idle" | "blocked";
+  ready: boolean;
+  headline: string;
+  blockReason?: string;
+  tradesToday: number;
+  maxTradesToday: number;
+  tradesLast24h: number;
+  txsToday: number;
+  maxTxsToday: number;
+  swapsRemainingToday: number;
+  emergencyMode: boolean;
+  startupCooldownSec: number;
+  nextCycleInSec: number | null;
+  lastCycleAt: number | null;
+  lastCycleDurationSec: number | null;
+  lastCycleTrades: number;
+  lastCycleQueued: number;
+  tradeIntervalSec: number;
+  maxPerCycle: number;
+  autoExitEnabled: boolean;
+  strategy: string;
+  failedSwapCooldowns: Array<{ symbol: string; remainingMin: number }>;
+  competitionNudge: boolean;
+}
+
+function formatDurationSec(totalSec: number): string {
+  if (totalSec < 60) return `${totalSec}s`;
+  if (totalSec < 3600) return `${Math.floor(totalSec / 60)}m ${totalSec % 60}s`;
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
 function sleep(ms: number): Promise<void> {

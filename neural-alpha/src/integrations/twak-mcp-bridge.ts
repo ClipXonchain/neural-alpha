@@ -317,11 +317,44 @@ function parsePortfolioHoldings(
  * CMC Agent Hub data flows through x402_request per
  * https://coinmarketcap.com/api/agent/#dev-steps
  */
+
+let activeTransport: StdioClientTransport | null = null;
+
+function isBenignPipeError(err: unknown): boolean {
+  const code = (err as NodeJS.ErrnoException)?.code;
+  if (code === "EPIPE" || code === "ERR_STREAM_DESTROYED") return true;
+  return /EPIPE|broken pipe/i.test(String(err));
+}
+
+/** Close the TWAK MCP child process — call on SIGINT/SIGTERM before exit (tsx watch reload). */
+export async function closeTwakMcpBridge(): Promise<void> {
+  const transport = activeTransport;
+  activeTransport = null;
+  if (!transport) return;
+  try {
+    await transport.close();
+  } catch (err) {
+    if (!isBenignPipeError(err)) {
+      logger.warn("TWAK MCP close error", { error: String(err) });
+    }
+  }
+}
+
 export async function createTwakMcpBridge(): Promise<McpBridge> {
   const command = process.env.TWAK_MCP_COMMAND || "twak";
   const args = (process.env.TWAK_MCP_ARGS || "serve").split(" ").filter(Boolean);
 
   const transport = new StdioClientTransport({ command, args });
+  activeTransport = transport;
+  transport.onerror = (err) => {
+    if (isBenignPipeError(err)) {
+      logger.warn("TWAK MCP pipe closed (benign)", {
+        code: (err as NodeJS.ErrnoException)?.code,
+      });
+      return;
+    }
+    logger.warn("TWAK MCP transport error", { error: String(err) });
+  };
   const client = new Client(
     { name: "neural-alpha", version: "1.0.0" },
     { capabilities: {} }

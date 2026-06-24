@@ -2,6 +2,15 @@ import type { PortfolioSnapshot, PortfolioPosition, TradeResult, RiskExit } from
 import { MIN_GAS_RESERVE_USD, MIN_POSITION_VALUE_USD } from "../config.js";
 import { logger } from "../utils/logger.js";
 
+const FUNDING_TOKENS = new Set([
+  "USDT", "USDC", "BUSD", "DAI", "FDUSD", "TUSD", "USD1", "BNB",
+]);
+
+function parseTradeAmount(raw?: string): number {
+  const n = parseFloat(raw ?? "");
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
 export class PortfolioTracker {
   private initialValueUsd: number;
   private cashUsd: number;
@@ -24,6 +33,12 @@ export class PortfolioTracker {
   /** Opening NAV for the current calendar day (UTC) — daily PnL baseline. */
   private dayStartValueUsd = 0;
   private currentDay = "";
+  /** Latest NAV from the most recent snapshot (live prices). */
+  private lastNavUsd = 0;
+  /** DB peak/initial restored at startup — applied after wallet sync validates NAV. */
+  private pendingNavRestore: { peakNavUsd: number; initialNavUsd: number } | null = null;
+  /** Cost basis restored from Neon when trade replay is incomplete. */
+  private persistedEntries = new Map<string, { avgEntryPrice: number; peakPnlPct?: number }>();
 
   constructor(initialCashUsd: number, deferBaseline = false) {
     this.initialValueUsd = initialCashUsd;
@@ -77,16 +92,88 @@ export class PortfolioTracker {
   }) {
     if (!state.baselineInitialized || state.peakNavUsd <= 0) return;
     if (!this.baselineInitialized) {
-      this.initialValueUsd = state.initialNavUsd;
-      this.peakValueUsd = state.peakNavUsd;
-      this.baselineInitialized = true;
-      logger.info("Portfolio NAV restored from database", {
+      this.pendingNavRestore = {
+        peakNavUsd: state.peakNavUsd,
+        initialNavUsd: state.initialNavUsd,
+      };
+      logger.info("Portfolio NAV restore deferred until wallet sync", {
         peakNavUsd: Math.round(state.peakNavUsd * 100) / 100,
         initialNavUsd: Math.round(state.initialNavUsd * 100) / 100,
       });
-    } else {
-      this.peakValueUsd = Math.max(this.peakValueUsd, state.peakNavUsd);
+      return;
     }
+    this.peakValueUsd = Math.max(this.peakValueUsd, state.peakNavUsd);
+  }
+
+  hasPendingNavRestore(): boolean {
+    return this.pendingNavRestore !== null;
+  }
+
+  /**
+   * Apply deferred DB peak/initial after on-chain NAV is known.
+   * Discards stale DB values when peak or initial diverges sharply from wallet.
+   */
+  applyPendingNavRestore(navUsd: number) {
+    if (!this.pendingNavRestore || !Number.isFinite(navUsd) || navUsd <= 0) return;
+    const { peakNavUsd, initialNavUsd } = this.pendingNavRestore;
+    this.pendingNavRestore = null;
+
+    const peakRatio = peakNavUsd / navUsd;
+    const initialRatio = initialNavUsd / navUsd;
+    const stale =
+      peakRatio > 1.25 ||
+      peakRatio < 0.5 ||
+      initialRatio > 3 ||
+      initialRatio < 0.25;
+
+    if (stale) {
+      this.initialValueUsd = navUsd;
+      this.peakValueUsd = navUsd;
+      this.baselineInitialized = true;
+      logger.info("Stale NAV state from DB discarded — realigned to wallet", {
+        navUsd: Math.round(navUsd * 100) / 100,
+        peakNavUsd: Math.round(peakNavUsd * 100) / 100,
+        initialNavUsd: Math.round(initialNavUsd * 100) / 100,
+      });
+      return;
+    }
+
+    this.initialValueUsd = initialNavUsd;
+    this.peakValueUsd = Math.max(peakNavUsd, navUsd);
+    this.baselineInitialized = true;
+    logger.info("Portfolio NAV restored from database", {
+      peakNavUsd: Math.round(this.peakValueUsd * 100) / 100,
+      initialNavUsd: Math.round(this.initialValueUsd * 100) / 100,
+      navUsd: Math.round(navUsd * 100) / 100,
+    });
+  }
+
+  /**
+   * Reset inflated peak / initial when they no longer match on-chain NAV
+   * (e.g. after selling all positions or purging phantom trades).
+   */
+  realignNavBaselineIfStale(navUsd: number) {
+    if (!this.baselineInitialized || !Number.isFinite(navUsd) || navUsd <= 0) return;
+
+    const peakRatio = this.peakValueUsd / navUsd;
+    const initialRatio = this.initialValueUsd / navUsd;
+    const stale =
+      peakRatio > 1.25 ||
+      peakRatio < 0.5 ||
+      initialRatio > 3 ||
+      initialRatio < 0.25;
+
+    if (!stale) return;
+
+    const oldPeak = this.peakValueUsd;
+    const oldInitial = this.initialValueUsd;
+    this.initialValueUsd = navUsd;
+    this.peakValueUsd = navUsd;
+    logger.info("Portfolio NAV baseline realigned to wallet", {
+      navUsd: Math.round(navUsd * 100) / 100,
+      oldPeak: Math.round(oldPeak * 100) / 100,
+      oldInitial: Math.round(oldInitial * 100) / 100,
+    });
   }
 
   /** Merge confirmed trades loaded from Neon or on-chain backfill (survives restarts). */
@@ -100,6 +187,40 @@ export class PortfolioTracker {
     this.tradeHistory.sort((a, b) => a.timestamp - b.timestamp);
     this.rebuildDailyTradeCounts();
     logger.info("Trade history hydrated from database", { count: trades.length });
+  }
+
+  /** Restore saved entry prices / peak PnL from Neon (survives restarts). */
+  restorePersistedEntries(entries: Record<string, { avgEntryPrice: number; peakPnlPct?: number }>) {
+    for (const [symbol, entry] of Object.entries(entries)) {
+      if (entry.avgEntryPrice > 0) {
+        this.persistedEntries.set(symbol.toUpperCase(), entry);
+      }
+    }
+  }
+
+  /** Export open-position cost basis for Neon persistence. */
+  exportPositionEntries(): Record<string, { avgEntryPrice: number; peakPnlPct?: number }> {
+    const out: Record<string, { avgEntryPrice: number; peakPnlPct?: number }> = {};
+    for (const [symbol, pos] of this.positions) {
+      if (pos.avgEntryPrice <= 0) continue;
+      const peak = this.peakPnlPct.get(symbol);
+      out[symbol] = {
+        avgEntryPrice: pos.avgEntryPrice,
+        ...(peak !== undefined ? { peakPnlPct: peak } : {}),
+      };
+    }
+    return out;
+  }
+
+  private resolveEntryPrice(
+    symbol: string,
+    spotPrice: number | undefined
+  ): number {
+    const fromTrades = this.inferEntryPriceFromTrades(symbol);
+    if (fromTrades && fromTrades > 0) return fromTrades;
+    const persisted = this.persistedEntries.get(symbol.toUpperCase())?.avgEntryPrice;
+    if (persisted && persisted > 0) return persisted;
+    return spotPrice && spotPrice > 0 ? spotPrice : 0;
   }
 
   /** Mark a trade as persisted/confirmed so it stays in Recent Trades after reconcile. */
@@ -154,6 +275,13 @@ export class PortfolioTracker {
     return this.dailyTradesByDate.get(today) || 0;
   }
 
+  /** Confirmed successful swaps since a unix-ms timestamp. */
+  countSuccessfulTradesSince(sinceMs: number): number {
+    return this.tradeHistory.filter(
+      (t) => t.success && t.timestamp >= sinceMs
+    ).length;
+  }
+
   clearPositions() {
     this.positions.clear();
     this.peakPnlPct.clear();
@@ -186,8 +314,10 @@ export class PortfolioTracker {
       const existing = this.positions.get(symbol);
       if (existing) {
         existing.amount = amount;
+        const entry = this.resolveEntryPrice(symbol, prices.get(symbol));
+        if (entry > 0) existing.avgEntryPrice = entry;
       } else {
-        const price = prices.get(symbol) ?? 0;
+        const price = this.resolveEntryPrice(symbol, prices.get(symbol));
         if (price > 0) {
           this.positions.set(symbol, { amount, avgEntryPrice: price });
           added.push(symbol);
@@ -195,7 +325,212 @@ export class PortfolioTracker {
       }
     }
 
+    for (const [symbol, pos] of this.positions) {
+      const peak = this.persistedEntries.get(symbol)?.peakPnlPct;
+      if (peak !== undefined && !this.peakPnlPct.has(symbol)) {
+        this.peakPnlPct.set(symbol, peak);
+      }
+    }
+
+    this.refreshEntryPricesFromTrades();
     return { added, removed };
+  }
+
+  private collectSymbolsFromTradeHistory(): Set<string> {
+    const symbols = new Set<string>();
+    for (const t of this.tradeHistory) {
+      if (!t.success) continue;
+      const from = t.fromToken.toUpperCase();
+      const to = t.toToken.toUpperCase();
+      if (FUNDING_TOKENS.has(from) && !FUNDING_TOKENS.has(to)) symbols.add(to);
+      if (!FUNDING_TOKENS.has(from) && FUNDING_TOKENS.has(to)) symbols.add(from);
+    }
+    return symbols;
+  }
+
+  /**
+   * Replay buy/sell ledger for one token — weighted-average cost basis.
+   */
+  private replaySymbolLedger(symbol: string): { qty: number; avgEntryPrice: number } {
+    const sym = symbol.toUpperCase();
+    let qty = 0;
+    let costBasis = 0;
+
+    const trades = [...this.tradeHistory].sort((a, b) => a.timestamp - b.timestamp);
+    for (const t of trades) {
+      if (!t.success) continue;
+      const from = t.fromToken.toUpperCase();
+      const to = t.toToken.toUpperCase();
+      const price = t.priceAtExecution > 0 ? t.priceAtExecution : 0;
+
+      const isBuy = FUNDING_TOKENS.has(from) && to === sym;
+      const isSell = from === sym && FUNDING_TOKENS.has(to);
+      if (!isBuy && !isSell) continue;
+
+      if (isBuy) {
+        let tokenQty = parseTradeAmount(t.toAmount);
+        if (tokenQty <= 0 && price > 0) {
+          tokenQty = parseTradeAmount(t.fromAmount) / price;
+        }
+        if (tokenQty <= 0 || price <= 0) continue;
+        costBasis += price * tokenQty;
+        qty += tokenQty;
+        continue;
+      }
+
+      let soldQty = parseTradeAmount(t.fromAmount);
+      if (soldQty <= 0 && price > 0) {
+        soldQty = parseTradeAmount(t.toAmount) / price;
+      }
+      if (soldQty <= 0 || qty <= 0) continue;
+      const avg = costBasis / qty;
+      const sold = Math.min(soldQty, qty);
+      qty -= sold;
+      costBasis = avg * qty;
+      if (qty <= 1e-12) {
+        qty = 0;
+        costBasis = 0;
+      }
+    }
+
+    if (qty <= 0 || costBasis <= 0) return { qty: 0, avgEntryPrice: 0 };
+    return { qty, avgEntryPrice: costBasis / qty };
+  }
+
+  /**
+   * Rebuild open positions from trade history after DB/chain hydrate.
+   * When seedAmounts is true (cold start), pre-populates amounts before wallet sync.
+   */
+  rebuildPositionsFromTrades(opts?: { seedAmounts?: boolean }): number {
+    let seeded = 0;
+    for (const sym of this.collectSymbolsFromTradeHistory()) {
+      const { qty, avgEntryPrice } = this.replaySymbolLedger(sym);
+      if (qty <= 1e-12 || avgEntryPrice <= 0) continue;
+
+      const existing = this.positions.get(sym);
+      if (existing) {
+        existing.avgEntryPrice = avgEntryPrice;
+      } else if (opts?.seedAmounts) {
+        this.positions.set(sym, { amount: qty, avgEntryPrice });
+        seeded++;
+      }
+    }
+
+    const updated = this.refreshEntryPricesFromTrades();
+    if (seeded > 0) {
+      logger.info("Open positions seeded from trade history", { seeded, entriesRefreshed: updated });
+    } else if (updated > 0) {
+      logger.info("Entry prices rebuilt from trade history", { updated });
+    }
+    return seeded;
+  }
+
+  /**
+   * Recompute weighted-average entry from confirmed buy/sell trade history.
+   * Fixes positions that were synced from wallet using spot price as cost basis.
+   */
+  inferEntryPriceFromTrades(symbol: string): number | undefined {
+    const { qty, avgEntryPrice } = this.replaySymbolLedger(symbol);
+    if (qty <= 0 || avgEntryPrice <= 0) return undefined;
+    return avgEntryPrice;
+  }
+
+  /** Apply trade-derived entry prices to every open position when available. */
+  refreshEntryPricesFromTrades(): number {
+    let updated = 0;
+    for (const [symbol, pos] of this.positions) {
+      const inferred = this.inferEntryPriceFromTrades(symbol);
+      if (inferred && inferred > 0 && Math.abs(inferred - pos.avgEntryPrice) / inferred > 0.0001) {
+        pos.avgEntryPrice = inferred;
+        updated++;
+      }
+    }
+    if (updated > 0) {
+      logger.info("Entry prices refreshed from trade history", { updated });
+    }
+    return updated;
+  }
+
+  /**
+   * Win rate from confirmed sells — replays cost basis when realizedPnl is missing
+   * (common for chain-backfilled trades).
+   */
+  getClosedTradeStats(): {
+    closedSells: number;
+    wins: number;
+    losses: number;
+    winRate: number;
+    realizedPnl: number;
+  } {
+    const ledgers = new Map<string, { qty: number; cost: number }>();
+    let wins = 0;
+    let losses = 0;
+    let closedSells = 0;
+    let realizedPnl = 0;
+
+    const trades = [...this.tradeHistory]
+      .filter((t) => t.success)
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    for (const t of trades) {
+      const from = t.fromToken.toUpperCase();
+      const to = t.toToken.toUpperCase();
+      const price = t.priceAtExecution > 0 ? t.priceAtExecution : 0;
+      const isBuy = FUNDING_TOKENS.has(from) && !FUNDING_TOKENS.has(to);
+      const isSell = !FUNDING_TOKENS.has(from) && FUNDING_TOKENS.has(to);
+
+      if (isBuy) {
+        const sym = to;
+        let tokenQty = parseTradeAmount(t.toAmount);
+        if (tokenQty <= 0 && price > 0) {
+          tokenQty = parseTradeAmount(t.fromAmount) / price;
+        }
+        if (tokenQty <= 0 || price <= 0) continue;
+        const cur = ledgers.get(sym) ?? { qty: 0, cost: 0 };
+        cur.cost += price * tokenQty;
+        cur.qty += tokenQty;
+        ledgers.set(sym, cur);
+        continue;
+      }
+
+      if (!isSell) continue;
+
+      const sym = from;
+      let soldQty = parseTradeAmount(t.fromAmount);
+      if (soldQty <= 0 && price > 0) {
+        soldQty = parseTradeAmount(t.toAmount) / price;
+      }
+      if (soldQty <= 0) continue;
+
+      let proceeds = parseTradeAmount(t.toAmount);
+      if (proceeds <= 0 && price > 0) proceeds = soldQty * price;
+
+      let pnl = t.realizedPnl;
+      const ledger = ledgers.get(sym);
+      if (pnl === undefined) {
+        if (!ledger || ledger.qty <= 0) continue;
+        const avgEntry = ledger.cost / ledger.qty;
+        const sold = Math.min(soldQty, ledger.qty);
+        pnl = proceeds - avgEntry * sold;
+      }
+
+      if (ledger && ledger.qty > 0) {
+        const avg = ledger.cost / ledger.qty;
+        const sold = Math.min(soldQty, ledger.qty);
+        ledger.qty -= sold;
+        ledger.cost = ledger.qty > 0 ? avg * ledger.qty : 0;
+        if (ledger.qty <= 1e-12) ledgers.delete(sym);
+        else ledgers.set(sym, ledger);
+      }
+
+      closedSells++;
+      realizedPnl += pnl;
+      if (pnl >= 0) wins++;
+      else losses++;
+    }
+
+    const winRate = closedSells > 0 ? (wins / closedSells) * 100 : 0;
+    return { closedSells, wins, losses, winRate, realizedPnl };
   }
 
   /** Drop Binance Web3 aggregate rows once real on-chain txs are available. */
@@ -359,6 +694,22 @@ export class PortfolioTracker {
     return pnl;
   }
 
+  /** Merge or replace a confirmed on-chain trade (by tx hash). */
+  upsertChainTrade(trade: import("../utils/types.js").TradeResult) {
+    if (!trade.txHash) return;
+    const hash = trade.txHash.toLowerCase();
+    const idx = this.tradeHistory.findIndex(
+      (t) => t.txHash?.toLowerCase() === hash
+    );
+    if (idx >= 0) {
+      this.tradeHistory[idx] = trade;
+    } else if (!this.tradeHistory.some((t) => t.orderId === trade.orderId)) {
+      this.tradeHistory.push(trade);
+    }
+    this.persistentTradeIds.add(trade.orderId);
+    this.tradeHistory.sort((a, b) => a.timestamp - b.timestamp);
+  }
+
   recordTrade(result: TradeResult) {
     this.tradeHistory.push(result);
   }
@@ -368,9 +719,18 @@ export class PortfolioTracker {
     this.dailyTradesByDate.set(today, (this.dailyTradesByDate.get(today) || 0) + 1);
   }
 
-  snapshot(currentPrices: Map<string, number>): PortfolioSnapshot {
+  snapshot(
+    currentPrices: Map<string, number>,
+    exitRules?: {
+      stopLossPct: number;
+      takeProfitPct: number;
+      trailingActivatePct?: number;
+    }
+  ): PortfolioSnapshot {
     const positionSnapshots: PortfolioPosition[] = [];
     let positionsValueUsd = 0;
+    const slPct = exitRules?.stopLossPct ?? 0;
+    const tpPct = exitRules?.takeProfitPct ?? 0;
 
     for (const [symbol, pos] of this.positions) {
       const currentPrice = currentPrices.get(symbol) || pos.avgEntryPrice;
@@ -378,18 +738,37 @@ export class PortfolioTracker {
       if (valueUsd < MIN_POSITION_VALUE_USD) continue;
       positionsValueUsd += valueUsd;
 
-      positionSnapshots.push({
+      const entry = pos.avgEntryPrice;
+      const pnlPct = entry > 0 ? ((currentPrice - entry) / entry) * 100 : 0;
+      const peak = this.peakPnlPct.get(symbol);
+      const entryFromTrades = this.inferEntryPriceFromTrades(symbol);
+
+      const snap: PortfolioPosition = {
         symbol,
         amount: pos.amount,
-        avgEntryPrice: pos.avgEntryPrice,
+        avgEntryPrice: entry,
         currentPrice,
-        unrealizedPnl: (currentPrice - pos.avgEntryPrice) * pos.amount,
-        unrealizedPnlPct: ((currentPrice - pos.avgEntryPrice) / pos.avgEntryPrice) * 100,
+        unrealizedPnl: (currentPrice - entry) * pos.amount,
+        unrealizedPnlPct: pnlPct,
         weight: 0,
-      });
+      };
+
+      if (exitRules && entry > 0) {
+        snap.stopLossPrice = entry * (1 - Math.abs(slPct) / 100);
+        snap.takeProfitPrice = entry * (1 + tpPct / 100);
+        snap.distanceToStopPct = pnlPct + Math.abs(slPct);
+        snap.distanceToTakeProfitPct = tpPct - pnlPct;
+        if (peak !== undefined) snap.peakPnlPct = peak;
+      }
+      if (entryFromTrades && entryFromTrades > 0) {
+        snap.entryFromTrades = Math.abs(entryFromTrades - entry) / entryFromTrades < 0.001;
+      }
+
+      positionSnapshots.push(snap);
     }
 
     const totalValueUsd = this.cashUsd + this.gasReserveUsd + positionsValueUsd;
+    this.lastNavUsd = totalValueUsd;
 
     for (const p of positionSnapshots) {
       p.weight = totalValueUsd > 0 ? ((p.amount * p.currentPrice) / totalValueUsd) * 100 : 0;
@@ -413,6 +792,9 @@ export class PortfolioTracker {
         ? ((totalValueUsd - this.initialValueUsd) / this.initialValueUsd) * 100
         : 0,
       realizedPnl: this.realizedPnlUsd,
+      ...(this.baselineInitialized
+        ? { initialNavUsd: this.initialValueUsd }
+        : {}),
       gasReserveUsd: this.gasReserveUsd,
       maxDrawdownPct: drawdownPct,
       tradeCount: this.tradeHistory.length,
@@ -431,9 +813,10 @@ export class PortfolioTracker {
   }
 
   getMaxDrawdown(): number {
-    const totalValue = this.cashUsd + this.gasReserveUsd +
-      Array.from(this.positions.values()).reduce((s, p) => s + p.amount * p.avgEntryPrice, 0);
-    return this.computeDrawdown(totalValue);
+    if (this.lastNavUsd > 0) {
+      return this.computeDrawdown(this.lastNavUsd);
+    }
+    return this.computeDrawdown(this.estimateNavUsd());
   }
 
   /**

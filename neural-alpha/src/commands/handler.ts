@@ -263,6 +263,11 @@ export async function executeCommand(
     intent = regexIntent;
   }
 
+  // Sells without an explicit $ amount mean "full position" — override LLM defaults.
+  if (intent.action === "sell" && extractAmount(raw) === undefined) {
+    intent.amount = undefined;
+  }
+
   logger.info("Command received", {
     raw,
     intent: intent.action,
@@ -452,22 +457,21 @@ async function ensureSellablePosition(
   const pos = portfolio.getAllPositions().get(symbol);
   if (pos && pos.amount > 0) return { ok: true };
 
+  try {
+    if (await agent.ensureTrackedPosition(symbol)) return { ok: true };
+  } catch {
+    /* fall through */
+  }
+
   const state = agent.getStateSnapshot();
   const onChain = state.binancePositions?.find((p) => p.symbol === symbol);
   if (onChain && onChain.remainQty > 0) {
-    try {
-      await agent.forceResync();
-      const after = agent.getPortfolio().getAllPositions().get(symbol);
-      if (after && after.amount > 0) return { ok: true };
-    } catch {
-      /* fall through */
-    }
     return {
       ok: false,
       message: [
         `Wallet shows ${onChain.remainQty.toFixed(4)} ${symbol} on-chain`,
-        `but the agent portfolio is not synced yet.`,
-        `Try "portfolio" or wait for the next sync cycle.`,
+        `but the agent could not read a transferable balance yet.`,
+        `Try again in a moment or use the wallet resync button.`,
       ].join("\n"),
     };
   }
@@ -548,8 +552,10 @@ async function executeTrade(
   };
 
   try {
+    const sellAll = intent.action === "sell" && intent.amount === undefined;
     const { result, violations, tradeSizeUsd } = await agent.executeManualTrade(signal, {
       amountUsd: intent.amount,
+      sellAll,
     });
     const sizeUsd = tradeSizeUsd ?? amount;
     if (!result) {
@@ -579,6 +585,10 @@ async function executeTrade(
     }
     const r = result;
     if (r.success) {
+      const soldQty =
+        r.fromAmount && parseFloat(r.fromAmount) > 0
+          ? `${parseFloat(r.fromAmount).toFixed(4)} ${symbol}`
+          : `$${sizeUsd.toFixed(2)}`;
       return {
         ok: true,
         intent: intent.action,
@@ -586,7 +596,7 @@ async function executeTrade(
           `✅ ${intent.action.toUpperCase()} EXECUTED`,
           `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
           `Token:   ${symbol}`,
-          `Amount:  $${sizeUsd.toFixed(2)}`,
+          `Amount:  ${soldQty}`,
           `Tx:      ${r.txHash ?? "confirmed"}`,
           ``,
           `💡 Check "portfolio" to see updated positions.`,

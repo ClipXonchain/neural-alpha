@@ -78,23 +78,23 @@ export function RiskPanel({ state }: { state: AgentState }) {
     {
       label: "Max Drawdown",
       current: state.currentDrawdownPct,
-      max: 30,
+      max: state.maxDrawdownLimit,
       unit: "%",
-      passed: state.currentDrawdownPct < 30,
+      passed: state.currentDrawdownPct < state.maxDrawdownLimit && !state.emergencyMode,
     },
     {
       label: "Daily Trades",
       current: state.todayTrades,
-      max: 10,
+      max: state.maxDailyTradesLimit,
       unit: "",
-      passed: state.todayTrades < 10,
+      passed: state.todayTrades < state.maxDailyTradesLimit,
     },
     {
       label: "Open Positions",
       current: state.positions.length,
-      max: 5,
+      max: state.maxPositionsLimit,
       unit: "",
-      passed: state.positions.length <= 5,
+      passed: state.positions.length <= state.maxPositionsLimit,
     },
     {
       label: "Cash Reserve",
@@ -132,12 +132,14 @@ export function RiskPanel({ state }: { state: AgentState }) {
         <span
           className={cn(
             "text-[10px] font-mono font-bold px-2 py-0.5 rounded",
-            allPassed
-              ? "bg-neon/10 text-neon border border-neon/20"
-              : "bg-danger/10 text-danger border border-danger/20"
+            state.emergencyMode
+              ? "bg-danger/10 text-danger border border-danger/20"
+              : allPassed
+                ? "bg-neon/10 text-neon border border-neon/20"
+                : "bg-warning/10 text-warning border border-warning/20"
           )}
         >
-          {allPassed ? "ALL CLEAR" : "WARNING"}
+          {state.emergencyMode ? "EMERGENCY" : allPassed ? "ALL CLEAR" : "WARNING"}
         </span>
       </div>
 

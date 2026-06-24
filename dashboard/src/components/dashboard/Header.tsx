@@ -24,8 +24,33 @@ interface HeaderProps {
 }
 
 export function Header({ state, onStart, onStop, connected, readOnly }: HeaderProps) {
+  const auto = state.autonomous;
   const isRunning = connected && state.status === "running";
   const showOffline = connected === false;
+
+  const statusLabel = showOffline
+    ? "OFFLINE"
+    : !isRunning
+      ? "STOPPED"
+      : auto.phase === "warming"
+        ? "WARMING UP"
+        : auto.phase === "scanning"
+          ? "SCANNING"
+          : auto.phase === "blocked"
+            ? "BLOCKED"
+            : "RUNNING";
+
+  const statusColor = showOffline
+    ? "danger"
+    : auto.phase === "blocked"
+      ? "danger"
+      : auto.phase === "warming"
+        ? "warning"
+        : auto.phase === "scanning"
+          ? "cyan"
+          : isRunning
+            ? "neon"
+            : "warning";
 
   const uptimeHrs = Math.floor(state.uptime / 3600);
   const uptimeMin = Math.floor((state.uptime % 3600) / 60);
@@ -67,28 +92,31 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
           transition={{ delay: 0.2 }}
           className={cn(
             "relative flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono font-medium",
-            showOffline
-              ? "bg-danger/10 text-danger border border-danger/20"
-              : isRunning
-                ? "bg-neon/10 text-neon border border-neon/20"
-                : "bg-warning/10 text-warning border border-warning/20"
+            statusColor === "danger" && "bg-danger/10 text-danger border border-danger/20",
+            statusColor === "warning" && "bg-warning/10 text-warning border border-warning/20",
+            statusColor === "cyan" && "bg-cyan/10 text-cyan border border-cyan/20",
+            statusColor === "neon" && "bg-neon/10 text-neon border border-neon/20"
           )}
         >
           <span className="relative flex size-2">
             <span
               className={cn(
                 "absolute inline-flex size-full rounded-full opacity-75",
-                isRunning && "animate-ping bg-neon"
+                isRunning && auto.phase === "idle" && "animate-ping bg-neon",
+                auto.phase === "scanning" && "animate-ping bg-cyan"
               )}
             />
             <span
               className={cn(
                 "relative inline-flex size-2 rounded-full",
-                showOffline ? "bg-danger" : isRunning ? "bg-neon" : "bg-warning"
+                statusColor === "danger" && "bg-danger",
+                statusColor === "warning" && "bg-warning",
+                statusColor === "cyan" && "bg-cyan",
+                statusColor === "neon" && "bg-neon"
               )}
             />
           </span>
-          {showOffline ? "OFFLINE" : isRunning ? "RUNNING" : "STOPPED"}
+          {statusLabel}
         </motion.div>
 
         <div className="hidden md:flex items-center gap-3 text-xs font-mono text-text-secondary">
@@ -125,40 +153,50 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
           transition={{ delay: 0.4 }}
           className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-lg glass-raised text-xs font-mono"
         >
-          <Zap
-            className={cn(
-              "size-3",
-              state.fearGreedIndex < 30
-                ? "text-danger"
-                : state.fearGreedIndex < 50
-                  ? "text-warning"
-                  : "text-neon"
-            )}
-          />
-          <span className="text-text-secondary">F&G</span>
-          <span
-            className={cn(
-              "font-semibold",
-              state.fearGreedIndex < 30
-                ? "text-danger"
-                : state.fearGreedIndex < 50
-                  ? "text-warning"
-                  : "text-neon"
-            )}
-          >
-            {state.fearGreedIndex}
-          </span>
-          <span className="text-text-muted">
-            {state.fearGreedIndex < 25
-              ? "Extreme Fear"
-              : state.fearGreedIndex < 45
-                ? "Fear"
-                : state.fearGreedIndex < 55
-                  ? "Neutral"
-                  : state.fearGreedIndex < 75
-                    ? "Greed"
-                    : "Extreme Greed"}
-          </span>
+          {state.fearGreedIndex != null ? (
+            <>
+              <Zap
+                className={cn(
+                  "size-3",
+                  state.fearGreedIndex < 30
+                    ? "text-danger"
+                    : state.fearGreedIndex < 50
+                      ? "text-warning"
+                      : "text-neon"
+                )}
+              />
+              <span className="text-text-secondary">F&G</span>
+              <span
+                className={cn(
+                  "font-semibold",
+                  state.fearGreedIndex < 30
+                    ? "text-danger"
+                    : state.fearGreedIndex < 50
+                      ? "text-warning"
+                      : "text-neon"
+                )}
+              >
+                {state.fearGreedIndex}
+              </span>
+              <span className="text-text-muted">
+                {state.fearGreedIndex < 25
+                  ? "Extreme Fear"
+                  : state.fearGreedIndex < 45
+                    ? "Fear"
+                    : state.fearGreedIndex < 55
+                      ? "Neutral"
+                      : state.fearGreedIndex < 75
+                        ? "Greed"
+                        : "Extreme Greed"}
+              </span>
+            </>
+          ) : (
+            <>
+              <Zap className="size-3 text-text-muted" />
+              <span className="text-text-secondary">F&G</span>
+              <span className="text-text-muted">—</span>
+            </>
+          )}
         </motion.div>
 
         {/* Controls — hidden on public/read-only deployments */}

@@ -20,6 +20,19 @@ export const ELIGIBLE_TOKENS: string[] = [
   "SUSHI", "PEAQ", "COAI", "BDCA", "XAUM",
 ];
 
+/** Low-conviction / micro-cap tokens — excluded from scans, signals, and new buys. */
+export const EXCLUDED_TOKENS = new Set<string>([
+  ...(process.env.EXCLUDED_TOKENS?.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean) ?? []),
+  "NEX", "BTT", "SHIB", "AB", "BRETT", "NFT", "U", "HTX", "BDX", "RAY",
+  "ZIL", "XCN", "BONK", "ROSE", "VELO", "LUNC", "NILA", "REAL", "FLOKI",
+  "JUDAO", "BABYDOGE", "GOMINING", "XAUT",
+]);
+
+/** Skip tokens priced below this USD threshold (meme/dust). */
+export const MIN_TRADABLE_PRICE_USD = parseFloat(
+  process.env.MIN_TRADABLE_PRICE_USD || "0.01"
+);
+
 export const STABLECOINS = new Set([
   "USDT", "USDC", "DAI", "USD1", "USDe", "USDD", "TUSD", "FDUSD", "USDf",
   "FRAX", "FRXUSD", "USDF", "DUSD", "lisUSD", "EURI", "XUSD", "STABLE",
@@ -27,12 +40,12 @@ export const STABLECOINS = new Set([
 
 /** High-momentum eligible tokens — always on watchlist */
 export const MOMENTUM_CORE = [
-  "FET", "FLOKI", "PENDLE", "INJ", "BONK", "APE", "CAKE", "1INCH", "SNX", "DEXE",
+  "FET", "PENDLE", "INJ", "APE", "CAKE", "1INCH", "SNX", "DEXE",
 ];
 
 /** Rotated in when trending or showing movement */
 export const MOMENTUM_VOLATILE = [
-  "PENGU", "AXS", "COMP", "LDO", "SUSHI", "RAY", "ZRO", "STG", "NXPC", "CHEEMS",
+  "PENGU", "AXS", "COMP", "LDO", "SUSHI", "ZRO", "STG", "NXPC", "CHEEMS",
 ];
 
 /** Low-beta anchors for stability / hedge */
@@ -56,7 +69,27 @@ export const HIGH_CAP_TOKENS = ANCHOR_TOKENS;
 export const MID_CAP_TOKENS = MOMENTUM_CORE;
 
 export function buildDefaultWatchlist(): string[] {
-  return [...MOMENTUM_CORE, ...ANCHOR_TOKENS];
+  return [...MOMENTUM_CORE, ...ANCHOR_TOKENS].filter((s) =>
+    isTradableToken(s)
+  );
+}
+
+export function isExcludedToken(symbol: string): boolean {
+  return EXCLUDED_TOKENS.has(symbol.toUpperCase());
+}
+
+export function isEligibleToken(symbol: string): boolean {
+  return ELIGIBLE_TOKENS.includes(symbol.toUpperCase());
+}
+
+/** Competition-eligible, not stable, not blocklisted, and above min price when known. */
+export function isTradableToken(symbol: string, price?: number | null): boolean {
+  const upper = symbol.toUpperCase();
+  if (!isEligibleToken(upper)) return false;
+  if (isStablecoin(upper)) return false;
+  if (isExcludedToken(upper)) return false;
+  if (price != null && price > 0 && price < MIN_TRADABLE_PRICE_USD) return false;
+  return true;
 }
 
 export const COMPETITION_CONTRACT = "0x212c61b9b72c95d95bf29cf032f5e5635629aed5";
@@ -92,14 +125,25 @@ export function loadConfig(): AgentConfig {
   const num = (env: string | undefined, fallback: number) =>
     env !== undefined && env !== "" ? parseFloat(env) : fallback;
 
+  const disableDrawdownLimit = process.env.DISABLE_DRAWDOWN_LIMIT === "true";
+  const maxDrawdownPct = disableDrawdownLimit
+    ? 100
+    : num(process.env.MAX_DRAWDOWN_PCT, r.maxDrawdownPct);
+
   return {
     mode,
     strategy,
     positionSizeMultiplier: profile.positionSizeMultiplier,
     tradeIntervalMs: parseInt(process.env.TRADE_INTERVAL_MS || defaultInterval, 10),
     maxPositionSizeUsd: num(process.env.MAX_POSITION_SIZE_USD, 100),
-    maxDailyTrades: Math.round(num(process.env.MAX_DAILY_TRADES, r.maxDailyTrades)),
-    maxDrawdownPct: num(process.env.MAX_DRAWDOWN_PCT, r.maxDrawdownPct),
+    maxDailyTrades: Math.round(
+      process.env.MAX_DAILY_TRADES !== undefined && process.env.MAX_DAILY_TRADES !== ""
+        ? parseFloat(process.env.MAX_DAILY_TRADES)
+        : 10
+    ),
+    maxDrawdownPct,
+    drawdownLimitEnabled: !disableDrawdownLimit && maxDrawdownPct < 100,
+    signalRefreshMs: parseInt(process.env.SIGNAL_REFRESH_MS || "300000", 10),
     slippageTolerance: num(process.env.SLIPPAGE_TOLERANCE, 1),
     baseCurrency: "USDT",
     swapCurrencies: parseSwapCurrencies(),
@@ -120,10 +164,6 @@ export function loadConfig(): AgentConfig {
     ),
     maxOnChainTxPerDay: Math.round(num(process.env.MAX_ONCHAIN_TX_PER_DAY, 10)),
   };
-}
-
-export function isEligibleToken(symbol: string): boolean {
-  return ELIGIBLE_TOKENS.includes(symbol.toUpperCase());
 }
 
 export function isStablecoin(symbol: string): boolean {

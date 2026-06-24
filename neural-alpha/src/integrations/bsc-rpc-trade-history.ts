@@ -3,6 +3,7 @@ import { BSC_TOKEN_ADDRESSES } from "./bsc-token-addresses.js";
 import { logger } from "../utils/logger.js";
 import type { TradeResult } from "../utils/types.js";
 import { fetchRawBinancePositions } from "./binance-web3-trade-history.js";
+import { getTokenDecimals, preloadDecimals, tokenAmountFromRaw } from "./bsc-token-decimals.js";
 
 const DEFAULT_RPC_URLS = [
   "https://bsc-dataseed.binance.org/",
@@ -56,6 +57,7 @@ interface RpcLog {
   topics: string[];
   data: string;
   transactionHash: string;
+  blockNumber: string;
 }
 
 interface BlockRange {
@@ -92,7 +94,7 @@ async function rpcCall<T>(method: string, params: unknown[]): Promise<T> {
       const json = (await res.json()) as { result?: T; error?: { message?: string } };
       if (json.error) {
         const msg = json.error.message ?? "RPC error";
-        if (/limit|rate|too many/i.test(msg)) {
+        if (/limit|rate|too many|archive/i.test(msg)) {
           rpcEndpointIndex++;
           lastError = new Error(msg);
           await sleep(250);
@@ -154,16 +156,48 @@ async function findBlockNearTimestamp(targetMs: number): Promise<number> {
   return lo;
 }
 
-function parseTransferLog(log: RpcLog, blockTimestampMs: number) {
+function parseTransferLog(
+  log: RpcLog,
+  blockTimestampMs: number,
+  decimalsByContract: Map<string, number>
+) {
   if (log.topics.length < 3 || log.topics[0]?.toLowerCase() !== TRANSFER_TOPIC) return null;
   const from = ("0x" + log.topics[1]!.slice(-40)).toLowerCase();
   const to = ("0x" + log.topics[2]!.slice(-40)).toLowerCase();
   const contract = log.address.toLowerCase();
   const symbol = symbolForContract(contract);
   const raw = BigInt(log.data || "0x0");
-  const amount = Number(raw) / 1e18;
+  const decimals = decimalsByContract.get(contract) ?? 18;
+  const amount = tokenAmountFromRaw(raw, decimals);
   if (!(amount > 0)) return null;
   return { hash: log.transactionHash, from, to, amount, symbol, timestamp: blockTimestampMs };
+}
+
+async function parseTransferLogs(
+  logs: RpcLog[],
+  blockTimestampMs: number
+): Promise<Array<{
+  hash: string;
+  from: string;
+  to: string;
+  amount: number;
+  symbol: string;
+  timestamp: number;
+}>> {
+  const contracts = logs
+    .filter((l) => l.topics[0]?.toLowerCase() === TRANSFER_TOPIC)
+    .map((l) => l.address.toLowerCase());
+  const decimalsByContract = await preloadDecimals(contracts);
+  return logs
+    .map((l) => parseTransferLog(l, blockTimestampMs, decimalsByContract))
+    .filter(Boolean) as Array<{
+    hash: string;
+    from: string;
+    to: string;
+    amount: number;
+    symbol: string;
+    timestamp: number;
+  }>;
 }
 
 async function parseSwapsFromTx(
@@ -173,16 +207,7 @@ async function parseSwapsFromTx(
 ): Promise<TradeResult[]> {
   const receipt = await rpcCall<{ logs: RpcLog[] }>("eth_getTransactionReceipt", [txHash]);
   const walletLower = wallet.toLowerCase();
-  const transfers = receipt.logs
-    .map((l) => parseTransferLog(l, blockTimestampMs))
-    .filter(Boolean) as Array<{
-    hash: string;
-    from: string;
-    to: string;
-    amount: number;
-    symbol: string;
-    timestamp: number;
-  }>;
+  const transfers = await parseTransferLogs(receipt.logs, blockTimestampMs);
 
   const legs = transfers.filter((t) => t.from === walletLower || t.to === walletLower);
   if (legs.length === 0) return [];
@@ -235,6 +260,64 @@ async function parseSwapsFromTx(
   return trades;
 }
 
+function mergeBlockRanges(ranges: BlockRange[]): BlockRange[] {
+  if (ranges.length === 0) return [];
+  const sorted = [...ranges].sort((a, b) => a.from - b.from);
+  const merged: BlockRange[] = [{ ...sorted[0]! }];
+  for (let i = 1; i < sorted.length; i++) {
+    const cur = sorted[i]!;
+    const last = merged[merged.length - 1]!;
+    if (cur.from <= last.to + 1) {
+      last.to = Math.max(last.to, cur.to);
+    } else {
+      merged.push({ ...cur });
+    }
+  }
+  return merged;
+}
+
+function splitWideRanges(ranges: BlockRange[], maxSpan: number): BlockRange[] {
+  const out: BlockRange[] = [];
+  for (const r of ranges) {
+    if (r.to - r.from + 1 <= maxSpan) {
+      out.push(r);
+      continue;
+    }
+    for (let start = r.from; start <= r.to; start += maxSpan) {
+      out.push({ from: start, to: Math.min(r.to, start + maxSpan - 1) });
+    }
+  }
+  return out;
+}
+
+/** Newest ranges first so recent sells appear before a long historical scan finishes. */
+async function buildScanRanges(
+  hints: Array<{ lastTx: number; activity: number }>
+): Promise<BlockRange[]> {
+  const window = parseInt(process.env.BSC_TRADE_SCAN_WINDOW || "6000", 10) || 6000;
+  const maxSpan = parseInt(process.env.BSC_BLOCK_SCAN_MAX_SPAN || "12000", 10) || 12000;
+  const recentDepth =
+    parseInt(process.env.BSC_TRADE_RECENT_BLOCKS || "5000", 10) || 5000;
+
+  const head = await getLatestBlock();
+  const ranges: BlockRange[] = [{ from: Math.max(1, head - recentDepth), to: head }];
+
+  for (const hint of hints) {
+    if (!(hint.lastTx > 0)) continue;
+    for (const ms of [hint.lastTx - BINANCE_TX_TIME_OFFSET_MS, hint.lastTx]) {
+      if (!(ms > 0)) continue;
+      const center = await findBlockNearTimestamp(ms);
+      ranges.push({
+        from: Math.max(1, center - window),
+        to: center + window,
+      });
+    }
+  }
+
+  const merged = splitWideRanges(mergeBlockRanges(ranges), maxSpan);
+  return merged.sort((a, b) => b.to - a.to);
+}
+
 async function scanBlockRangeForSwaps(
   wallet: string,
   fromBlock: number,
@@ -247,16 +330,16 @@ async function scanBlockRangeForSwaps(
   const walletLower = wallet.toLowerCase();
   const batchSize = 25;
 
-    for (let start = toBlock; start >= fromBlock && acc.length < limit; start -= batchSize) {
-      const end = Math.max(fromBlock, start - batchSize + 1);
-      const blocks = await Promise.all(
-        Array.from({ length: start - end + 1 }, (_, i) => start - i).map((b) =>
-          rpcCall<RpcBlock>("eth_getBlockByNumber", [`0x${b.toString(16)}`, true]).catch(
-            () => null
-          )
+  for (let start = toBlock; start >= fromBlock && acc.length < limit; start -= batchSize) {
+    const end = Math.max(fromBlock, start - batchSize + 1);
+    const blocks = await Promise.all(
+      Array.from({ length: start - end + 1 }, (_, i) => start - i).map((b) =>
+        rpcCall<RpcBlock>("eth_getBlockByNumber", [`0x${b.toString(16)}`, true]).catch(
+          () => null
         )
-      );
-      await sleep(50);
+      )
+    );
+    await sleep(50);
 
     for (const block of blocks) {
       if (!block?.transactions?.length || acc.length >= limit) continue;
@@ -282,45 +365,59 @@ async function scanBlockRangeForSwaps(
   }
 }
 
-async function buildScanRanges(hints: Array<{ lastTx: number; activity: number }>): Promise<BlockRange[]> {
-  const window = parseInt(process.env.BSC_TRADE_SCAN_WINDOW || "5000", 10) || 5000;
-  const offsetCenters: number[] = [];
-  const rawCenters: number[] = [];
+async function scanWalletSwaps(
+  walletAddress: string,
+  hints: Array<{ lastTx: number; activity: number }>,
+  limit: number,
+  ranges?: BlockRange[]
+): Promise<TradeResult[]> {
+  const scanRanges = ranges ?? (await buildScanRanges(hints));
+  const all: TradeResult[] = [];
+  const seenHash = new Set<string>();
+  const seenTx = new Set<string>();
 
-  for (const hint of hints) {
-    rawCenters.push(await findBlockNearTimestamp(hint.lastTx));
-    if (BINANCE_TX_TIME_OFFSET_MS > 0) {
-      offsetCenters.push(await findBlockNearTimestamp(hint.lastTx - BINANCE_TX_TIME_OFFSET_MS));
-    }
-  }
-
-  const ranges: BlockRange[] = [];
-
-  if (offsetCenters.length > 0) {
-    const sorted = [...offsetCenters].sort((a, b) => a - b);
-    const newest = sorted[sorted.length - 1]!;
-    const cluster = sorted.filter((c) => newest - c <= 20_000);
-    ranges.push({
-      from: Math.max(1, Math.min(...cluster) - window),
-      to: Math.max(...cluster) + window,
-    });
-  }
-
-  if (rawCenters.length > 0) {
-    const sorted = [...rawCenters].sort((a, b) => a - b);
-    const newest = sorted[sorted.length - 1]!;
-    const cluster = sorted.filter((c) => newest - c <= 15_000);
-    const rawRange: BlockRange = {
-      from: Math.max(1, Math.min(...cluster) - window),
-      to: Math.max(...cluster) + window,
-    };
-    const overlaps = ranges.some(
-      (r) => rawRange.from <= r.to + 1 && rawRange.to >= r.from - 1
+  for (const range of scanRanges) {
+    if (all.length >= limit) break;
+    await scanBlockRangeForSwaps(
+      walletAddress,
+      range.from,
+      range.to,
+      seenTx,
+      limit,
+      all,
+      seenHash
     );
-    if (!overlaps) ranges.push(rawRange);
   }
 
-  return ranges;
+  all.sort((a, b) => b.timestamp - a.timestamp);
+  return all.slice(0, limit);
+}
+
+/**
+ * Fast pass: scan only the chain head so new sells show up within ~1 min.
+ */
+export async function fetchRpcRecentTradeHistory(
+  walletAddress: string,
+  limit = 50
+): Promise<TradeResult[]> {
+  if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) return [];
+
+  try {
+    const head = await getLatestBlock();
+    const recentDepth =
+      parseInt(process.env.BSC_TRADE_RECENT_BLOCKS || "5000", 10) || 5000;
+    const range: BlockRange = { from: Math.max(1, head - recentDepth), to: head };
+    const trades = await scanWalletSwaps(walletAddress, [], limit, [range]);
+    logger.info("BSC RPC recent trade scan", {
+      wallet: walletAddress.slice(0, 10) + "…",
+      swaps: trades.length,
+      blocks: recentDepth,
+    });
+    return trades;
+  } catch (err) {
+    logger.warn("BSC RPC recent trade scan failed", { error: String(err) });
+    return [];
+  }
 }
 
 /**
@@ -345,25 +442,7 @@ export async function fetchRpcTradeHistory(
     if (hints.length === 0) return [];
 
     const ranges = await buildScanRanges(hints);
-    const all: TradeResult[] = [];
-    const seenHash = new Set<string>();
-    const seenTx = new Set<string>();
-
-    for (const range of ranges) {
-      await scanBlockRangeForSwaps(
-        walletAddress,
-        range.from,
-        range.to,
-        seenTx,
-        limit,
-        all,
-        seenHash
-      );
-      if (all.length >= limit) break;
-    }
-
-    all.sort((a, b) => b.timestamp - a.timestamp);
-    const trimmed = all.slice(0, limit);
+    const trimmed = await scanWalletSwaps(walletAddress, hints, limit, ranges);
     logger.info("BSC RPC trade history scanned", {
       wallet: walletAddress.slice(0, 10) + "…",
       swaps: trimmed.length,

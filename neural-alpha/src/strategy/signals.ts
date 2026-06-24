@@ -276,6 +276,36 @@ export function getTokenMomentumMetrics(symbol: string): {
   return { momentum: mom, atrPct, volumeRatio };
 }
 
+/** Normalized metrics for dashboard display (MACD %, BB position, VWAP deviation). */
+export function getTokenDisplayMetrics(
+  symbol: string,
+  price?: number | null
+): {
+  macdPct: number | null;
+  bbPosition: number | null;
+  vwapDev: number | null;
+} {
+  const closes = getClosePrices(symbol);
+  const history = getPriceHistory(symbol);
+  const tech = computeSignals(symbol);
+  const p = price ?? closes.at(-1) ?? null;
+
+  const macdPct =
+    tech.macd && p && p > 0 ? (tech.macd.histogram / p) * 100 : null;
+
+  const bb = tech.bollingerBands;
+  const bbPosition =
+    bb && p && bb.upper !== bb.lower
+      ? ((p - bb.lower) / (bb.upper - bb.lower)) * 100
+      : null;
+
+  const vwapVal = ind.vwap(history);
+  const vwapDev =
+    vwapVal && p && vwapVal > 0 ? ((p - vwapVal) / vwapVal) * 100 : null;
+
+  return { macdPct, bbPosition, vwapDev };
+}
+
 export function generateSignal(
   market: MarketData,
   signals: TechnicalSignals,

@@ -10,8 +10,10 @@ import {
   Sparkles,
   ChevronDown,
   Flame,
+  Search,
+  X,
 } from "lucide-react";
-import { cn, formatUsd, formatPct } from "@/lib/utils";
+import { cn, formatTokenPrice, formatPct } from "@/lib/utils";
 import type { Signal } from "@/lib/mock-data";
 import { isAlphaToken } from "@/lib/alpha-tokens";
 
@@ -122,15 +124,69 @@ function IndicatorCell({
   );
 }
 
+function formatPctIndicator(value: number, decimals = 2): string {
+  if (Math.abs(value) < 0.005) return "0%";
+  return `${value > 0 ? "+" : ""}${value.toFixed(decimals)}%`;
+}
+
+function formatAgeMs(ts: number | null | undefined): string {
+  if (!ts) return "—";
+  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (sec < 60) return `${sec}s ago`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
+  return `${Math.floor(sec / 3600)}h ago`;
+}
+
+function TokenLogo({ symbol, icon }: { symbol: string; icon?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (icon && !failed) {
+    return (
+      <img
+        src={icon}
+        alt=""
+        referrerPolicy="no-referrer"
+        className="size-6 rounded-full shrink-0 bg-surface-overlay object-cover ring-1 ring-border-dim/60"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <span
+      className="flex items-center justify-center size-6 rounded-full shrink-0 bg-surface-overlay text-[9px] font-bold text-text-muted ring-1 ring-border-dim/60"
+      style={{ fontFamily: "var(--font-mono)" }}
+    >
+      {symbol.slice(0, 2)}
+    </span>
+  );
+}
+
 function SignalRow({ signal, index }: { signal: Signal; index: number }) {
   const [expanded, setExpanded] = useState(false);
   const isVolumeSpike = (signal.volumeRatio ?? 0) >= 2;
   const hasAi = !!signal.aiSummary;
 
   const rsiDanger = signal.rsi > 70 || signal.rsi < 30;
-  const macdPositive = signal.macd >= 0;
+  const macdPositive = (signal.macd ?? 0) > 0;
+  const bbPos = signal.bbPosition;
+  const bbNearUpper = bbPos != null && bbPos >= 75;
+  const bbNearLower = bbPos != null && bbPos <= 25;
+  const vwapDev = signal.vwapDev;
+  const aboveVwap = vwapDev != null && vwapDev > 0;
   const newsScore = signal.newsScore;
   const hasNews = signal.newsArticles != null && signal.newsArticles > 0 && newsScore != null;
+  const hasLive =
+    signal.livePrice != null &&
+    signal.livePrice > 0 &&
+    signal.livePriceUpdatedAt != null;
+  const displayLivePrice = hasLive ? signal.livePrice! : signal.price;
+  const displayLiveChange = hasLive && signal.liveChange24h != null
+    ? signal.liveChange24h
+    : signal.change24h;
+  const priceSource = hasLive ? "binance" : signal.price > 0 ? "cmc" : "none";
+  const liveStale =
+    hasLive &&
+    signal.livePriceUpdatedAt != null &&
+    Date.now() - signal.livePriceUpdatedAt > 120_000;
 
   return (
     <motion.div
@@ -153,8 +209,9 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
       >
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
           {/* Left: score + symbol + price */}
-          <div className="flex items-center gap-3 min-w-0 sm:w-[200px] shrink-0">
+          <div className="flex items-center gap-3 min-w-0 sm:w-[220px] shrink-0">
             <ScoreRing score={signal.score} />
+            <TokenLogo symbol={signal.symbol} icon={signal.icon} />
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span
@@ -172,7 +229,7 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
                   className="text-[12px] text-text-secondary tabular-nums font-medium"
                   style={{ fontFamily: "var(--font-mono)" }}
                 >
-                  {formatUsd(signal.price, signal.price < 1 ? 4 : 2)}
+                  {formatTokenPrice(signal.price)}
                 </span>
                 <span
                   className={cn(
@@ -192,6 +249,49 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
             </div>
           </div>
 
+          {/* Price (Binance live when available, else CMC scan) */}
+          <div className="flex flex-col gap-0.5 min-w-[72px] shrink-0 sm:ml-1">
+            <span
+              className="text-[9px] uppercase tracking-wider text-text-muted font-medium"
+              style={{ fontFamily: "var(--font-mono)" }}
+            >
+              {priceSource === "binance" ? "Live" : "Price"}
+            </span>
+            {displayLivePrice > 0 ? (
+              <>
+                <span
+                  className={cn(
+                    "text-[12px] tabular-nums font-semibold",
+                    priceSource === "binance"
+                      ? liveStale
+                        ? "text-text-secondary"
+                        : "text-cyan"
+                      : "text-text-primary"
+                  )}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                  title={
+                    priceSource === "binance"
+                      ? "Binance Web3 on-chain"
+                      : "CMC / agent scan"
+                  }
+                >
+                  {formatTokenPrice(displayLivePrice)}
+                </span>
+                <span
+                  className={cn(
+                    "text-[10px] tabular-nums",
+                    displayLiveChange >= 0 ? "text-neon/80" : "text-danger/80"
+                  )}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                >
+                  {formatPct(displayLiveChange)}
+                </span>
+              </>
+            ) : (
+              <span className="text-[12px] text-text-muted">—</span>
+            )}
+          </div>
+
           {/* Middle: indicators */}
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 flex-1">
             <IndicatorCell
@@ -199,11 +299,32 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
               value={String(Math.round(signal.rsi))}
               danger={rsiDanger}
             />
+            {signal.ohlcvReal === false && (
+              <span
+                className="hidden xl:inline text-[8px] uppercase text-amber-400/70 self-center"
+                style={{ fontFamily: "var(--font-mono)" }}
+                title="Using estimated candles — Binance OHLCV pending"
+              >
+                ~est
+              </span>
+            )}
             <IndicatorCell
               label="MACD"
-              value={`${signal.macd > 0 ? "+" : ""}${signal.macd.toFixed(1)}`}
+              value={signal.macd != null ? formatPctIndicator(signal.macd) : "—"}
               highlight={macdPositive}
-              danger={!macdPositive}
+              danger={signal.macd != null && signal.macd < 0}
+            />
+            <IndicatorCell
+              label="BB"
+              value={bbPos != null ? `${Math.round(bbPos)}%` : "—"}
+              highlight={bbNearLower}
+              danger={bbNearUpper}
+            />
+            <IndicatorCell
+              label="VWAP"
+              value={vwapDev != null ? formatPctIndicator(vwapDev) : "—"}
+              highlight={aboveVwap}
+              danger={vwapDev != null && vwapDev < 0}
             />
             <IndicatorCell
               label="Vol"
@@ -289,8 +410,17 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
 
 type SignalTab = "eligible" | "alpha";
 
-export function SignalMonitor({ signals }: { signals: Signal[] }) {
+export function SignalMonitor({
+  signals,
+  lastSignalRefreshAt,
+  signalRefreshSec = 300,
+}: {
+  signals: Signal[];
+  lastSignalRefreshAt?: number | null;
+  signalRefreshSec?: number;
+}) {
   const [tab, setTab] = useState<SignalTab>("eligible");
+  const [query, setQuery] = useState("");
 
   const sorted = [...signals].sort(
     (a, b) => Math.abs(b.score) - Math.abs(a.score)
@@ -304,6 +434,10 @@ export function SignalMonitor({ signals }: { signals: Signal[] }) {
   const alphaSignals = eligibleSignals.filter((s) => isAlphaToken(s.symbol));
 
   const active = tab === "alpha" ? alphaSignals : eligibleSignals;
+  const q = query.trim().toUpperCase();
+  const filtered = q
+    ? active.filter((s) => s.symbol.toUpperCase().includes(q))
+    : active;
 
   const tabs: { id: SignalTab; label: string; count: number; hint: string }[] = [
     {
@@ -342,7 +476,9 @@ export function SignalMonitor({ signals }: { signals: Signal[] }) {
             className="text-[11px] text-text-secondary tabular-nums font-medium"
             style={{ fontFamily: "var(--font-mono)" }}
           >
-            {active.length} scanned
+            {q ? `${filtered.length} / ${active.length}` : active.length} scanned
+            {" · "}
+            signals {formatAgeMs(lastSignalRefreshAt)} · refresh {Math.round(signalRefreshSec / 60)}m
           </span>
         </div>
         <div
@@ -367,6 +503,7 @@ export function SignalMonitor({ signals }: { signals: Signal[] }) {
           <span className="flex items-center gap-1">
             <Sparkles className="size-3 text-cyan/80" /> AI
           </span>
+          <span className="hidden lg:inline text-text-muted">BB = band position · VWAP = vs session avg</span>
         </div>
       </div>
 
@@ -399,12 +536,41 @@ export function SignalMonitor({ signals }: { signals: Signal[] }) {
         ))}
       </div>
 
+      {/* Search */}
+      <div className="relative mb-3">
+        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-text-muted pointer-events-none" />
+        <input
+          type="search"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search token (e.g. SIREN, ETH, LINK)…"
+          className={cn(
+            "w-full rounded-lg border border-border-dim bg-surface-overlay/50",
+            "py-2 pl-9 pr-9 text-[12px] text-text-primary placeholder:text-text-muted",
+            "focus:outline-none focus:border-neon/30 focus:ring-1 focus:ring-neon/15",
+            "transition-colors"
+          )}
+          style={{ fontFamily: "var(--font-mono)" }}
+        />
+        {query && (
+          <button
+            type="button"
+            onClick={() => setQuery("")}
+            className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-text-muted hover:text-text-primary transition-colors"
+            aria-label="Clear search"
+          >
+            <X className="size-3.5" />
+          </button>
+        )}
+      </div>
+
       {/* List header — desktop only */}
       <div
-        className="hidden sm:grid grid-cols-[200px_1fr_auto] gap-3 px-3 py-1.5 text-[9px] uppercase tracking-wider text-text-muted font-medium border-b border-border-dim/60 mb-0"
+        className="hidden sm:grid grid-cols-[220px_72px_1fr_auto] gap-3 px-3 py-1.5 text-[9px] uppercase tracking-wider text-text-muted font-medium border-b border-border-dim/60 mb-0"
         style={{ fontFamily: "var(--font-mono)" }}
       >
         <span>Token</span>
+        <span>Live</span>
         <span className="pl-1">Indicators</span>
         <span className="text-right pr-12">Signal</span>
       </div>
@@ -416,8 +582,12 @@ export function SignalMonitor({ signals }: { signals: Signal[] }) {
               ? "No Binance Alpha tokens in the current scan window."
               : "Waiting for market data…"}
           </div>
+        ) : filtered.length === 0 ? (
+          <div className="px-3 py-8 text-center text-[11px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
+            No tokens match &quot;{query.trim()}&quot;
+          </div>
         ) : (
-          active.map((signal, i) => (
+          filtered.map((signal, i) => (
             <SignalRow key={signal.symbol} signal={signal} index={i} />
           ))
         )}

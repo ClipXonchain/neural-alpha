@@ -1,5 +1,5 @@
 import type { TradeOrder, TradeResult, TradeSignal, AgentConfig } from "../utils/types.js";
-import { BSC_CHAIN, BSC_USDT_ADDRESS, isEligibleToken } from "../config.js";
+import { BSC_CHAIN, BSC_USDT_ADDRESS, isEligibleToken, isTradableToken } from "../config.js";
 import { hasBscSwapAddress, knownBscAddress } from "../integrations/bsc-token-addresses.js";
 import { RiskManager } from "../risk/manager.js";
 import { PortfolioTracker } from "../risk/portfolio.js";
@@ -54,6 +54,13 @@ export function createTradeOrder(
     toToken,
     slippage: config.slippageTolerance,
   };
+}
+
+/** Round down token qty so the swap never requests more than the on-chain balance. */
+export function floorTokenAmount(amount: number, decimals = 8): number {
+  if (amount <= 0) return 0;
+  const factor = 10 ** decimals;
+  return Math.floor(amount * factor + 1e-12) / factor;
 }
 
 /** TWAK swap amount: USD for buys (USDT in), token units for sells (token out). */
@@ -186,11 +193,13 @@ export function extractTxHash(mcpResult: Record<string, unknown>, depth = 0): st
   return undefined;
 }
 
-/** Parse TWAK summary like "4.9 TWT -> 1.84 USDT". */
+/** Parse TWAK summary like "4.9 TWT -> 1.84 USDT" or output "113.3 USDT". */
 function parseSwapSummary(summary: string): { fromAmount?: string; toAmount?: string } {
-  const m = summary.match(/^([\d.]+)\s+\S+\s*->\s*([\d.]+)/);
-  if (!m) return {};
-  return { fromAmount: m[1], toAmount: m[2] };
+  const arrow = summary.match(/^([\d.]+)\s+\S+\s*->\s*([\d.]+)/);
+  if (arrow) return { fromAmount: arrow[1], toAmount: arrow[2] };
+  const outOnly = summary.match(/^([\d.]+)\s+\S+/);
+  if (outOnly) return { toAmount: outOnly[1] };
+  return {};
 }
 
 /**
@@ -210,14 +219,23 @@ export function processSwapResult(
     typeof mcpResult.summary === "string"
       ? parseSwapSummary(mcpResult.summary)
       : {};
+  const outputParsed =
+    typeof mcpResult.output === "string"
+      ? parseSwapSummary(mcpResult.output)
+      : {};
+  const inputAmount =
+    typeof mcpResult.input === "string"
+      ? mcpResult.input.match(/^([\d.]+)/)?.[1]
+      : undefined;
   const fromAmount =
     (mcpResult.fromAmount as string | undefined) ??
     summaryParsed.fromAmount ??
+    inputAmount ??
     (order.side === "sell" && order.fromTokenAmount
       ? String(order.fromTokenAmount)
       : String(order.amountUsd));
   const toAmount =
-    (mcpResult.toAmount ?? mcpResult.tokenOutAmount ?? summaryParsed.toAmount) as
+    (mcpResult.toAmount ?? mcpResult.tokenOutAmount ?? summaryParsed.toAmount ?? outputParsed.toAmount) as
       | string
       | undefined;
   const confirmed = isConfirmedTxHash(txHash, requireOnChainTx);
@@ -321,6 +339,16 @@ export function validateAndCreateOrder(
     };
   }
 
+  if (
+    signal.action === "buy" &&
+    !isTradableToken(signal.symbol, getLatestPrice(signal.symbol) ?? undefined)
+  ) {
+    return {
+      approved: false,
+      violations: [`${signal.symbol} is blocklisted or below min tradable price`],
+    };
+  }
+
   if (signal.action === "hold") {
     return { approved: false, violations: ["Signal is HOLD — no trade needed"] };
   }
@@ -384,6 +412,9 @@ export function validateAndCreateOrder(
     symbol: signal.symbol,
     side: order.side,
     amountUsd: tradeSize,
+    ...(order.fromTokenAmount !== undefined
+      ? { fromTokenAmount: order.fromTokenAmount }
+      : {}),
     funding: order.fromToken,
     strength: signal.strength,
     score: Math.round(signal.score),

@@ -19,6 +19,14 @@ export interface NavPeakState {
   baselineInitialized: boolean;
 }
 
+/** Persisted cost basis per open symbol — survives agent restarts. */
+export interface PositionEntryRecord {
+  avgEntryPrice: number;
+  peakPnlPct?: number;
+}
+
+export type PositionEntriesState = Record<string, PositionEntryRecord>;
+
 export interface CycleStats {
   realizedPnl: number;
   dailyPnl: number;
@@ -150,7 +158,14 @@ export class AgentStore {
           from_token, to_token, from_amount, to_amount,
           price_usd, tx_hash, status, confirmed_at, wallet_address
         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'confirmed',$11,$12)
-        ON CONFLICT (order_id) DO NOTHING`,
+        ON CONFLICT (order_id) DO UPDATE SET
+          from_amount = EXCLUDED.from_amount,
+          to_amount = EXCLUDED.to_amount,
+          amount_usd = EXCLUDED.amount_usd,
+          price_usd = EXCLUDED.price_usd,
+          tx_hash = EXCLUDED.tx_hash,
+          confirmed_at = EXCLUDED.confirmed_at,
+          wallet_address = COALESCE(EXCLUDED.wallet_address, trades.wallet_address)`,
         [
           trade.orderId,
           symbol.toUpperCase(),
@@ -341,6 +356,88 @@ export class AgentStore {
     } catch (err) {
       logger.warn("Failed to load traded symbols from Neon", { error: String(err) });
       return [];
+    }
+  }
+
+  /**
+   * Full confirmed trade history for cost-basis replay (oldest first).
+   * Unlike loadRecentTrades, this is not capped — needed to recover entry
+   * prices for positions opened before the most recent N swaps.
+   */
+  async loadAllTradesForCostBasis(
+    walletAddress?: string | null,
+    maxRows = 2000
+  ): Promise<TradeResult[]> {
+    if (!this.pool) return [];
+    try {
+      const params: (string | number)[] = [maxRows];
+      let walletClause = "";
+      if (walletAddress) {
+        params.push(walletAddress.toLowerCase());
+        walletClause = ` AND LOWER(wallet_address) = $${params.length}`;
+      }
+      const { rows } = await this.pool.query<{
+        order_id: string;
+        from_token: string;
+        to_token: string;
+        from_amount: string | null;
+        to_amount: string | null;
+        price_usd: number | null;
+        tx_hash: string | null;
+        realized_pnl: number | null;
+        confirmed_at: string | null;
+        created_at: string;
+      }>(
+        `SELECT order_id, from_token, to_token, from_amount, to_amount,
+                price_usd, tx_hash, realized_pnl, confirmed_at, created_at
+         FROM trades
+         WHERE status IN ('confirmed', 'paper')${walletClause}
+         ORDER BY COALESCE(confirmed_at, created_at) ASC
+         LIMIT $1`,
+        params
+      );
+      return rows.map((r) => ({
+        orderId: r.order_id,
+        success: true,
+        fromToken: r.from_token,
+        toToken: r.to_token,
+        fromAmount: String(r.from_amount ?? "0"),
+        toAmount: r.to_amount ? String(r.to_amount) : undefined,
+        priceAtExecution: Number(r.price_usd ?? 0),
+        txHash: r.tx_hash ?? undefined,
+        timestamp: new Date(r.confirmed_at ?? r.created_at).getTime(),
+        ...(r.realized_pnl != null ? { realizedPnl: r.realized_pnl } : {}),
+      }));
+    } catch (err) {
+      logger.warn("Failed to load full trade history from Neon", { error: String(err) });
+      return [];
+    }
+  }
+
+  async savePositionEntries(entries: PositionEntriesState): Promise<void> {
+    if (!this.pool) return;
+    try {
+      await this.pool.query(
+        `INSERT INTO agent_state (key, value_json, updated_at)
+         VALUES ('position_entries', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = NOW()`,
+        [JSON.stringify(entries)]
+      );
+    } catch (err) {
+      logger.warn("Failed to persist position entries", { error: String(err) });
+    }
+  }
+
+  async loadPositionEntries(): Promise<PositionEntriesState | null> {
+    if (!this.pool) return null;
+    try {
+      const { rows } = await this.pool.query<{ value_json: PositionEntriesState }>(
+        `SELECT value_json FROM agent_state WHERE key = 'position_entries' LIMIT 1`
+      );
+      return rows[0]?.value_json ?? null;
+    } catch (err) {
+      logger.warn("Failed to load position entries from Neon", { error: String(err) });
+      return null;
     }
   }
 

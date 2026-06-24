@@ -154,6 +154,25 @@ export function atr(
 }
 
 /**
+ * Session VWAP from OHLCV candles (typical price × volume / total volume).
+ */
+export function vwap(
+  candles: Array<{ high: number; low: number; close: number; volume?: number }>
+): number | null {
+  let cumVol = 0;
+  let cumTpVol = 0;
+  for (const c of candles) {
+    const vol = c.volume ?? 0;
+    if (vol <= 0) continue;
+    const tp = (c.high + c.low + c.close) / 3;
+    cumTpVol += tp * vol;
+    cumVol += vol;
+  }
+  if (cumVol === 0) return null;
+  return cumTpVol / cumVol;
+}
+
+/**
  * Volume ratio — current volume vs average volume.
  * Above 1.5 = high volume (confirms trend), below 0.5 = low conviction.
  */

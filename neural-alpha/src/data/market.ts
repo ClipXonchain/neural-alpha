@@ -15,6 +15,8 @@ import { BSC_CHAIN } from "../config.js";
 const CMC_X402_BASE = process.env.CMC_X402_BASE_URL || "https://agenthub.coinmarketcap.com";
 
 const priceHistory: Map<string, PricePoint[]> = new Map();
+/** Symbols whose candle history came from Binance klines (not synthetic seed). */
+const realOhlcvSymbols = new Set<string>();
 const MAX_HISTORY_LENGTH = 200;
 
 export function recordPrice(symbol: string, price: number, volume?: number) {
@@ -73,6 +75,34 @@ export function getVolumes(symbol: string): number[] {
   return history.map((p) => p.volume || 0);
 }
 
+/** Replace in-memory candle history (e.g. from Binance klines). */
+export function loadPriceHistory(
+  symbol: string,
+  points: PricePoint[],
+  opts?: { fromKlines?: boolean }
+) {
+  if (points.length === 0) return;
+  const sorted = [...points].sort((a, b) => a.timestamp - b.timestamp);
+  priceHistory.set(symbol, sorted.slice(-MAX_HISTORY_LENGTH));
+  if (opts?.fromKlines) {
+    realOhlcvSymbols.add(symbol.toUpperCase());
+  }
+}
+
+/** Age of the newest candle in ms; null if no history. */
+export function getHistoryAgeMs(symbol: string): number | null {
+  const history = priceHistory.get(symbol);
+  if (!history || history.length === 0) return null;
+  return Date.now() - history[history.length - 1].timestamp;
+}
+
+/** True when history has enough Binance kline candles for RSI/MACD. */
+export function hasRealHistory(symbol: string, minPoints = 14): boolean {
+  const sym = symbol.toUpperCase();
+  if (!realOhlcvSymbols.has(sym)) return false;
+  return getHistoryLength(sym) >= minPoints;
+}
+
 export function buildMarketData(
   symbol: string,
   price: number,
@@ -104,6 +134,9 @@ export const CMC_ENDPOINTS = {
     `${CMC_X402_BASE}/v1/cryptocurrency/trending/latest`,
   listings: (limit = 100) =>
     `${CMC_X402_BASE}/v1/cryptocurrency/listings/latest?limit=${limit}`,
+  /** OHLCV historical candles (CMC Agent Hub x402). */
+  ohlcv: (symbol: string, interval = "5m", count = 100) =>
+    `${CMC_X402_BASE}/v1/cryptocurrency/ohlcv/historical?symbol=${encodeURIComponent(symbol)}&time_period=hourly&interval=${interval}&count=${count}`,
   metadata: (symbol: string) =>
     `${CMC_X402_BASE}/v1/cryptocurrency/info?symbol=${symbol}`,
   socialBuzz: (symbol: string) =>
@@ -135,9 +168,19 @@ export function parseCmcQuote(raw: Record<string, unknown>, symbol: string): Mar
 
 export function parseFearGreedIndex(raw: Record<string, unknown>): number | null {
   try {
-    const data = raw as Record<string, Record<string, unknown>>;
-    const value = (data?.data as Record<string, number>)?.value;
-    return typeof value === "number" ? value : null;
+    const payload = raw?.data;
+    if (payload && typeof payload === "object") {
+      if (Array.isArray(payload)) {
+        const first = payload[0] as Record<string, unknown> | undefined;
+        const v = first?.value;
+        if (typeof v === "number") return v;
+      } else {
+        const v = (payload as Record<string, unknown>).value;
+        if (typeof v === "number") return v;
+      }
+    }
+    const top = raw?.value;
+    return typeof top === "number" ? top : null;
   } catch {
     return null;
   }

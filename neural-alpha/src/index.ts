@@ -6,6 +6,7 @@ import { resolve } from "node:path";
 dotenvConfig({ path: resolve(import.meta.dirname, "../../.env") });
 import { TradingAgent } from "./agent.js";
 import { createBridge } from "./integrations/create-bridge.js";
+import { closeTwakMcpBridge } from "./integrations/twak-mcp-bridge.js";
 import { logger } from "./utils/logger.js";
 import { initAgentStore } from "./db/store.js";
 import { startDashboard } from "./web/server.js";
@@ -38,10 +39,13 @@ import { startDashboard } from "./web/server.js";
  *   DASHBOARD_PORT            - Web UI port (default: 3847)
  */
 
-// Prevent TWAK stdio transport EPIPE from crashing the process.
-// Also suppress EADDRINUSE (handled by server.on('error')).
+// Prevent TWAK stdio transport EPIPE from crashing the process on hot reload.
 process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
-  if (err.code === "EPIPE" || err.code === "ERR_STREAM_DESTROYED") {
+  if (
+    err.code === "EPIPE" ||
+    err.code === "ERR_STREAM_DESTROYED" ||
+    /write EPIPE|broken pipe/i.test(String(err.message ?? err))
+  ) {
     logger.warn("Pipe error (TWAK transport) — suppressed", { code: err.code });
     return;
   }
@@ -105,6 +109,11 @@ async function main() {
     shuttingDown = true;
     logger.info(`Received ${signal} — shutting down gracefully`);
     agent.stop();
+    void closeTwakMcpBridge()
+      .catch(() => undefined)
+      .finally(() => {
+        setTimeout(() => process.exit(0), 100).unref();
+      });
     setTimeout(() => {
       logger.warn("Graceful shutdown timeout — forcing exit");
       process.exit(1);

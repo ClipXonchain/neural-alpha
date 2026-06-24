@@ -231,7 +231,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
   const [interval, setInterval_] = useState(60);
   const [drawdown, setDrawdown] = useState(20);
   const [slippage, setSlippage] = useState(1);
-  const [maxDaily, setMaxDaily] = useState(5);
+  const [maxDaily, setMaxDaily] = useState(10);
   const [maxPositions, setMaxPositions] = useState(3);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);

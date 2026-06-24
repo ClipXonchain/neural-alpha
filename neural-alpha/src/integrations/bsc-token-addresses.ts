@@ -33,7 +33,7 @@ export const BSC_TOKEN_ADDRESSES: Record<string, string> = {
   SNX: "0x9Ac983826058b8a9C7Aa1C917144119123A7Ba37",
   DEXE: "0x6e4f9705e7C1F050af6391A565f659468e4B988E",
   BRETT: "0x4D3DC895a9EDb2347a98585A8f44E8E14E7C2865",
-  KOGE: "0xE0d949586065091FAA85E6316311dBB2D607832A",
+  KOGE: "0xe6df05ce8c8301223373cf5b969afcb1498c5528",
   LUNC: "0x156ab3346823b651294766e103a0e46615449ee8",
   PENGU: "0x9e606F4D95aE1344B239409F9701C7C4E5E7f558",
   LDO: "0xF8Bc2914A3D68A7a4BF5268B45B5aA5eF4164fC4",
@@ -45,7 +45,7 @@ export const BSC_TOKEN_ADDRESSES: Record<string, string> = {
   // Ethereum LayerZero contract, which TWAK rejects on BSC. Left unmapped so
   // the executor skips it instead of attempting a wrong-chain swap.
   STG: "0xB0D12492637F3F1aD7535416272550617A0623E2",
-  CHEEMS: "0x0A876808B156612C8058089A14D2D141b82B81B8",
+  CHEEMS: "0x0df0587216a4a1bb7d5082fdc491d93d2dd4b413",
   BabyDoge: "0xc7486730579aB99ca0e1671640677A7d279f0FcE",
   NILA: "0x5Ea5C597660A2E47b1F8F174eF314FCE1f9d3E7F",
 
@@ -101,6 +101,7 @@ export const BSC_TOKEN_ADDRESSES: Record<string, string> = {
   VELO: "0xf486ad071f3bee968384d2e39e2d8af0fcf6fd46",
   XPL: "0x405fbc9004d857903bfd6b3357792d71a50726b0",
   ZAMA: "0x6907a5986c4950bdaf2f81828ec0737ce787519f",
+  STABLE: "0x011ebe7d75e2c9d1e0bd0be0bef5c36f0a90075f",
 };
 
 /**
@@ -114,6 +115,11 @@ export function knownBscAddress(symbol: string): string | undefined {
     BSC_TOKEN_ADDRESSES[symbol] ??
     addressCache.get(upper);
   return mapped && EVM_ADDRESS.test(mapped) ? mapped : undefined;
+}
+
+/** Trust Wallet CDN logo for a BEP-20 contract (fallback when Binance has no icon). */
+export function trustWalletIconUrl(contractAddress: string): string {
+  return `https://assets.trustwallet.com/blockchains/smartchain/assets/${contractAddress}/logo.png`;
 }
 
 /**
@@ -167,6 +173,13 @@ function extractBscAddressFromCmcEntry(entry: Record<string, unknown>): string |
   }
 
   return undefined;
+}
+
+/** Synchronous lookup — static map only (no CMC API round-trip). */
+export function getKnownBscTokenAddress(symbol: string): string | undefined {
+  const sym = symbol.toUpperCase();
+  const known = BSC_TOKEN_ADDRESSES[sym] ?? BSC_TOKEN_ADDRESSES[symbol];
+  return known ? normalizeAddress(known) : undefined;
 }
 
 /** Resolve a symbol → BEP-20 contract via static map, then CMC Pro API. */

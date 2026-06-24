@@ -426,9 +426,15 @@ export function startDashboard(agent: TradingAgent) {
     res.end("Not found");
   });
 
-  server.keepAliveTimeout = 65_000;
-  server.headersTimeout = 66_000;
-  server.timeout = 30_000;
+  // Trades + wallet sync can take 1–3 min (TWAK quote, approval, on-chain swap).
+  const HTTP_IDLE_TIMEOUT_MS = 300_000;
+  server.keepAliveTimeout = HTTP_IDLE_TIMEOUT_MS + 5_000;
+  server.headersTimeout = HTTP_IDLE_TIMEOUT_MS + 10_000;
+  server.timeout = HTTP_IDLE_TIMEOUT_MS;
+  const httpServer = server as typeof server & { requestTimeout?: number };
+  if ("requestTimeout" in httpServer) {
+    httpServer.requestTimeout = HTTP_IDLE_TIMEOUT_MS;
+  }
 
   const portFile = resolve(import.meta.dirname, "../../../.agent-api-port");
 

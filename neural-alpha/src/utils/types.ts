@@ -90,6 +90,17 @@ export interface PortfolioPosition {
   unrealizedPnl: number;
   unrealizedPnlPct: number;
   weight: number;
+  /** Fixed exit levels derived from entry + strategy config. */
+  stopLossPrice?: number;
+  takeProfitPrice?: number;
+  /** Percentage points until stop-loss fires (≤0 = at or past SL). */
+  distanceToStopPct?: number;
+  /** Percentage points until take-profit fires (≤0 = at or past TP). */
+  distanceToTakeProfitPct?: number;
+  /** Best unrealized PnL % seen this hold (trailing-stop reference). */
+  peakPnlPct?: number;
+  /** Whether avg entry was reconstructed from confirmed buy trades. */
+  entryFromTrades?: boolean;
 }
 
 export interface PortfolioSnapshot {
@@ -101,6 +112,8 @@ export interface PortfolioSnapshot {
   totalPnl: number;
   totalPnlPct: number;
   realizedPnl: number;
+  /** NAV baseline for lifetime PnL (set when wallet sync anchors capital). */
+  initialNavUsd?: number;
   gasReserveUsd?: number;
   maxDrawdownPct: number;
   tradeCount: number;
@@ -124,6 +137,10 @@ export interface AgentConfig {
   maxPositionSizeUsd: number;
   maxDailyTrades: number;
   maxDrawdownPct: number;
+  /** When false, drawdown gates and emergency mode are disabled. */
+  drawdownLimitEnabled: boolean;
+  /** How often to re-scan markets and recompute signals (independent of trade cycle). */
+  signalRefreshMs: number;
   slippageTolerance: number;
   baseCurrency: string;
   /** Currencies used to fund buys (USDT first, then BNB). Sells settle to baseCurrency. */
@@ -151,6 +168,10 @@ export interface AgentConfig {
   maxAutonomousTradesPerCycle: number;
   /** Max estimated on-chain txs per UTC day for autonomous swaps (~2 per swap: approve + swap). */
   maxOnChainTxPerDay: number;
+  /** Dashboard / API: tokens blocklisted from scans and new buys. */
+  excludedTokens?: string[];
+  /** Dashboard / API: minimum USD price to consider tradable. */
+  minTradablePriceUsd?: number;
 }
 
 export interface PortfolioHolding {

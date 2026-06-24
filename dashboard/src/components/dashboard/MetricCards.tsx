@@ -94,7 +94,7 @@ export function MetricCards({ state }: { state: AgentState }) {
   const dailyTrend = state.dailyPnl >= 0 ? "up" : "down";
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
       <MetricCard
         label="Portfolio Value"
         value={formatUsd(state.portfolioValue)}
@@ -123,21 +123,38 @@ export function MetricCards({ state }: { state: AgentState }) {
         delay={0.1}
       />
       <MetricCard
-        label="Max Drawdown"
-        value={formatPct(state.maxDrawdownPct).replace("+", "")}
-        subValue={`Current: ${state.currentDrawdownPct.toFixed(1)}%`}
+        label="Drawdown"
+        value={formatPct(state.currentDrawdownPct).replace("+", "")}
+        subValue={state.maxDrawdownLimit >= 100 ? "Limit off" : `Limit ${state.maxDrawdownLimit}%`}
         icon={<ShieldAlert className="size-4" />}
         trend={state.currentDrawdownPct > 15 ? "down" : "neutral"}
         accentColor={state.currentDrawdownPct > 15 ? "danger" : "warning"}
         delay={0.15}
       />
       <MetricCard
+        label="Trades 24h"
+        value={String(state.autonomous.tradesLast24h)}
+        subValue={`${state.autonomous.tradesToday}/${state.autonomous.maxTradesToday} today`}
+        icon={<Repeat className="size-4" />}
+        trend="neutral"
+        accentColor="cyan"
+        delay={0.18}
+      />
+      <MetricCard
         label="Win Rate"
-        value={`${state.winRate.toFixed(1)}%`}
-        subValue={`${state.totalTrades} trades`}
+        value={
+          state.closedTrades > 0
+            ? `${state.winRate.toFixed(1)}%`
+            : "—"
+        }
+        subValue={
+          state.closedTrades > 0
+            ? `${state.winCount}W / ${state.lossCount}L · ${state.closedTrades} sells`
+            : `${state.totalTrades} swaps`
+        }
         icon={<Target className="size-4" />}
-        trend={state.winRate > 50 ? "up" : "down"}
-        accentColor={state.winRate > 50 ? "neon" : "warning"}
+        trend={state.closedTrades > 0 ? (state.winRate > 50 ? "up" : "down") : "neutral"}
+        accentColor={state.closedTrades > 0 ? (state.winRate > 50 ? "neon" : "warning") : "cyan"}
         delay={0.2}
       />
     </div>

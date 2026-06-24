@@ -2,9 +2,23 @@ import { NextRequest } from "next/server";
 import { getAgentApiUrl } from "@/lib/agent-url";
 
 export const dynamic = "force-dynamic";
+/** Trades / wallet sync can take 1–2 min (TWAK approval + on-chain swap). */
+export const maxDuration = 300;
 
 const API_SECRET = process.env.API_SECRET?.trim();
 const PUBLIC_DASHBOARD_HOSTS = new Set(["agents.clipx.app"]);
+
+/** POST routes that wait on TWAK / chain — need a long upstream timeout. */
+const LONG_RUNNING_PATHS = new Set([
+  "command",
+  "wallet/sync",
+  "control/resync",
+  "wallet/mode",
+  "competition/register",
+  "control/start",
+]);
+
+const UPSTREAM_TIMEOUT_MS = 180_000;
 
 function isReadonlyDeploy(req: NextRequest): boolean {
   if (process.env.READONLY === "true" || process.env.NEXT_PUBLIC_READONLY === "true") {
@@ -63,7 +77,9 @@ async function proxyToAgent(req: NextRequest, ctx: RouteContext) {
   const init: RequestInit = {
     method: req.method,
     headers,
-    signal: req.signal,
+    signal: LONG_RUNNING_PATHS.has(agentPath)
+      ? AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
+      : req.signal,
   };
 
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -94,11 +110,20 @@ async function proxyToAgent(req: NextRequest, ctx: RouteContext) {
     outHeaders.set("X-Content-Type-Options", "nosniff");
 
     return new Response(res.body, { status: res.status, headers: outHeaders });
-  } catch {
-    return new Response(JSON.stringify({ error: "Agent API unreachable" }), {
-      status: 502,
-      headers: { "Content-Type": "application/json", ...respCors },
-    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    const timedOut = /abort|timeout/i.test(msg);
+    return new Response(
+      JSON.stringify({
+        error: timedOut
+          ? "Agent command timed out — trade may still be processing on-chain"
+          : "Agent API unreachable",
+      }),
+      {
+        status: timedOut ? 504 : 502,
+        headers: { "Content-Type": "application/json", ...respCors },
+      }
+    );
   }
 }
 

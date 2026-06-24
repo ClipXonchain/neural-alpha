@@ -135,6 +135,7 @@ export function CommandPanel({ connected }: { connected: boolean }) {
   ]);
   const [input, setInput] = useState("");
   const [loading, setLoading] = useState(false);
+  const [loadingHint, setLoadingHint] = useState<string | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -164,6 +165,11 @@ export function CommandPanel({ connected }: { connected: boolean }) {
       setMessages((prev) => [...prev, userMsg]);
       setInput("");
       setLoading(true);
+      setLoadingHint(
+        /^(buy|sell|swap)\b/i.test(cmd)
+          ? "Executing on-chain — may take up to 2 minutes…"
+          : null
+      );
 
       try {
         const result: CommandResult = connected
@@ -182,18 +188,20 @@ export function CommandPanel({ connected }: { connected: boolean }) {
           },
         ]);
       } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
         setMessages((prev) => [
           ...prev,
           {
             id: `a-${Date.now()}`,
             role: "agent",
-            text: `Error: ${String(err)}`,
+            text: msg,
             timestamp: Date.now(),
             ok: false,
           },
         ]);
       } finally {
         setLoading(false);
+        setLoadingHint(null);
       }
     },
     [input, loading, connected],
@@ -301,9 +309,11 @@ export function CommandPanel({ connected }: { connected: boolean }) {
               ))}
               {loading && (
                 <div className="flex justify-start">
-                  <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-surface/80 border border-white/5 text-xs text-text-muted">
-                    <Loader2 className="size-3 animate-spin" />
-                    Processing...
+                  <div className="flex flex-col gap-1 px-3 py-2 rounded-lg bg-surface/80 border border-white/5 text-xs text-text-muted">
+                    <div className="flex items-center gap-2">
+                      <Loader2 className="size-3 animate-spin" />
+                      {loadingHint ?? "Processing…"}
+                    </div>
                   </div>
                 </div>
               )}

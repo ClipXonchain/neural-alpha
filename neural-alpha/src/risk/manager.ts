@@ -1,9 +1,9 @@
 import type { AgentConfig, RiskCheck, TradeSignal, PortfolioSnapshot } from "../utils/types.js";
-import { isEligibleToken, isStablecoin } from "../config.js";
+import { isEligibleToken, isStablecoin, isTradableToken } from "../config.js";
+import { getLatestPrice } from "../data/market.js";
 import { PortfolioTracker } from "./portfolio.js";
 import { logger } from "../utils/logger.js";
 import { getTokenMomentumMetrics } from "../strategy/signals.js";
-import { getLatestPrice } from "../data/market.js";
 
 export class RiskManager {
   private config: AgentConfig;
@@ -35,9 +35,15 @@ export class RiskManager {
       ? (tradeAmountUsd / this.portfolio.getSpendableCash()) * 100
       : 100;
 
-    // 1. Eligible token check (hard requirement)
+    // 1. Eligible + tradable (not blocklisted / sub-min-price)
     if (!isEligibleToken(signal.symbol)) {
       violations.push(`Token ${signal.symbol} is NOT on the eligible BEP-20 list`);
+    }
+    if (
+      signal.action === "buy" &&
+      !isTradableToken(signal.symbol, getLatestPrice(signal.symbol))
+    ) {
+      violations.push(`Token ${signal.symbol} is excluded or below min tradable price`);
     }
 
     // 2. Stablecoin guard — don't trade stables for stables
@@ -45,19 +51,19 @@ export class RiskManager {
       violations.push(`Cannot buy stablecoin ${signal.symbol} as a position`);
     }
 
-    // 3. Max drawdown gate — halts NEW BUYS only. Sells are risk-reducing
-    //    (and protective exits), so they must always be allowed to execute.
-    if (signal.action === "buy" && drawdownPct >= this.config.maxDrawdownPct) {
-      violations.push(
-        `Drawdown ${drawdownPct.toFixed(1)}% exceeds max ${this.config.maxDrawdownPct}% — no new buys`
-      );
-    }
+    // 3–4. Drawdown gates (optional — disabled when DISABLE_DRAWDOWN_LIMIT=true).
+    if (this.config.drawdownLimitEnabled) {
+      if (signal.action === "buy" && drawdownPct >= this.config.maxDrawdownPct) {
+        violations.push(
+          `Drawdown ${drawdownPct.toFixed(1)}% exceeds max ${this.config.maxDrawdownPct}% — no new buys`
+        );
+      }
 
-    // 4. Safety buffer: stop new buys at 80% of max drawdown
-    if (signal.action === "buy" && drawdownPct >= this.config.maxDrawdownPct * 0.8) {
-      violations.push(
-        `Drawdown ${drawdownPct.toFixed(1)}% approaching limit — no new buys allowed`
-      );
+      if (signal.action === "buy" && drawdownPct >= this.config.maxDrawdownPct * 0.8) {
+        violations.push(
+          `Drawdown ${drawdownPct.toFixed(1)}% approaching limit — no new buys allowed`
+        );
+      }
     }
 
     // 5. Daily trade limit — autonomous pacing only. Manual (operator /
@@ -210,6 +216,7 @@ export class RiskManager {
    * In emergency mode, only sells are allowed.
    */
   isEmergencyMode(): boolean {
+    if (!this.config.drawdownLimitEnabled) return false;
     const drawdown = this.portfolio.getMaxDrawdown();
     return drawdown >= this.config.maxDrawdownPct * 0.8;
   }

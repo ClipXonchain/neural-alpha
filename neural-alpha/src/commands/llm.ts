@@ -34,7 +34,7 @@ const TOOLS: OpenAI.ChatCompletionTool[] = [
           amount: {
             type: "number",
             description:
-              "Trade amount in USD — REQUIRED for buy/sell when the user specifies a dollar value. Examples: 'buy $50 SIREN' → amount=50, 'buy 50$ siren' → amount=50, 'sell $25 ETH' → amount=25. Do NOT omit when a dollar amount is present.",
+              "Trade amount in USD — only when the user specifies a dollar value. Examples: 'buy $50 SIREN' → amount=50, 'sell $25 ETH' → amount=25. Omit for 'sell all ETH', 'sell LINK', or any sell without a $ amount (full position). Never invent a default amount.",
           },
           chatReply: {
             type: "string",
@@ -75,7 +75,9 @@ RULES:
 - Map user messages to one of these actions via the execute_action tool: buy, sell, swap, signal, analysis, portfolio, status, help, chat
 - For trade commands (buy/sell/swap), extract the token symbol and USD amount when given
 - Command format is: [buy|sell] [amount] [token] — e.g. "buy 50$ siren", "buy $50 SIREN", "sell 25 USDT worth of ETH"
-- When the user specifies a dollar amount, you MUST pass it as amount (number). Never omit it.
+- When the user specifies a dollar amount, you MUST pass it as amount (number)
+- For sells without a dollar amount ('sell all LINK', 'sell ETH'), omit amount — the agent sells the full position
+- Never invent or default a trade amount (e.g. do not use 100 unless the user said $100)
 - Token symbols must be uppercase (ETH, BTC, TWT, 1INCH, etc.)
 - ANY token can be traded as long as it has a verified BEP-20 contract on BSC — you are NOT limited to a fixed allowlist. If the user names a token, extract its ticker and let the agent resolve the contract address. Never refuse a trade just because a token "isn't on the list"; pass the symbol through and the agent will resolve/route it (or report if it truly can't).
 - BNB is eligible — buys use USDT; wallet BNB is tracked as gas reserve (user DOES hold BNB — report it from context, not as an open trade position)

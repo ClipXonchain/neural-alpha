@@ -16,8 +16,9 @@ import {
   registerCompetition,
   switchWalletMode,
   saveAgentConfig,
+  sendCommand,
 } from "@/lib/agent-api";
-import { mapTrack1ToDashboard, enrichStateWithWallet } from "@/lib/map-agent-state";
+import { mapTrack1ToDashboard, enrichStateWithWallet, mergeWalletLiveIntoSignals } from "@/lib/map-agent-state";
 import { generateOfflineState } from "@/lib/mock-data";
 
 function offlineMessage(): string {
@@ -48,7 +49,12 @@ export function useAgentConnection() {
       setWallet(w);
       walletRef.current = w;
       setState((prev) =>
-        prev ? enrichStateWithWallet(prev, w?.binancePositions) : prev
+        prev
+          ? mergeWalletLiveIntoSignals(
+              enrichStateWithWallet(prev, w?.binancePositions),
+              w?.binancePositions
+            )
+          : prev
       );
     } catch {
       /* agent may not have TWAK */
@@ -219,6 +225,30 @@ export function useAgentConnection() {
     []
   );
 
+  const handleSellPosition = useCallback(
+    async (symbol: string) => {
+      if (!connectedRef.current) {
+        throw new Error("Agent offline — start the agent first.");
+      }
+      const result = await sendCommand(`sell all ${symbol}`);
+      if (!result.ok) {
+        throw new Error(result.message || `Failed to sell ${symbol}`);
+      }
+      await resyncAgent();
+      await refreshWallet();
+      const snap = await fetchAgentState();
+      setState((prev) => {
+        const next = enrichStateWithWallet(
+          mapTrack1ToDashboard(snap),
+          walletRef.current?.binancePositions
+        );
+        if (prev) next.activity = prev.activity;
+        return next;
+      });
+    },
+    [refreshWallet]
+  );
+
   return {
     connected,
     loading,
@@ -234,6 +264,7 @@ export function useAgentConnection() {
     handleRegister,
     handleSwitchWallet,
     handleSaveConfig,
+    handleSellPosition,
     refreshWallet,
   };
 }

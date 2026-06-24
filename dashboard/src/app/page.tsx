@@ -4,6 +4,7 @@ import { useState, useEffect, useRef } from "react";
 import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { Header } from "@/components/dashboard/Header";
+import { AutonomousPanel } from "@/components/dashboard/AutonomousPanel";
 import { MetricCards } from "@/components/dashboard/MetricCards";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { TradeHistory } from "@/components/dashboard/TradeHistory";
@@ -103,6 +104,7 @@ export default function DashboardPage() {
     handleRegister,
     handleSwitchWallet,
     handleSaveConfig,
+    handleSellPosition,
   } = useAgentConnection();
 
   if (loading || !state) {
@@ -145,6 +147,8 @@ export default function DashboardPage() {
                 </div>
               )}
 
+              <AutonomousPanel state={state} />
+
               <MetricCards state={state} />
 
               {/* Charts row */}
@@ -160,7 +164,12 @@ export default function DashboardPage() {
               </div>
 
               {/* Open Positions — grouped with trade monitoring */}
-              <PositionsTable positions={state.positions} />
+              <PositionsTable
+                positions={state.positions}
+                readOnly={readOnly}
+                connected={connected}
+                onSell={readOnly ? undefined : handleSellPosition}
+              />
 
               {/* Wallet + Risk */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
@@ -177,7 +186,11 @@ export default function DashboardPage() {
               </div>
 
               {/* Signals */}
-              <SignalMonitor signals={state.signals} />
+              <SignalMonitor
+                signals={state.signals}
+                lastSignalRefreshAt={state.lastSignalRefreshAt}
+                signalRefreshSec={state.signalRefreshSec}
+              />
 
               {/* Agent Controls — hidden on public/read-only deployments */}
               {!readOnly && (

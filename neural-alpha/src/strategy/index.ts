@@ -1,7 +1,7 @@
 import type { MarketData, TradeSignal, AgentConfig } from "../utils/types.js";
 import { computeSignals, generateSignal } from "./signals.js";
 import type { NewsSentiment } from "./news-sentiment.js";
-import { isStablecoin } from "../config.js";
+import { isStablecoin, isTradableToken } from "../config.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -18,6 +18,7 @@ export function analyzeMarkets(
 
   for (const market of markets) {
     if (isStablecoin(market.symbol)) continue;
+    if (!isTradableToken(market.symbol, market.price)) continue;
 
     const technicals = computeSignals(market.symbol);
     const news = newsSentiment?.get(market.symbol) ?? null;

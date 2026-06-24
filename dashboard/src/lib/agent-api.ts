@@ -3,6 +3,32 @@
 const AGENT_BASE =
   process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
 
+export interface AutonomousStatus {
+  phase: "stopped" | "warming" | "scanning" | "idle" | "blocked";
+  ready: boolean;
+  headline: string;
+  blockReason?: string;
+  tradesToday: number;
+  maxTradesToday: number;
+  tradesLast24h: number;
+  txsToday: number;
+  maxTxsToday: number;
+  swapsRemainingToday: number;
+  emergencyMode: boolean;
+  startupCooldownSec: number;
+  nextCycleInSec: number | null;
+  lastCycleAt: number | null;
+  lastCycleDurationSec: number | null;
+  lastCycleTrades: number;
+  lastCycleQueued: number;
+  tradeIntervalSec: number;
+  maxPerCycle: number;
+  autoExitEnabled: boolean;
+  strategy: string;
+  failedSwapCooldowns: Array<{ symbol: string; remainingMin: number }>;
+  competitionNudge: boolean;
+}
+
 export interface Track1Snapshot {
   mode: string;
   running: boolean;
@@ -23,6 +49,13 @@ export interface Track1Snapshot {
     tradeIntervalMs?: number;
     slippageTolerance?: number;
     maxPortfolioTokens?: number;
+    startupCooldownMs?: number;
+    signalRefreshMs?: number;
+    stopLossPct?: number;
+    takeProfitPct?: number;
+    trailingActivatePct?: number;
+    minTradablePriceUsd?: number;
+    excludedTokens?: string[];
   };
   portfolio: {
     timestamp: number;
@@ -31,6 +64,7 @@ export interface Track1Snapshot {
     dailyPnl: number;
     totalPnl: number;
     totalPnlPct: number;
+    initialNavUsd?: number;
     realizedPnl?: number;
     gasReserveUsd?: number;
     maxDrawdownPct: number;
@@ -43,6 +77,12 @@ export interface Track1Snapshot {
       unrealizedPnl: number;
       unrealizedPnlPct: number;
       weight: number;
+      stopLossPrice?: number;
+      takeProfitPrice?: number;
+      distanceToStopPct?: number;
+      distanceToTakeProfitPct?: number;
+      peakPnlPct?: number;
+      entryFromTrades?: boolean;
     }>;
   };
   snapshots: Array<{
@@ -74,13 +114,24 @@ export interface Track1Snapshot {
       confidence?: number | null;
       rsi?: number | null;
       macd?: number | null;
+      bbPosition?: number | null;
+      vwapDev?: number | null;
       volumeRatio?: number | null;
+      ohlcvReal?: boolean;
       aiSummary?: string;
       aiVerdict?: string;
       aiAgrees?: boolean;
     }
   >;
   newsCount?: number;
+  autonomous?: AutonomousStatus;
+  startupCooldownRemainingMs?: number;
+  lastSignalRefreshAt?: number | null;
+  tokenIcons?: Record<string, string>;
+  livePrices?: Record<
+    string,
+    { price: number; change24hPct: number; updatedAt: number }
+  >;
   binancePositions?: Array<{
     symbol: string;
     name: string;
@@ -89,6 +140,7 @@ export interface Track1Snapshot {
     percentChange24h: number;
     valueUsd: number;
     contractAddress: string;
+    icon?: string;
   }>;
 }
 
@@ -108,6 +160,7 @@ export interface WalletSnapshot {
     percentChange24h: number;
     valueUsd: number;
     contractAddress: string;
+    icon?: string;
   }>;
 }
 
@@ -129,6 +182,15 @@ async function agentFetch<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error((err as { error?: string }).error || res.statusText);
   }
   return res.json() as Promise<T>;
+}
+
+const TRADE_TIMEOUT_MS = 180_000;
+
+async function agentFetchLong<T>(path: string, init?: RequestInit): Promise<T> {
+  return agentFetch<T>(path, {
+    ...init,
+    signal: init?.signal ?? AbortSignal.timeout(TRADE_TIMEOUT_MS),
+  });
 }
 
 export async function fetchAgentState(): Promise<Track1Snapshot> {
@@ -175,7 +237,7 @@ export interface CommandResult {
 }
 
 export async function sendCommand(command: string): Promise<CommandResult> {
-  return agentFetch("/command", {
+  return agentFetchLong("/command", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ command }),

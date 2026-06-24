@@ -1,5 +1,6 @@
 import { logger } from "../utils/logger.js";
 import type { PortfolioHolding } from "../utils/types.js";
+import { normalizeBinanceIcon } from "./binance-web3-market.js";
 
 const BINANCE_WEB3_BASE =
   "https://web3.binance.com/bapi/defi/v3/public/wallet-direct/buw/wallet/address/pnl/active-position-list/ai";
@@ -55,7 +56,9 @@ function parsePosition(row: Record<string, unknown>): BinanceWeb3Position | null
     contractAddress: String(row.contractAddress ?? ""),
     name: String(row.name ?? row.tokenName ?? symbol),
     symbol,
-    icon: row.icon ? String(row.icon) : row.iconUrl ? String(row.iconUrl) : undefined,
+    icon: normalizeBinanceIcon(
+      row.icon ? String(row.icon) : row.iconUrl ? String(row.iconUrl) : undefined
+    ),
     decimals: parseNum(row.decimals) || 18,
     price,
     percentChange24h: parseNum(row.percentChange24h ?? row.priceChange24h),
