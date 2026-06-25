@@ -12,6 +12,12 @@ import { analyzeNewsSentiment, type NewsSentiment } from "./strategy/news-sentim
 import { RiskManager } from "./risk/manager.js";
 import { PortfolioTracker } from "./risk/portfolio.js";
 import {
+  blacklistToken as addUserBlacklist,
+  unblacklistToken as removeUserBlacklist,
+  getUserBlacklistedTokens,
+  restoreUserBlacklist,
+} from "./risk/token-blacklist.js";
+import {
   validateAndCreateOrder,
   buildSwapParams,
   buildQuoteParams,
@@ -120,6 +126,9 @@ export class TradingAgent {
   private signalRefreshInProgress = false;
   private signalRefreshCount = 0;
   private lastSignalRefreshAt = 0;
+  /** Independent SL/TP/trailing check (decoupled from trade cycle). */
+  private protectiveExitTimer: ReturnType<typeof setInterval> | undefined;
+  private protectiveExitInProgress = false;
   private tokenIcons = new Map<string, string>();
   private livePrices = new Map<string, BinanceLiveQuote>();
   private lastMarketData: MarketData[] = [];
@@ -143,6 +152,8 @@ export class TradingAgent {
       maxPositionSize: this.config.maxPositionSizeUsd,
       tradeInterval: this.config.tradeIntervalMs,
       signalRefresh: this.config.signalRefreshMs,
+      protectiveExitCheck: this.config.protectiveExitCheckMs,
+      autoExitEnabled: this.config.autoExitEnabled,
     });
   }
 
@@ -187,6 +198,7 @@ export class TradingAgent {
 
     // Signal refresh loop — populates dashboard before / between trade cycles.
     this.startSignalRefreshLoop(generation);
+    this.startProtectiveExitLoop(generation);
 
     this.getWalletInfo().catch(() => {});
 
@@ -227,6 +239,10 @@ export class TradingAgent {
     if (this.signalRefreshTimer) {
       clearInterval(this.signalRefreshTimer);
       this.signalRefreshTimer = undefined;
+    }
+    if (this.protectiveExitTimer) {
+      clearInterval(this.protectiveExitTimer);
+      this.protectiveExitTimer = undefined;
     }
     logger.info("Agent stop requested");
   }
@@ -300,30 +316,10 @@ export class TradingAgent {
     }
     const trailingSells: import("./utils/types.js").TradeSignal[] = [];
     if (this.config.autoExitEnabled) {
-      const riskExits = this.portfolio.getRiskManagedExits(currentPrices, {
-        stopLossPct: this.config.stopLossPct,
-        takeProfitPct: this.config.takeProfitPct,
-        trailingActivatePct: this.config.trailingActivatePct,
-        trailingGivebackPct: this.config.trailingGivebackPct,
-      });
-      for (const exit of riskExits) {
-        trailingSells.push({
-          symbol: exit.symbol,
-          action: "sell",
-          strength: "strong_sell",
-          score: -100,
-          reasons: [exit.reason],
-          targetAllocationPct: 0,
-          confidence: 1,
-        });
-      }
+      trailingSells.push(...this.buildProtectiveExitSignals(currentPrices));
       if (trailingSells.length > 0) {
-        logger.risk("Protective exit triggered", {
-          exits: riskExits.map((e) => ({
-            symbol: e.symbol,
-            kind: e.kind,
-            pnlPct: Math.round(e.pnlPct * 10) / 10,
-          })),
+        logger.risk("Protective exit triggered in trade cycle", {
+          exits: trailingSells.map((s) => s.symbol),
         });
       }
     }
@@ -470,6 +466,145 @@ export class TradingAgent {
     logger.info("Signal refresh loop started", {
       intervalSec: this.config.signalRefreshMs / 1000,
     });
+  }
+
+  /**
+   * Fast protective exit loop — SL / TP / trailing checks without running a
+   * full buy/signal cycle. Decoupled from TRADE_INTERVAL_MS.
+   */
+  private startProtectiveExitLoop(generation: number) {
+    if (this.protectiveExitTimer) {
+      clearInterval(this.protectiveExitTimer);
+      this.protectiveExitTimer = undefined;
+    }
+    if (!this.config.autoExitEnabled || this.config.protectiveExitCheckMs <= 0) {
+      return;
+    }
+
+    void this.runProtectiveExitCheck({ refreshPrices: true });
+
+    this.protectiveExitTimer = setInterval(() => {
+      if (!this.running || generation !== this.runGeneration) return;
+      if (this.protectiveExitInProgress) return;
+      void this.runProtectiveExitCheck();
+    }, this.config.protectiveExitCheckMs);
+
+    logger.info("Protective exit loop started", {
+      intervalSec: this.config.protectiveExitCheckMs / 1000,
+      stopLossPct: this.config.stopLossPct,
+      takeProfitPct: this.config.takeProfitPct,
+    });
+  }
+
+  private buildProtectiveExitSignals(
+    currentPrices: Map<string, number>
+  ): import("./utils/types.js").TradeSignal[] {
+    const riskExits = this.portfolio.getRiskManagedExits(currentPrices, {
+      stopLossPct: this.config.stopLossPct,
+      takeProfitPct: this.config.takeProfitPct,
+      trailingActivatePct: this.config.trailingActivatePct,
+      trailingGivebackPct: this.config.trailingGivebackPct,
+    });
+    return riskExits.map((exit) => ({
+      symbol: exit.symbol,
+      action: "sell" as const,
+      strength: "strong_sell" as const,
+      score: -100,
+      reasons: [exit.reason],
+      targetAllocationPct: 0,
+      confidence: 1,
+    }));
+  }
+
+  /** Live prices for open positions — Binance live → market cache → TWAK fallback. */
+  private buildPositionPrices(): Map<string, number> {
+    const prices = new Map<string, number>();
+    for (const sym of this.portfolio.getMaterialPositionSymbols()) {
+      const live = this.livePrices.get(sym);
+      if (live?.price && live.price > 0) {
+        prices.set(sym, live.price);
+        continue;
+      }
+      const cached = getLatestPrice(sym);
+      if (cached && cached > 0) prices.set(sym, cached);
+    }
+    for (const md of this.lastMarketData) {
+      if (!prices.has(md.symbol) && md.price > 0) {
+        prices.set(md.symbol, md.price);
+      }
+    }
+    return prices;
+  }
+
+  private async fetchPricesForPositions(symbols: string[]): Promise<Map<string, number>> {
+    const prices = this.buildPositionPrices();
+    const missing = symbols.filter((s) => !prices.has(s));
+    if (missing.length === 0) return prices;
+
+    await Promise.all(
+      missing.map(async (sym) => {
+        try {
+          const q = await this.mcp.getTokenPrice(BSC_CHAIN, sym);
+          if (q?.price && q.price > 0) prices.set(sym, q.price);
+        } catch {
+          /* best-effort */
+        }
+      })
+    );
+    return prices;
+  }
+
+  /**
+   * Check SL/TP/trailing and execute sells. Runs on its own timer (default 60s).
+   * Bypasses startup cooldown — capital protection should not wait for warmup.
+   */
+  private async runProtectiveExitCheck(
+    opts: { refreshPrices?: boolean } = {}
+  ): Promise<import("./utils/types.js").TradeResult[]> {
+    if (!this.config.autoExitEnabled || !this.running) return [];
+    if (this.protectiveExitInProgress) return [];
+
+    const symbols = [...this.portfolio.getMaterialPositionSymbols()];
+    if (symbols.length === 0) return [];
+
+    this.protectiveExitInProgress = true;
+    try {
+      const prices =
+        opts.refreshPrices || symbols.some((s) => !this.buildPositionPrices().has(s))
+          ? await this.fetchPricesForPositions(symbols)
+          : this.buildPositionPrices();
+
+      const exitSignals = this.buildProtectiveExitSignals(prices);
+      if (exitSignals.length === 0) return [];
+
+      logger.risk("Protective exit check firing sells", {
+        symbols: exitSignals.map((s) => s.symbol),
+        reasons: exitSignals.map((s) => s.reasons[0]),
+      });
+
+      const results: import("./utils/types.js").TradeResult[] = [];
+      for (const signal of exitSignals) {
+        const result = await this.executeTrade(signal, {
+          protectiveExit: true,
+          sellAll: true,
+        });
+        if (result?.success) results.push(result);
+      }
+
+      if (results.length > 0 && this.config.mode === "live") {
+        try {
+          await this.reconcileLivePortfolio(prices);
+        } catch (err) {
+          logger.warn("Post-exit wallet sync failed", { error: String(err) });
+        }
+      }
+      return results;
+    } catch (err) {
+      logger.warn("Protective exit check failed", { error: String(err) });
+      return [];
+    } finally {
+      this.protectiveExitInProgress = false;
+    }
   }
 
   /**
@@ -974,9 +1109,11 @@ export class TradingAgent {
       /** Sell entire on-chain balance (not a partial $-denominated slice). */
       sellAll?: boolean;
       amountUsd?: number;
+      /** SL/TP/trailing — bypass startup cooldown, still subject to tx budget. */
+      protectiveExit?: boolean;
     } = {}
   ): Promise<TradeResult | null> {
-    if (!opts.manual && this.isInStartupCooldown()) {
+    if (!opts.manual && !opts.protectiveExit && this.isInStartupCooldown()) {
       logger.info("Trade deferred — startup cooldown active", {
         symbol: signal.symbol,
         action: signal.action,
@@ -1289,6 +1426,7 @@ export class TradingAgent {
       "maxDrawdownPct", "slippageTolerance", "maxPortfolioTokens",
       "minTradeAmountUsd", "minBuyConfidence", "stopLossPct", "takeProfitPct",
       "trailingActivatePct", "trailingGivebackPct", "autoExitEnabled",
+      "protectiveExitCheckMs", "signalRefreshMs",
       "maxAutonomousTradesPerCycle", "maxOnChainTxPerDay",
     ];
     for (const key of safe) {
@@ -1579,6 +1717,9 @@ export class TradingAgent {
       const wallet = await this.resolveBootstrapWalletAddress();
       const entries = await store.loadPositionEntries();
       if (entries) this.portfolio.restorePersistedEntries(entries);
+
+      const bl = await store.loadUserBlacklist();
+      restoreUserBlacklist(bl);
 
       dbTrades = await store.loadAllTradesForCostBasis(wallet);
       if (dbTrades.length > 0) {
@@ -2314,10 +2455,12 @@ export class TradingAgent {
     // the last cycle, incl. full-scan / Binance Alpha promotions), not just the
     // 15-token trading watchlist — so the dashboard can show all of them.
     const held = new Set(this.portfolio.getAllPositions().keys());
+    const userBlacklisted = getUserBlacklistedTokens();
     const scanSymbols = new Set<string>([
       ...this.watchlist,
       ...this.lastSignals.keys(),
       ...held,
+      ...userBlacklisted,
     ]);
 
     const currentPrices = new Map<string, number>();
@@ -2329,9 +2472,14 @@ export class TradingAgent {
       if (md.price > 0) currentPrices.set(md.symbol, md.price);
     }
 
-    const reportSymbols = [...scanSymbols].filter((s) =>
-      isTradableToken(s, currentPrices.get(s))
-    );
+    const reportSymbols = [
+      ...new Set([
+        ...[...scanSymbols].filter((s) =>
+          isTradableToken(s, currentPrices.get(s))
+        ),
+        ...userBlacklisted,
+      ]),
+    ];
 
     const portfolioSnap = this.portfolio.snapshot(currentPrices, {
       stopLossPct: this.config.stopLossPct,
@@ -2431,7 +2579,23 @@ export class TradingAgent {
       ...(this._cachedWalletInfo?.binancePositions?.length
         ? { binancePositions: this._cachedWalletInfo.binancePositions }
         : {}),
+      userBlacklisted,
     };
+  }
+
+  /** Operator blacklist — blocks new entries; persisted to Neon when available. */
+  async addUserBlacklistToken(symbol: string): Promise<{ ok: boolean; added: boolean; symbols: string[] }> {
+    const added = addUserBlacklist(symbol);
+    const symbols = getUserBlacklistedTokens();
+    await getAgentStore().saveUserBlacklist(symbols);
+    return { ok: true, added, symbols };
+  }
+
+  async removeUserBlacklistToken(symbol: string): Promise<{ ok: boolean; removed: boolean; symbols: string[] }> {
+    const removed = removeUserBlacklist(symbol);
+    const symbols = getUserBlacklistedTokens();
+    await getAgentStore().saveUserBlacklist(symbols);
+    return { ok: true, removed, symbols };
   }
 }
 
@@ -2476,6 +2640,7 @@ export interface AgentState {
     string,
     { price: number; change24hPct: number; updatedAt: number }
   >;
+  userBlacklisted?: string[];
 }
 
 export interface AutonomousStatus {

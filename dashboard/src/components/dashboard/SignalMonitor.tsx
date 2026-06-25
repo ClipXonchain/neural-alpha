@@ -12,6 +12,8 @@ import {
   Flame,
   Search,
   X,
+  Ban,
+  Undo2,
 } from "lucide-react";
 import { cn, formatTokenPrice, formatPct } from "@/lib/utils";
 import type { Signal } from "@/lib/mock-data";
@@ -160,8 +162,24 @@ function TokenLogo({ symbol, icon }: { symbol: string; icon?: string }) {
   );
 }
 
-function SignalRow({ signal, index }: { signal: Signal; index: number }) {
+function SignalRow({
+  signal,
+  index,
+  readOnly,
+  busySymbol,
+  onBlacklist,
+  onUnblacklist,
+}: {
+  signal: Signal;
+  index: number;
+  readOnly?: boolean;
+  busySymbol?: string | null;
+  onBlacklist?: (symbol: string) => void;
+  onUnblacklist?: (symbol: string) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
+  const isBlocked = !!signal.blacklisted;
+  const isBusy = busySymbol === signal.symbol;
   const isVolumeSpike = (signal.volumeRatio ?? 0) >= 2;
   const hasAi = !!signal.aiSummary;
 
@@ -195,7 +213,8 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
       transition={{ delay: 0.05 + index * 0.03 }}
       className={cn(
         "border-b border-border-dim/60 last:border-b-0",
-        isVolumeSpike && "bg-amber-400/[0.03] border-l-2 border-l-amber-400/50"
+        isBlocked && "bg-danger/[0.04] border-l-2 border-l-danger/40 opacity-90",
+        !isBlocked && isVolumeSpike && "bg-amber-400/[0.03] border-l-2 border-l-amber-400/50"
       )}
     >
       <button
@@ -220,8 +239,16 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
                 >
                   {signal.symbol}
                 </span>
-                {isVolumeSpike && (
+                {isVolumeSpike && !isBlocked && (
                   <Flame className="size-3 text-amber-400 shrink-0" aria-label="Volume spike" />
+                )}
+                {isBlocked && (
+                  <span
+                    className="text-[8px] font-bold uppercase tracking-wider text-danger/90 px-1 py-0.5 rounded border border-danger/25 bg-danger/10"
+                    style={{ fontFamily: "var(--font-mono)" }}
+                  >
+                    Blocked
+                  </span>
                 )}
               </div>
               <div className="flex items-center gap-2 mt-0.5">
@@ -347,8 +374,49 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
             />
           </div>
 
-          {/* Right: badge + confidence */}
-          <div className="flex items-center gap-3 shrink-0 sm:justify-end">
+          {/* Right: badge + confidence + blacklist */}
+          <div className="flex items-center gap-2 shrink-0 sm:justify-end">
+            {!readOnly && (onBlacklist || onUnblacklist) && (
+              isBlocked ? (
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onUnblacklist?.(signal.symbol);
+                  }}
+                  className={cn(
+                    "flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold border transition-colors",
+                    "text-neon/90 bg-neon/8 border-neon/20 hover:bg-neon/15",
+                    isBusy && "opacity-50 cursor-wait"
+                  )}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                  title="Resume trading this token"
+                >
+                  <Undo2 className="size-3" />
+                  Resume
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  disabled={isBusy}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onBlacklist?.(signal.symbol);
+                  }}
+                  className={cn(
+                    "flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold border transition-colors",
+                    "text-danger/90 bg-danger/8 border-danger/20 hover:bg-danger/15",
+                    isBusy && "opacity-50 cursor-wait"
+                  )}
+                  style={{ fontFamily: "var(--font-mono)" }}
+                  title="Block new entries for this token"
+                >
+                  <Ban className="size-3" />
+                  Block
+                </button>
+              )
+            )}
             <SignalBadge strength={signal.strength} />
             <span
               className="text-[11px] text-text-secondary tabular-nums font-medium w-9 text-right"
@@ -408,32 +476,61 @@ function SignalRow({ signal, index }: { signal: Signal; index: number }) {
   );
 }
 
-type SignalTab = "eligible" | "alpha";
+type SignalTab = "eligible" | "alpha" | "blocked";
 
 export function SignalMonitor({
   signals,
   lastSignalRefreshAt,
   signalRefreshSec = 300,
+  readOnly = false,
+  onBlacklist,
+  onUnblacklist,
 }: {
   signals: Signal[];
   lastSignalRefreshAt?: number | null;
   signalRefreshSec?: number;
+  readOnly?: boolean;
+  onBlacklist?: (symbol: string) => Promise<void> | void;
+  onUnblacklist?: (symbol: string) => Promise<void> | void;
 }) {
   const [tab, setTab] = useState<SignalTab>("eligible");
   const [query, setQuery] = useState("");
+  const [busySymbol, setBusySymbol] = useState<string | null>(null);
+
+  const handleBlacklist = async (symbol: string) => {
+    if (!onBlacklist) return;
+    setBusySymbol(symbol);
+    try {
+      await onBlacklist(symbol);
+    } finally {
+      setBusySymbol(null);
+    }
+  };
+
+  const handleUnblacklist = async (symbol: string) => {
+    if (!onUnblacklist) return;
+    setBusySymbol(symbol);
+    try {
+      await onUnblacklist(symbol);
+    } finally {
+      setBusySymbol(null);
+    }
+  };
 
   const sorted = [...signals].sort(
     (a, b) => Math.abs(b.score) - Math.abs(a.score)
   );
 
-  // Section 1: full eligible universe (149) minus stablecoins.
+  const blockedSignals = sorted.filter((s) => s.blacklisted);
+  // Section 1: full eligible universe (149) minus stablecoins and user-blocked.
   const eligibleSignals = sorted.filter(
-    (s) => !STABLE_SYMBOLS.has(s.symbol.toUpperCase())
+    (s) => !STABLE_SYMBOLS.has(s.symbol.toUpperCase()) && !s.blacklisted
   );
   // Section 2: tokens also listed on Binance Alpha (intersection with the 149).
   const alphaSignals = eligibleSignals.filter((s) => isAlphaToken(s.symbol));
 
-  const active = tab === "alpha" ? alphaSignals : eligibleSignals;
+  const active =
+    tab === "alpha" ? alphaSignals : tab === "blocked" ? blockedSignals : eligibleSignals;
   const q = query.trim().toUpperCase();
   const filtered = q
     ? active.filter((s) => s.symbol.toUpperCase().includes(q))
@@ -451,6 +548,12 @@ export function SignalMonitor({
       label: "Binance Alpha",
       count: alphaSignals.length,
       hint: "common w/ 149",
+    },
+    {
+      id: "blocked",
+      label: "Blocked",
+      count: blockedSignals.length,
+      hint: "no new entries",
     },
   ];
 
@@ -523,6 +626,7 @@ export function SignalMonitor({
             style={{ fontFamily: "var(--font-mono)" }}
           >
             {t.id === "alpha" && <Sparkles className="size-3" />}
+            {t.id === "blocked" && <Ban className="size-3" />}
             <span>{t.label}</span>
             <span
               className={cn(
@@ -580,7 +684,9 @@ export function SignalMonitor({
           <div className="px-3 py-8 text-center text-[11px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
             {tab === "alpha"
               ? "No Binance Alpha tokens in the current scan window."
-              : "Waiting for market data…"}
+              : tab === "blocked"
+                ? "No blocked tokens — use Block on any signal row to skip entries."
+                : "Waiting for market data…"}
           </div>
         ) : filtered.length === 0 ? (
           <div className="px-3 py-8 text-center text-[11px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
@@ -588,7 +694,15 @@ export function SignalMonitor({
           </div>
         ) : (
           filtered.map((signal, i) => (
-            <SignalRow key={signal.symbol} signal={signal} index={i} />
+            <SignalRow
+              key={signal.symbol}
+              signal={signal}
+              index={i}
+              readOnly={readOnly}
+              busySymbol={busySymbol}
+              onBlacklist={handleBlacklist}
+              onUnblacklist={handleUnblacklist}
+            />
           ))
         )}
       </div>

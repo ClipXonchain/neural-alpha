@@ -441,6 +441,34 @@ export class AgentStore {
     }
   }
 
+  async saveUserBlacklist(symbols: string[]): Promise<void> {
+    if (!this.pool) return;
+    try {
+      await this.pool.query(
+        `INSERT INTO agent_state (key, value_json, updated_at)
+         VALUES ('user_token_blacklist', $1, NOW())
+         ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = NOW()`,
+        [JSON.stringify({ symbols })]
+      );
+    } catch (err) {
+      logger.warn("Failed to persist user token blacklist", { error: String(err) });
+    }
+  }
+
+  async loadUserBlacklist(): Promise<string[]> {
+    if (!this.pool) return [];
+    try {
+      const { rows } = await this.pool.query<{ value_json: { symbols?: string[] } }>(
+        `SELECT value_json FROM agent_state WHERE key = 'user_token_blacklist' LIMIT 1`
+      );
+      const list = rows[0]?.value_json?.symbols;
+      return Array.isArray(list) ? list.map((s) => String(s).toUpperCase()) : [];
+    } catch (err) {
+      logger.warn("Failed to load user token blacklist", { error: String(err) });
+      return [];
+    }
+  }
+
   /** Last persisted on-chain holdings snapshot (may include tokens purged from memory). */
   async loadLastChainSyncHoldings(): Promise<string[]> {
     if (!this.pool) return [];

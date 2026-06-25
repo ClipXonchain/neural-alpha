@@ -1,5 +1,6 @@
 import type { AgentConfig } from "./utils/types.js";
 import { getStrategyProfile, resolveStrategyName } from "./strategy/presets.js";
+import { isUserBlacklisted } from "./risk/token-blacklist.js";
 
 export const ELIGIBLE_TOKENS: string[] = [
   "ETH", "USDT", "USDC", "XRP", "TRX", "DOGE", "ZEC", "ADA", "LINK", "BCH", "BNB",
@@ -88,6 +89,7 @@ export function isTradableToken(symbol: string, price?: number | null): boolean 
   if (!isEligibleToken(upper)) return false;
   if (isStablecoin(upper)) return false;
   if (isExcludedToken(upper)) return false;
+  if (isUserBlacklisted(upper)) return false;
   if (price != null && price > 0 && price < MIN_TRADABLE_PRICE_USD) return false;
   return true;
 }
@@ -144,6 +146,7 @@ export function loadConfig(): AgentConfig {
     maxDrawdownPct,
     drawdownLimitEnabled: !disableDrawdownLimit && maxDrawdownPct < 100,
     signalRefreshMs: parseInt(process.env.SIGNAL_REFRESH_MS || "300000", 10),
+    protectiveExitCheckMs: parseInt(process.env.PROTECTIVE_EXIT_CHECK_MS || "60000", 10),
     slippageTolerance: num(process.env.SLIPPAGE_TOLERANCE, 1),
     baseCurrency: "USDT",
     swapCurrencies: parseSwapCurrencies(),

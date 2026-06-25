@@ -51,6 +51,7 @@ export interface Track1Snapshot {
     maxPortfolioTokens?: number;
     startupCooldownMs?: number;
     signalRefreshMs?: number;
+    protectiveExitCheckMs?: number;
     stopLossPct?: number;
     takeProfitPct?: number;
     trailingActivatePct?: number;
@@ -132,6 +133,7 @@ export interface Track1Snapshot {
     string,
     { price: number; change24hPct: number; updatedAt: number }
   >;
+  userBlacklisted?: string[];
   binancePositions?: Array<{
     symbol: string;
     name: string;
@@ -263,6 +265,20 @@ export async function saveAgentConfig(
   return agentFetch("/control/config", {
     method: "POST",
     body: JSON.stringify(updates),
+  });
+}
+
+export async function blacklistToken(symbol: string): Promise<{ ok: boolean; added: boolean; symbols: string[] }> {
+  return agentFetch("/blacklist", {
+    method: "POST",
+    body: JSON.stringify({ action: "add", symbol }),
+  });
+}
+
+export async function unblacklistToken(symbol: string): Promise<{ ok: boolean; removed: boolean; symbols: string[] }> {
+  return agentFetch("/blacklist", {
+    method: "POST",
+    body: JSON.stringify({ action: "remove", symbol }),
   });
 }
 

@@ -307,6 +307,42 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
     return true;
   }
 
+  if (url === "/api/blacklist" && req.method === "GET") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    const snap = agentRef.getStateSnapshot();
+    json(req, res, { symbols: snap.userBlacklisted ?? [] });
+    return true;
+  }
+
+  if (url === "/api/blacklist" && req.method === "POST") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    readBody(req)
+      .then((body) => {
+        try {
+          const { action, symbol } = JSON.parse(body) as { action?: string; symbol?: string };
+          if (!symbol || typeof symbol !== "string" || symbol.length > 20) {
+            return json(req, res, { error: "symbol required (max 20 chars)" }, 400);
+          }
+          if (action !== "add" && action !== "remove") {
+            return json(req, res, { error: "action must be 'add' or 'remove'" }, 400);
+          }
+          const run = action === "add"
+            ? agentRef!.addUserBlacklistToken(symbol)
+            : agentRef!.removeUserBlacklistToken(symbol);
+          run
+            .then((r) => {
+              broadcast("state", agentRef!.getStateSnapshot());
+              json(req, res, r);
+            })
+            .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
+        } catch {
+          json(req, res, { error: "Invalid JSON" }, 400);
+        }
+      })
+      .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 413));
+    return true;
+  }
+
   if (url.startsWith("/api/control/watchlist") && req.method === "POST") {
     if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
     readBody(req)
@@ -343,6 +379,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
             "maxDrawdownPct", "slippageTolerance", "maxPortfolioTokens",
             "minTradeAmountUsd", "minBuyConfidence", "stopLossPct", "takeProfitPct",
             "trailingActivatePct", "trailingGivebackPct", "autoExitEnabled",
+            "protectiveExitCheckMs", "signalRefreshMs",
             "maxAutonomousTradesPerCycle", "maxOnChainTxPerDay", "strategy",
           ]);
           const disallowed = Object.keys(updates).filter((k) => !ALLOWED_CONFIG_KEYS.has(k));

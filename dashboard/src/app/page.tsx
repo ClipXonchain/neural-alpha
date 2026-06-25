@@ -16,6 +16,7 @@ import { AgentControls } from "@/components/dashboard/AgentControls";
 import { CommandPanel } from "@/components/dashboard/CommandPanel";
 import { useAgentConnection } from "@/hooks/useAgentConnection";
 import { useReadOnly } from "@/hooks/useReadOnly";
+import { blacklistToken, unblacklistToken } from "@/lib/agent-api";
 
 const EquityChart = dynamic(
   () => import("@/components/dashboard/EquityChart").then((m) => m.EquityChart),
@@ -190,6 +191,9 @@ export default function DashboardPage() {
                 signals={state.signals}
                 lastSignalRefreshAt={state.lastSignalRefreshAt}
                 signalRefreshSec={state.signalRefreshSec}
+                readOnly={readOnly}
+                onBlacklist={readOnly ? undefined : async (sym) => { await blacklistToken(sym); }}
+                onUnblacklist={readOnly ? undefined : async (sym) => { await unblacklistToken(sym); }}
               />
 
               {/* Agent Controls — hidden on public/read-only deployments */}

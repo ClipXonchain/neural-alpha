@@ -376,16 +376,20 @@ export async function createTwakMcpBridge(): Promise<McpBridge> {
 
   /** Log each distinct TWAK tool error once — dashboard polling otherwise spams logs. */
   const loggedToolErrors = new Set<string>();
+  /** Last tool failure message — surfaced to swap callers when result is null. */
+  let lastToolError: string | undefined;
 
   const callTool = async (
     name: string,
     args: Record<string, unknown>
   ): Promise<Record<string, unknown> | null> => {
+    lastToolError = undefined;
     try {
       const result = (await client.callTool({ name, arguments: args })) as ToolResult;
       if (result.isError) {
         const errBody = parseToolResult(result);
-        const errMsg = String(errBody?.message ?? errBody?.code ?? errBody ?? "unknown");
+        const errMsg = String(errBody?.message ?? errBody?.error ?? errBody?.code ?? errBody ?? "unknown");
+        lastToolError = errMsg;
         const errKey = `${name}:${errMsg.slice(0, 160)}`;
         if (!loggedToolErrors.has(errKey)) {
           loggedToolErrors.add(errKey);
@@ -395,6 +399,7 @@ export async function createTwakMcpBridge(): Promise<McpBridge> {
       }
       return parseToolResult(result);
     } catch (err) {
+      lastToolError = String(err);
       const errKey = `${name}:exception:${String(err).slice(0, 160)}`;
       if (!loggedToolErrors.has(errKey)) {
         loggedToolErrors.add(errKey);
@@ -597,7 +602,12 @@ export async function createTwakMcpBridge(): Promise<McpBridge> {
 
     async executeSwap(params: ReturnType<typeof buildSwapParams>) {
       const r = await callTool("swap", params);
-      if (!r) return { error: "swap returned empty result" };
+      if (!r) {
+        return {
+          error: lastToolError ?? "swap returned empty result",
+          success: false,
+        };
+      }
       logger.info("TWAK swap raw response", {
         keys: Object.keys(r),
         sample: JSON.stringify(r).slice(0, 800),

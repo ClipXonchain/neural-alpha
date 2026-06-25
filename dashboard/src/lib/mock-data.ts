@@ -55,6 +55,7 @@ export interface Signal {
   signalUpdatedAt?: number | null;
   usesRealOhlcv?: boolean;
   ohlcvReal?: boolean;
+  blacklisted?: boolean;
 }
 
 export interface ActivityItem {

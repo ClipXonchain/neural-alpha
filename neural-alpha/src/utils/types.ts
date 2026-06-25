@@ -141,6 +141,8 @@ export interface AgentConfig {
   drawdownLimitEnabled: boolean;
   /** How often to re-scan markets and recompute signals (independent of trade cycle). */
   signalRefreshMs: number;
+  /** How often to check stop-loss / take-profit / trailing (independent of trade cycle). */
+  protectiveExitCheckMs: number;
   slippageTolerance: number;
   baseCurrency: string;
   /** Currencies used to fund buys (USDT first, then BNB). Sells settle to baseCurrency. */

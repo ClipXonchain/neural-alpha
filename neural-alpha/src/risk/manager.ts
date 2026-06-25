@@ -1,5 +1,6 @@
 import type { AgentConfig, RiskCheck, TradeSignal, PortfolioSnapshot } from "../utils/types.js";
 import { isEligibleToken, isStablecoin, isTradableToken } from "../config.js";
+import { isUserBlacklisted } from "./token-blacklist.js";
 import { getLatestPrice } from "../data/market.js";
 import { PortfolioTracker } from "./portfolio.js";
 import { logger } from "../utils/logger.js";
@@ -41,6 +42,13 @@ export class RiskManager {
       violations.push(`Token ${signal.symbol} is NOT on the eligible BEP-20 list`);
     }
     if (
+      signal.action === "buy" &&
+      isUserBlacklisted(signal.symbol)
+    ) {
+      violations.push(
+        `${signal.symbol} is blacklisted — resume from Signal Monitor to allow entries`
+      );
+    } else if (
       signal.action === "buy" &&
       !isTradableToken(signal.symbol, getLatestPrice(signal.symbol))
     ) {

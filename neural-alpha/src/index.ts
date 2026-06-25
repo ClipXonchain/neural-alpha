@@ -35,7 +35,8 @@ import { startDashboard } from "./web/server.js";
  *   CMC_X402_BASE_URL       - CMC Agent Hub base URL
  *   CMC_X402_MAX_PAYMENT    - Max micropayment per request in USDC atomic units (default: 10000 = 0.01)
  *   CMC_X402_PREFER_NETWORK - x402 payment network (default: bsc)
- *   TRADE_INTERVAL_MS         - Cycle interval in ms
+ *   TRADE_INTERVAL_MS         - Full cycle interval in ms (buys + scans)
+ *   PROTECTIVE_EXIT_CHECK_MS  - SL/TP/trailing check interval (default 60s)
  *   DASHBOARD_PORT            - Web UI port (default: 3847)
  */
 

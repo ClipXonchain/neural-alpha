@@ -244,9 +244,13 @@ function mapSignals(snap: Track1Snapshot): Signal[] {
   const signalUpdatedAt = snap.lastSignalRefreshAt ?? null;
   const excluded = snap.config.excludedTokens;
   const minPrice = snap.config.minTradablePriceUsd;
+  const userBlacklisted = new Set(
+    (snap.userBlacklisted ?? []).map((s) => s.toUpperCase())
+  );
 
   return snap.watchlist
     .filter((symbol) => {
+      if (userBlacklisted.has(symbol.toUpperCase())) return true;
       const price = snap.prices[symbol] ?? 0;
       return isScannableToken(symbol, price, {
         excluded,
@@ -254,6 +258,7 @@ function mapSignals(snap: Track1Snapshot): Signal[] {
       });
     })
     .map((symbol) => {
+    const isBlocked = userBlacklisted.has(symbol.toUpperCase());
     const metrics = snap.tokenMetrics?.[symbol];
     const score = roundNum(metrics?.score ?? 0, 0);
     const strength = scoreToStrength(score);
@@ -290,6 +295,7 @@ function mapSignals(snap: Track1Snapshot): Signal[] {
       livePriceUpdatedAt: liveOk ? (live?.updatedAt ?? null) : null,
       signalUpdatedAt,
       ohlcvReal: metrics?.ohlcvReal ?? false,
+      blacklisted: isBlocked,
       ...(metrics?.aiSummary
         ? {
             aiSummary: metrics.aiSummary,
