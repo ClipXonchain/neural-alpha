@@ -158,7 +158,7 @@ export default function DashboardPage() {
                 <AllocationChart state={state} onRefresh={readOnly ? undefined : handleResync} />
               </div>
 
-              {/* Trades + Live Logs — main monitoring area */}
+              {/* Trades + Agent Brain — main monitoring area */}
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
                 <TradeHistory trades={state.trades} />
                 <ActivityFeed activity={state.activity} />

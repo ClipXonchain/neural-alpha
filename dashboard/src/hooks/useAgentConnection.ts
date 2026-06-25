@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { AgentState } from "@/lib/mock-data";
 import type { WalletSnapshot, LogEntry, Track1Snapshot } from "@/lib/agent-api";
+import { logEntryToActivity } from "@/lib/brain-narrative";
 import {
   checkAgentConnection,
   fetchAgentState,
@@ -115,16 +116,12 @@ export function useAgentConnection() {
             (logEntry) => {
               setState((prev) => {
                 if (!prev) return prev;
-                const newItem = {
-                  id: `${logEntry.timestamp}-${Math.random().toString(36).slice(2, 6)}`,
-                  timestamp: new Date(logEntry.timestamp).getTime(),
-                  type: (["trade", "signal", "risk", "error"].includes(logEntry.level)
-                    ? logEntry.level
-                    : "info") as "trade" | "signal" | "risk" | "info" | "error",
-                  message: logEntry.event,
-                  detail: logEntry.data ? JSON.stringify(logEntry.data) : logEntry.txHash,
-                };
-                const activity = [newItem, ...prev.activity].slice(0, 200);
+                const newItem = logEntryToActivity(
+                  logEntry,
+                  `${logEntry.timestamp}-${Math.random().toString(36).slice(2, 6)}`
+                );
+                if (!newItem) return prev;
+                const activity = [newItem, ...prev.activity].slice(0, 120);
                 return { ...prev, activity };
               });
             }

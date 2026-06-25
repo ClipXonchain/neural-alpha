@@ -49,8 +49,9 @@ export function analyzeMarkets(
  * Select the best trades to execute this cycle, respecting portfolio limits.
  *
  * Holding policy: positions are HELD, not churned. We never sell an existing
- * position just to free a slot for a new entry. Signal-driven exits require a
- * decisive `strong_sell` (clear reversal); mild weakness is held and left to
+ * position just to free a slot for a new entry. No duplicate buys into tokens
+ * already held above the dust threshold (MIN_POSITION_VALUE_USD). Signal-driven
+ * exits require a decisive `strong_sell` (clear reversal); mild weakness is held and left to
  * the protective exits (stop-loss / take-profit / trailing) to manage. When all
  * slots are full, new buys are simply skipped — no forced rotation.
  */
@@ -80,6 +81,7 @@ export function selectTrades(
   let buysAdded = 0;
   const maxBuysPerCycle = Math.max(0, config.maxAutonomousTradesPerCycle);
   for (const buy of buys) {
+    if (existingPositions.has(buy.symbol)) continue;
     if (buysAdded >= availableSlots) break;
     if (buysAdded >= maxBuysPerCycle) break;
     selected.push(buy);

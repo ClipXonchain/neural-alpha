@@ -1,5 +1,6 @@
 import type { Track1Snapshot, LogEntry, WalletSnapshot, AutonomousStatus } from "./agent-api";
 import type { AgentState, Signal, Trade, ActivityItem } from "./mock-data";
+import { mapActivityLogs } from "./brain-narrative";
 import { roundNum, normalizeTokenIconUrl, roundTokenPrice, isPlausibleLivePrice } from "./utils";
 import { isScannableToken } from "./tradable-filter";
 
@@ -353,18 +354,7 @@ function mapTrades(
 }
 
 function mapActivity(logs: LogEntry[]): ActivityItem[] {
-  return logs
-    .slice(-30)
-    .reverse()
-    .map((log, i) => ({
-      id: `${log.timestamp}-${i}`,
-      timestamp: new Date(log.timestamp).getTime(),
-      type: (["trade", "signal", "risk", "error"].includes(log.level)
-        ? log.level
-        : "info") as ActivityItem["type"],
-      message: log.event,
-      detail: log.data ? JSON.stringify(log.data) : log.txHash,
-    }));
+  return mapActivityLogs(logs);
 }
 
 function mapEquityCurve(snap: Track1Snapshot) {

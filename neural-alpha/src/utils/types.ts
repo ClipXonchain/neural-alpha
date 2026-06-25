@@ -194,8 +194,10 @@ export interface RiskExit {
 
 export interface LogEntry {
   timestamp: string;
-  level: "info" | "warn" | "error" | "trade" | "signal" | "risk";
+  level: "info" | "warn" | "error" | "trade" | "signal" | "risk" | "brain";
   event: string;
+  /** Human-readable line for dashboard brain feed (falls back to event). */
+  narrative?: string;
   data?: Record<string, unknown>;
   txHash?: string;
 }

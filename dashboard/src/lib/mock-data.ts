@@ -61,7 +61,7 @@ export interface Signal {
 export interface ActivityItem {
   id: string;
   timestamp: number;
-  type: "trade" | "signal" | "risk" | "info" | "error";
+  type: "brain" | "trade" | "signal" | "risk" | "info" | "error";
   message: string;
   detail?: string;
 }
@@ -232,14 +232,14 @@ export function generateMockState(): AgentState {
       { symbol: "AAVE", action: "sell", strength: "sell", score: -42, rsi: 73, macd: 0.18, bbPosition: 91, vwapDev: 0.9, confidence: 0.77, price: 93.2, change24h: 5.6, volumeRatio: 1.3 },
     ],
     activity: [
-      { id: "a1", timestamp: Date.now() - 60000, type: "trade", message: "BUY 0.0421 ETH @ $3,720", detail: "Score: 45 | Confidence: 82%" },
-      { id: "a2", timestamp: Date.now() - 180000, type: "signal", message: "Strong buy signal: AVAX", detail: "RSI: 24 (oversold) + MACD bullish cross" },
-      { id: "a3", timestamp: Date.now() - 300000, type: "risk", message: "Position limit check passed", detail: "4/5 positions used" },
-      { id: "a4", timestamp: Date.now() - 420000, type: "info", message: "Cycle #847 complete", detail: "8 markets analyzed, 2 signals" },
-      { id: "a5", timestamp: Date.now() - 600000, type: "trade", message: "SELL 520 DOGE @ $0.158", detail: "PnL: +$4.12 (+5.28%)" },
-      { id: "a6", timestamp: Date.now() - 900000, type: "info", message: "Fear & Greed Index: 42 (Fear)", detail: "Contrarian overlay active" },
-      { id: "a7", timestamp: Date.now() - 1200000, type: "signal", message: "Sell signal: ADA", detail: "RSI: 71 (overbought) + momentum negative" },
-      { id: "a8", timestamp: Date.now() - 1800000, type: "error", message: "Price fetch failed: SHIB", detail: "Retrying in 30s..." },
+      { id: "a1", timestamp: Date.now() - 60000, type: "brain", message: "Bought ETH (~$156.50)." },
+      { id: "a2", timestamp: Date.now() - 180000, type: "brain", message: "Scan complete — 6 signals found. Best pick: AVAX (strong buy, score 62)." },
+      { id: "a3", timestamp: Date.now() - 300000, type: "brain", message: "Plan for this cycle: buy AVAX." },
+      { id: "a4", timestamp: Date.now() - 420000, type: "brain", message: "Cycle done — watching the market, no trades needed. Status: idle." },
+      { id: "a5", timestamp: Date.now() - 600000, type: "trade", message: "Sold DOGE (~$82.16).", detail: "PnL: +$4.12 (+5.28%)" },
+      { id: "a6", timestamp: Date.now() - 900000, type: "risk", message: "Passed on ADA — already holding ADA — no duplicate buy." },
+      { id: "a7", timestamp: Date.now() - 1200000, type: "signal", message: "Found 3 buy candidates. Top signal: UNI buy (29)." },
+      { id: "a8", timestamp: Date.now() - 1800000, type: "error", message: "Trade failed on SHIB: No verified BEP-20 contract." },
     ],
     equityCurve,
     drawdownCurve: generateDrawdownCurve(),

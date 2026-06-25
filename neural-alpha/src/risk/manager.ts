@@ -1,5 +1,5 @@
 import type { AgentConfig, RiskCheck, TradeSignal, PortfolioSnapshot } from "../utils/types.js";
-import { isEligibleToken, isStablecoin, isTradableToken } from "../config.js";
+import { isEligibleToken, isStablecoin, isTradableToken, MIN_POSITION_VALUE_USD } from "../config.js";
 import { isUserBlacklisted } from "./token-blacklist.js";
 import { getLatestPrice } from "../data/market.js";
 import { PortfolioTracker } from "./portfolio.js";
@@ -58,6 +58,13 @@ export class RiskManager {
     // 2. Stablecoin guard — don't trade stables for stables
     if (isStablecoin(signal.symbol) && signal.action === "buy") {
       violations.push(`Cannot buy stablecoin ${signal.symbol} as a position`);
+    }
+
+    // 2b. No duplicate entries — skip if we already hold a material position (dust excluded).
+    if (signal.action === "buy" && this.portfolio.isMaterialPosition(signal.symbol)) {
+      violations.push(
+        `Already holding ${signal.symbol} — no duplicate buy (dust below $${MIN_POSITION_VALUE_USD} ignored)`
+      );
     }
 
     // 3–4. Drawdown gates (optional — disabled when DISABLE_DRAWDOWN_LIMIT=true).

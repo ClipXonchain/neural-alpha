@@ -170,6 +170,7 @@ export interface LogEntry {
   timestamp: string;
   level: string;
   event: string;
+  narrative?: string;
   data?: Record<string, unknown>;
   txHash?: string;
 }

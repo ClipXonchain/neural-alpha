@@ -1,4 +1,5 @@
 import { logger } from "../utils/logger.js";
+import { brain } from "../utils/brain-log.js";
 
 /** Operator-curated blocklist — persisted in Neon, merged at runtime with static exclusions. */
 const userBlacklisted = new Set<string>();
@@ -21,6 +22,7 @@ export function blacklistToken(symbol: string): boolean {
   if (userBlacklisted.has(sym)) return false;
   userBlacklisted.add(sym);
   logger.info("Token added to user blacklist", { symbol: sym });
+  brain(`Blocked ${sym} — I won't open new entries until you resume it.`);
   return true;
 }
 
@@ -29,6 +31,7 @@ export function unblacklistToken(symbol: string): boolean {
   if (!userBlacklisted.has(sym)) return false;
   userBlacklisted.delete(sym);
   logger.info("Token removed from user blacklist", { symbol: sym });
+  brain(`Resumed ${sym} — eligible for new entries again.`);
   return true;
 }
 

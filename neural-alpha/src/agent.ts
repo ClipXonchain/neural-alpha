@@ -27,6 +27,25 @@ import {
   floorTokenAmount,
 } from "./execution/executor.js";
 import { logger } from "./utils/logger.js";
+import {
+  brainAgentStarted,
+  brainCycleDone,
+  brainCycleStart,
+  brainEmergency,
+  brainLoopsStarted,
+  brainPortfolioContext,
+  brainProtectiveExit,
+  brainProtectiveWatch,
+  brainQueuedTrades,
+  brainRefreshLoopStarted,
+  brainSentiment,
+  brainSignalOverview,
+  brainSignalPulse,
+  brainStartupCooldown,
+  brainTradeExecuted,
+  brainTradeFailed,
+  brainTradeSkipped,
+} from "./utils/brain-log.js";
 import { getAgentStore } from "./db/store.js";
 import { fetchBscTokenBalances, scanWalletViaCliSubprocess } from "./integrations/bscscan.js";
 import { fetchWalletTradeHistory } from "./integrations/trade-history.js";
@@ -206,6 +225,11 @@ export class TradingAgent {
       interval: `${this.config.tradeIntervalMs / 1000}s`,
       startupCooldownSec: this.config.startupCooldownMs / 1000,
     });
+    brainAgentStarted(
+      this.config.mode,
+      Math.round(this.config.tradeIntervalMs / 60000),
+      Math.round(this.config.signalRefreshMs / 60000)
+    );
 
     while (this.running && generation === this.runGeneration) {
       try {
@@ -278,12 +302,24 @@ export class TradingAgent {
       updateSentiment: false,
       force: true,
     });
+    brainCycleStart(cycleId, markets.length, fullScan);
 
     // Step 2: Fetch macro sentiment (Fear & Greed via CMC x402) then re-score for trades.
     await this.fetchSentiment();
+    brainSentiment(this.fearGreedIndex, this.lastNewsCount);
+
+    const materialHeld = [...this.portfolio.getMaterialPositionSymbols()].sort();
+    brainPortfolioContext(
+      materialHeld,
+      this.portfolio.cash,
+      this.portfolio.getMaxDrawdown(),
+      materialHeld.length,
+      this.config.maxPortfolioTokens
+    );
 
     // Step 3: Analyze markets and generate signals (includes updated F&G).
     let signals = analyzeMarkets(markets, this.fearGreedIndex, this.config, this.lastNewsSentiment);
+    brainSignalOverview(markets.length, signals);
 
     // Step 4b: AI technical analysis on top actionable signals (optional)
     const technicalsMap = new Map(
@@ -309,6 +345,10 @@ export class TradingAgent {
       this.lastSignalConfidence.set(s.symbol, s.confidence);
     }
 
+    if (this.config.autoExitEnabled && materialHeld.length > 0) {
+      brainProtectiveWatch(materialHeld);
+    }
+
     // Step 3b: Protective exits — stop-loss, take-profit, trailing stop (optional).
     const currentPrices = new Map<string, number>();
     for (const m of markets) {
@@ -321,12 +361,17 @@ export class TradingAgent {
         logger.risk("Protective exit triggered in trade cycle", {
           exits: trailingSells.map((s) => s.symbol),
         });
+        brainProtectiveExit(
+          trailingSells.map((s) => s.symbol),
+          trailingSells.map((s) => s.reasons[0] ?? "stop/TP")
+        );
       }
     }
 
     // Step 4: Select best trades (dust holdings do not consume portfolio slots).
     const existingPositions = this.portfolio.getMaterialPositionSymbols(currentPrices);
     const tradesToExecute = selectTrades(signals, this.config, existingPositions);
+    brainQueuedTrades(tradesToExecute);
 
     // Prepend protective exits (highest priority — always execute first)
     for (const ts of trailingSells) {
@@ -343,6 +388,7 @@ export class TradingAgent {
         "EMERGENCY MODE — high drawdown, new buys paused (positions held, no liquidation)",
         this.riskManager.riskSummary()
       );
+      brainEmergency("Drawdown high — pausing new buys, keeping existing positions.");
       tradesToExecute.splice(0, tradesToExecute.length,
         ...tradesToExecute.filter((t) => t.action === "sell")
       );
@@ -362,6 +408,7 @@ export class TradingAgent {
         remainingSec,
         queued: tradesToExecute.length,
       });
+      brainStartupCooldown(remainingSec, tradesToExecute.length);
     } else if (tradesToExecute.length > maxPerCycle) {
       logger.info("Autonomous trade queue trimmed to per-cycle cap", {
         queued: tradesToExecute.length,
@@ -434,6 +481,18 @@ export class TradingAgent {
       nextCycleInSec: autoStatus.nextCycleInSec,
       blockReason: autoStatus.blockReason,
     });
+    brainCycleDone(
+      cycleId,
+      tradeResults.length,
+      tradesToExecute.length,
+      autoStatus.phase,
+      {
+        nextCycleMin: autoStatus.nextCycleInSec != null ? autoStatus.nextCycleInSec / 60 : null,
+        portfolioUsd: snapshot.totalValueUsd,
+        tradesToday: autoStatus.tradesToday,
+        durationSec: Math.round(duration / 1000),
+      }
+    );
 
     return {
       cycleId,
@@ -466,6 +525,7 @@ export class TradingAgent {
     logger.info("Signal refresh loop started", {
       intervalSec: this.config.signalRefreshMs / 1000,
     });
+    brainRefreshLoopStarted(this.config.signalRefreshMs);
   }
 
   /**
@@ -494,6 +554,10 @@ export class TradingAgent {
       stopLossPct: this.config.stopLossPct,
       takeProfitPct: this.config.takeProfitPct,
     });
+    brainLoopsStarted(
+      Math.round(this.config.protectiveExitCheckMs / 1000),
+      this.config.autoExitEnabled
+    );
   }
 
   private buildProtectiveExitSignals(
@@ -581,6 +645,10 @@ export class TradingAgent {
         symbols: exitSignals.map((s) => s.symbol),
         reasons: exitSignals.map((s) => s.reasons[0]),
       });
+      brainProtectiveExit(
+        exitSignals.map((s) => s.symbol),
+        exitSignals.map((s) => s.reasons[0] ?? "stop/TP")
+      );
 
       const results: import("./utils/types.js").TradeResult[] = [];
       for (const signal of exitSignals) {
@@ -629,9 +697,13 @@ export class TradingAgent {
       await this.fetchNews();
       const markets = await this.collectMarketData(!!opts.fullScan);
       await this.applyBinanceEnrichment(markets, !!opts.fullScan);
-      this.runSignalAnalysis(markets);
+      const signals = this.runSignalAnalysis(markets);
       this.lastMarketData = markets;
       this.lastSignalRefreshAt = Date.now();
+
+      if (!this.cycleInProgress) {
+        brainSignalPulse(!!opts.fullScan, markets.length, signals);
+      }
 
       logger.info("Market signals refreshed", {
         tokens: markets.length,
@@ -648,7 +720,7 @@ export class TradingAgent {
     }
   }
 
-  private runSignalAnalysis(markets: MarketData[]) {
+  private runSignalAnalysis(markets: MarketData[]): import("./utils/types.js").TradeSignal[] {
     const signals = analyzeMarkets(
       markets,
       this.fearGreedIndex,
@@ -670,6 +742,7 @@ export class TradingAgent {
         this.lastSignalConfidence.set(md.symbol, 0.3);
       }
     }
+    return signals;
   }
 
   private async applyBinanceEnrichment(markets: MarketData[], fullScan: boolean) {
@@ -1138,6 +1211,7 @@ export class TradingAgent {
           symbol: signal.symbol,
           reason: gate.reason,
         });
+        brainTradeSkipped(signal.symbol, signal.action, gate.reason ?? "autonomous gate");
         return null;
       }
     }
@@ -1152,6 +1226,13 @@ export class TradingAgent {
           symbol: signal.symbol,
           reasons: validation.violations,
         });
+        if (!opts.manual) {
+          brainTradeSkipped(
+            signal.symbol,
+            signal.action,
+            validation.violations?.[0] ?? "did not pass risk checks"
+          );
+        }
         return null;
       }
       order = validation.order;
@@ -1180,6 +1261,7 @@ export class TradingAgent {
 
       applyTradeToPortfolio(order, result, this.portfolio);
       await this.persistTrade(order, result);
+      brainTradeExecuted(order.side, order.symbol, order.amountUsd, result.txHash);
       return result;
     }
 
@@ -1253,6 +1335,7 @@ export class TradingAgent {
 
       if (result.success) {
         applyTradeToPortfolio(order, result, this.portfolio);
+        brainTradeExecuted(order.side, order.symbol, order.amountUsd, result.txHash);
         try {
           await this.syncWalletCapital();
         } catch (err) {
@@ -1267,17 +1350,20 @@ export class TradingAgent {
           symbol: order.symbol,
           error: result.error,
         });
+        brainTradeFailed(order.symbol, result.error ?? "swap not confirmed on-chain");
         if (!opts.manual) this.markFailedSwap(order.symbol);
       }
 
       return result;
     } catch (err) {
       if (!opts.manual) this.markFailedSwap(signal.symbol);
+      const msg = String(err);
       logger.error("Trade execution error", {
         orderId: order.id,
         symbol: order.symbol,
-        error: String(err),
+        error: msg,
       });
+      brainTradeFailed(order.symbol, msg);
       return null;
     }
   }

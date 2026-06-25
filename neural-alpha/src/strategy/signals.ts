@@ -3,7 +3,6 @@ import { getClosePrices, getVolumes, getPriceHistory } from "../data/market.js";
 import { isStablecoin } from "../config.js";
 import type { NewsSentiment } from "./news-sentiment.js";
 import * as ind from "./indicators.js";
-import { logger } from "../utils/logger.js";
 import {
   getStrategyProfile,
   DEFAULT_STRATEGY,
@@ -388,15 +387,6 @@ export function generateSignal(
   if (action === "buy") {
     targetAllocation = strength === "strong_buy" ? profile.alloc.strongBuy : profile.alloc.buy;
   }
-
-  logger.signal("Signal generated", {
-    symbol: market.symbol,
-    strategy: profile.name,
-    score: Math.round(totalScore),
-    strength,
-    action,
-    confidence: Math.round(confidence * 100),
-  });
 
   return {
     symbol: market.symbol,
