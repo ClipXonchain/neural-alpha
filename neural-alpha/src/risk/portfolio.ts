@@ -1,5 +1,6 @@
 import type { PortfolioSnapshot, PortfolioPosition, TradeResult, RiskExit } from "../utils/types.js";
 import { MIN_GAS_RESERVE_USD, MIN_POSITION_VALUE_USD } from "../config.js";
+import { getLatestPrice } from "../data/market.js";
 import { logger } from "../utils/logger.js";
 
 const FUNDING_TOKENS = new Set([
@@ -270,6 +271,76 @@ export class PortfolioTracker {
     return new Map(this.positions);
   }
 
+  /** USD value of a held token (live price → avg entry fallback). */
+  getPositionValueUsd(
+    symbol: string,
+    prices?: Map<string, number>
+  ): number {
+    const pos = this.positions.get(symbol.toUpperCase());
+    if (!pos || pos.amount <= 0) return 0;
+    const price =
+      prices?.get(symbol.toUpperCase()) ??
+      getLatestPrice(symbol) ??
+      pos.avgEntryPrice;
+    if (!(price > 0)) return 0;
+    return pos.amount * price;
+  }
+
+  /** Positions worth at least MIN_POSITION_VALUE_USD — these consume portfolio slots. */
+  isMaterialPosition(symbol: string, prices?: Map<string, number>): boolean {
+    return this.getPositionValueUsd(symbol, prices) >= MIN_POSITION_VALUE_USD;
+  }
+
+  countMaterialPositions(prices?: Map<string, number>): number {
+    let n = 0;
+    for (const sym of this.positions.keys()) {
+      if (this.isMaterialPosition(sym, prices)) n++;
+    }
+    return n;
+  }
+
+  getMaterialPositionSymbols(prices?: Map<string, number>): Set<string> {
+    const out = new Set<string>();
+    for (const sym of this.positions.keys()) {
+      if (this.isMaterialPosition(sym, prices)) out.add(sym);
+    }
+    return out;
+  }
+
+  /**
+   * Drop sub-minimum balances from the tracked map so dust doesn't block new buys.
+   * On-chain dust may still exist — it's just excluded from slot limits and snapshots.
+   */
+  purgeDustPositions(prices: Map<string, number>): string[] {
+    const purged: string[] = [];
+    for (const [symbol, pos] of [...this.positions]) {
+      const price =
+        prices.get(symbol) ?? getLatestPrice(symbol) ?? pos.avgEntryPrice;
+      const valueUsd = price > 0 ? pos.amount * price : 0;
+      if (valueUsd >= MIN_POSITION_VALUE_USD) continue;
+      this.positions.delete(symbol);
+      this.peakPnlPct.delete(symbol);
+      purged.push(symbol);
+    }
+    if (purged.length > 0) {
+      logger.info("Dust positions purged from slot count", {
+        symbols: purged,
+        minUsd: MIN_POSITION_VALUE_USD,
+      });
+    }
+    return purged;
+  }
+
+  /** Drop dust using latest market prices (safe before manual / risk checks). */
+  purgeDustFromMarket(): string[] {
+    const prices = new Map<string, number>();
+    for (const sym of this.positions.keys()) {
+      const p = getLatestPrice(sym);
+      if (p && p > 0) prices.set(sym, p);
+    }
+    return this.purgeDustPositions(prices);
+  }
+
   getTodayTradeCount(): number {
     const today = new Date().toISOString().split("T")[0];
     return this.dailyTradesByDate.get(today) || 0;
@@ -333,6 +404,12 @@ export class PortfolioTracker {
     }
 
     this.refreshEntryPricesFromTrades();
+    const dustRemoved = this.purgeDustPositions(prices);
+    if (dustRemoved.length > 0) {
+      for (const sym of dustRemoved) {
+        if (!removed.includes(sym)) removed.push(sym);
+      }
+    }
     return { added, removed };
   }
 
@@ -410,13 +487,14 @@ export class PortfolioTracker {
       const existing = this.positions.get(sym);
       if (existing) {
         existing.avgEntryPrice = avgEntryPrice;
-      } else if (opts?.seedAmounts) {
+      } else if (opts?.seedAmounts && qty * avgEntryPrice >= MIN_POSITION_VALUE_USD) {
         this.positions.set(sym, { amount: qty, avgEntryPrice });
         seeded++;
       }
     }
 
     const updated = this.refreshEntryPricesFromTrades();
+    this.purgeDustFromMarket();
     if (seeded > 0) {
       logger.info("Open positions seeded from trade history", { seeded, entriesRefreshed: updated });
     } else if (updated > 0) {

@@ -29,6 +29,7 @@ export class RiskManager {
     opts: { manual?: boolean; explicitAmount?: boolean } = {}
   ): RiskCheck {
     const violations: string[] = [];
+    this.portfolio.purgeDustFromMarket();
     const dailyTradeCount = this.portfolio.getTodayTradeCount();
     const drawdownPct = this.portfolio.getMaxDrawdown();
     const positionSizePct = this.portfolio.getSpendableCash() > 0
@@ -105,13 +106,12 @@ export class RiskManager {
       );
     }
 
-    // 9. Max portfolio tokens
-    const currentPositionCount = this.portfolio.getAllPositions().size;
-    if (
+    // 9. Max portfolio tokens — dust below MIN_POSITION_VALUE_USD does not consume slots.
+    const needsNewSlot =
       signal.action === "buy" &&
-      !this.portfolio.getPosition(signal.symbol) &&
-      currentPositionCount >= this.config.maxPortfolioTokens
-    ) {
+      !this.portfolio.isMaterialPosition(signal.symbol);
+    const currentPositionCount = this.portfolio.countMaterialPositions();
+    if (needsNewSlot && currentPositionCount >= this.config.maxPortfolioTokens) {
       violations.push(
         `Max ${this.config.maxPortfolioTokens} positions reached (have ${currentPositionCount})`
       );
@@ -233,7 +233,7 @@ export class RiskManager {
       cashUsd: Math.round(this.portfolio.cash * 100) / 100,
       spendableCashUsd: Math.round(this.portfolio.getSpendableCash() * 100) / 100,
       spendableBnbUsd: Math.round(this.portfolio.getSpendableBnbUsd() * 100) / 100,
-      positionCount: this.portfolio.getAllPositions().size,
+      positionCount: this.portfolio.countMaterialPositions(),
       maxPositions: this.config.maxPortfolioTokens,
       emergencyMode: this.isEmergencyMode(),
     };

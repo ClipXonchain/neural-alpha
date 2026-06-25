@@ -328,8 +328,8 @@ export class TradingAgent {
       }
     }
 
-    // Step 4: Select best trades
-    const existingPositions = new Set(this.portfolio.getAllPositions().keys());
+    // Step 4: Select best trades (dust holdings do not consume portfolio slots).
+    const existingPositions = this.portfolio.getMaterialPositionSymbols(currentPrices);
     const tradesToExecute = selectTrades(signals, this.config, existingPositions);
 
     // Prepend protective exits (highest priority — always execute first)
