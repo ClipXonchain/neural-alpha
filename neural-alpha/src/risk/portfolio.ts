@@ -2,6 +2,10 @@ import type { PortfolioSnapshot, PortfolioPosition, TradeResult, RiskExit } from
 import { MIN_GAS_RESERVE_USD, MIN_POSITION_VALUE_USD } from "../config.js";
 import { getLatestPrice } from "../data/market.js";
 import { logger } from "../utils/logger.js";
+import {
+  dedupeAndCleanTradeResults,
+  preferTradeRecord,
+} from "../utils/trade-dedupe.js";
 
 const FUNDING_TOKENS = new Set([
   "USDT", "USDC", "BUSD", "DAI", "FDUSD", "TUSD", "USD1", "BNB",
@@ -180,12 +184,9 @@ export class PortfolioTracker {
   /** Merge confirmed trades loaded from Neon or on-chain backfill (survives restarts). */
   hydrateTradeHistory(trades: import("../utils/types.js").TradeResult[]) {
     if (trades.length === 0) return;
-    const existing = new Set(this.tradeHistory.map((t) => t.orderId));
-    for (const t of trades) {
-      if (!existing.has(t.orderId)) this.tradeHistory.push(t);
-      this.persistentTradeIds.add(t.orderId);
-    }
-    this.tradeHistory.sort((a, b) => a.timestamp - b.timestamp);
+    const merged = dedupeAndCleanTradeResults([...this.tradeHistory, ...trades]);
+    this.tradeHistory = merged;
+    for (const t of merged) this.persistentTradeIds.add(t.orderId);
     this.rebuildDailyTradeCounts();
     logger.info("Trade history hydrated from database", { count: trades.length });
   }
@@ -780,16 +781,17 @@ export class PortfolioTracker {
       (t) => t.txHash?.toLowerCase() === hash
     );
     if (idx >= 0) {
-      this.tradeHistory[idx] = trade;
+      this.tradeHistory[idx] = preferTradeRecord(this.tradeHistory[idx]!, trade);
     } else if (!this.tradeHistory.some((t) => t.orderId === trade.orderId)) {
       this.tradeHistory.push(trade);
     }
+    this.tradeHistory = dedupeAndCleanTradeResults(this.tradeHistory);
     this.persistentTradeIds.add(trade.orderId);
-    this.tradeHistory.sort((a, b) => a.timestamp - b.timestamp);
   }
 
   recordTrade(result: TradeResult) {
     this.tradeHistory.push(result);
+    this.tradeHistory = dedupeAndCleanTradeResults(this.tradeHistory);
   }
 
   private incrementDailyTrades() {
@@ -910,7 +912,7 @@ export class PortfolioTracker {
   }
 
   getTradeHistory(): TradeResult[] {
-    return [...this.tradeHistory];
+    return dedupeAndCleanTradeResults(this.tradeHistory);
   }
 
   getSnapshots(): PortfolioSnapshot[] {

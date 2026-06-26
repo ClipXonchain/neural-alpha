@@ -320,9 +320,6 @@ function TokenHoldings({ positions }: { positions?: BinancePosition[] }) {
           +{dustCount} dust/spam token{dustCount > 1 ? "s" : ""} hidden (&lt; $1)
         </p>
       )}
-      <p className="text-[9px] text-text-muted mt-1.5 leading-relaxed">
-        Live scan via Binance Web3 public API · no API key required
-      </p>
     </div>
   );
 }

@@ -312,9 +312,26 @@ function mapTrades(
   snap: Track1Snapshot,
   sellPnls?: Map<string, number>
 ): Trade[] {
-  return snap.trades
-    .filter((t) => isConfirmedTrade(t, snap.mode))
-    .slice()
+  const seen = new Map<string, Track1Snapshot["trades"][number]>();
+  for (const t of snap.trades.filter((x) => isConfirmedTrade(x, snap.mode))) {
+    const hash = t.txHash?.toLowerCase();
+    const key =
+      hash && ON_CHAIN_TX_PATTERN.test(hash)
+        ? `hash:${hash}`
+        : hash?.startsWith("binance-web3-")
+          ? `binance:${hash}`
+          : `order:${t.orderId}`;
+    const prev = seen.get(key);
+    if (!prev) {
+      seen.set(key, t);
+      continue;
+    }
+    const prevChain = prev.orderId.startsWith("chain-");
+    const nextChain = t.orderId.startsWith("chain-");
+    if (prevChain && !nextChain) seen.set(key, t);
+  }
+
+  return [...seen.values()]
     .sort((a, b) => b.timestamp - a.timestamp)
     .map((t) => {
       const isBuy = ["USDT", "BNB", snap.config.baseCurrency]
@@ -339,8 +356,7 @@ function mapTrades(
         : undefined;
 
       return {
-        id:
-          t.txHash && ON_CHAIN_TX_PATTERN.test(t.txHash) ? t.txHash : t.orderId,
+        id: t.orderId,
         timestamp: t.timestamp,
         symbol,
         side: (isBuy ? "buy" : "sell") as "buy" | "sell",

@@ -1,6 +1,7 @@
 import { logger } from "../utils/logger.js";
 import type { PortfolioHolding } from "../utils/types.js";
 import { normalizeBinanceIcon } from "./binance-web3-market.js";
+import { filterVerifiedWalletPositions, isVerifiedWalletPosition } from "./wallet-position-filter.js";
 
 const BINANCE_WEB3_BASE =
   "https://web3.binance.com/bapi/defi/v3/public/wallet-direct/buw/wallet/address/pnl/active-position-list/ai";
@@ -107,7 +108,20 @@ export async function fetchWalletPositions(
     if (offset > 500) break; // safety cap
   }
 
-  return all;
+  const verified = filterVerifiedWalletPositions(all);
+  const dropped = all.length - verified.length;
+  if (dropped > 0) {
+    const spamSymbols = all
+      .filter((p) => !isVerifiedWalletPosition(p))
+      .map((p) => `${p.symbol}${p.contractAddress ? `@${p.contractAddress.slice(0, 10)}` : ""}`)
+      .slice(0, 12);
+    logger.info("Filtered wallet spam / fake-ticker tokens", {
+      dropped,
+      examples: spamSymbols,
+    });
+  }
+
+  return verified;
 }
 
 /** Convert Binance Web3 positions to PortfolioHolding format. */

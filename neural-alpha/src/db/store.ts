@@ -4,6 +4,7 @@ import { Pool } from "@neondatabase/serverless";
 import type { PortfolioSnapshot, TradeOrder, TradeResult } from "../utils/types.js";
 import { isPaperTxHash } from "../execution/executor.js";
 import { logger } from "../utils/logger.js";
+import { dedupeAndCleanTradeResults } from "../utils/trade-dedupe.js";
 
 export interface ChainSyncRecord {
   holdings: Record<string, number>;
@@ -44,6 +45,52 @@ function tradeStatus(result: TradeResult, mode: string): string {
   return "confirmed";
 }
 
+type TradeRow = {
+  order_id: string;
+  from_token: string;
+  to_token: string;
+  from_amount: string | null;
+  to_amount: string | null;
+  price_usd: number | null;
+  tx_hash: string | null;
+  realized_pnl: number | null;
+  confirmed_at: string | null;
+  created_at: string;
+};
+
+function mapTradeRows(rows: TradeRow[]): TradeResult[] {
+  return dedupeAndCleanTradeResults(
+    rows.map((r) => ({
+      orderId: r.order_id,
+      success: true,
+      fromToken: r.from_token,
+      toToken: r.to_token,
+      fromAmount: String(r.from_amount ?? "0"),
+      toAmount: r.to_amount ? String(r.to_amount) : undefined,
+      priceAtExecution: Number(r.price_usd ?? 0),
+      txHash: r.tx_hash ?? undefined,
+      timestamp: new Date(r.confirmed_at ?? r.created_at).getTime(),
+      ...(r.realized_pnl != null ? { realizedPnl: r.realized_pnl } : {}),
+    }))
+  );
+}
+
+const ON_CHAIN_TX = /^0x[a-fA-F0-9]{64}$/;
+
+async function deleteOtherRowsForTxHash(
+  pool: Pool,
+  txHash: string | undefined,
+  keepOrderId: string
+): Promise<void> {
+  if (!txHash || !ON_CHAIN_TX.test(txHash)) return;
+  await pool.query(
+    `DELETE FROM trades
+     WHERE LOWER(tx_hash) = LOWER($1)
+       AND order_id <> $2`,
+    [txHash, keepOrderId]
+  );
+}
+
 /**
  * Optional Neon Postgres persistence layer.
  * Gracefully no-ops when DATABASE_URL is unset.
@@ -82,6 +129,7 @@ export class AgentStore {
     if (!this.pool) return;
     try {
       const status = tradeStatus(result, mode);
+      await deleteOtherRowsForTxHash(this.pool, result.txHash, result.orderId);
       await this.pool.query(
         `INSERT INTO trades (
           order_id, symbol, side, amount_usd,
@@ -152,6 +200,7 @@ export class AgentStore {
     const amountUsd = isBuy ? fromAmt : toAmt || fromAmt * (trade.priceAtExecution || 0);
 
     try {
+      await deleteOtherRowsForTxHash(this.pool, trade.txHash, trade.orderId);
       await this.pool.query(
         `INSERT INTO trades (
           order_id, symbol, side, amount_usd,
@@ -296,18 +345,7 @@ export class AgentStore {
         params.push(walletAddress.toLowerCase());
         walletClause = ` AND LOWER(wallet_address) = $${params.length}`;
       }
-      const { rows } = await this.pool.query<{
-        order_id: string;
-        from_token: string;
-        to_token: string;
-        from_amount: string | null;
-        to_amount: string | null;
-        price_usd: number | null;
-        tx_hash: string | null;
-        realized_pnl: number | null;
-        confirmed_at: string | null;
-        created_at: string;
-      }>(
+      const { rows } = await this.pool.query<TradeRow>(
         `SELECT order_id, from_token, to_token, from_amount, to_amount,
                 price_usd, tx_hash, realized_pnl, confirmed_at, created_at
          FROM trades
@@ -316,18 +354,7 @@ export class AgentStore {
          LIMIT $1`,
         params
       );
-      return rows.map((r) => ({
-        orderId: r.order_id,
-        success: true,
-        fromToken: r.from_token,
-        toToken: r.to_token,
-        fromAmount: String(r.from_amount ?? "0"),
-        toAmount: r.to_amount ? String(r.to_amount) : undefined,
-        priceAtExecution: Number(r.price_usd ?? 0),
-        txHash: r.tx_hash ?? undefined,
-        timestamp: new Date(r.confirmed_at ?? r.created_at).getTime(),
-        ...(r.realized_pnl != null ? { realizedPnl: r.realized_pnl } : {}),
-      }));
+      return mapTradeRows(rows);
     } catch (err) {
       logger.warn("Failed to load trades from Neon", { error: String(err) });
       return [];
@@ -376,18 +403,7 @@ export class AgentStore {
         params.push(walletAddress.toLowerCase());
         walletClause = ` AND LOWER(wallet_address) = $${params.length}`;
       }
-      const { rows } = await this.pool.query<{
-        order_id: string;
-        from_token: string;
-        to_token: string;
-        from_amount: string | null;
-        to_amount: string | null;
-        price_usd: number | null;
-        tx_hash: string | null;
-        realized_pnl: number | null;
-        confirmed_at: string | null;
-        created_at: string;
-      }>(
+      const { rows } = await this.pool.query<TradeRow>(
         `SELECT order_id, from_token, to_token, from_amount, to_amount,
                 price_usd, tx_hash, realized_pnl, confirmed_at, created_at
          FROM trades
@@ -396,18 +412,7 @@ export class AgentStore {
          LIMIT $1`,
         params
       );
-      return rows.map((r) => ({
-        orderId: r.order_id,
-        success: true,
-        fromToken: r.from_token,
-        toToken: r.to_token,
-        fromAmount: String(r.from_amount ?? "0"),
-        toAmount: r.to_amount ? String(r.to_amount) : undefined,
-        priceAtExecution: Number(r.price_usd ?? 0),
-        txHash: r.tx_hash ?? undefined,
-        timestamp: new Date(r.confirmed_at ?? r.created_at).getTime(),
-        ...(r.realized_pnl != null ? { realizedPnl: r.realized_pnl } : {}),
-      }));
+      return mapTradeRows(rows);
     } catch (err) {
       logger.warn("Failed to load full trade history from Neon", { error: String(err) });
       return [];
