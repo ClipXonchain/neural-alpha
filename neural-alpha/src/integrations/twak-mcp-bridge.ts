@@ -340,11 +340,29 @@ export async function closeTwakMcpBridge(): Promise<void> {
   }
 }
 
+/** MCP stdio spawn whitelists HOME/PATH/USER only — forward TWAK secrets to `twak serve`. */
+function twakSubprocessEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const key of [
+    "TWAK_WALLET_PASSWORD",
+    "TW_ACCESS_ID",
+    "TW_HMAC_SECRET",
+  ] as const) {
+    const val = process.env[key]?.trim();
+    if (val) env[key] = val;
+  }
+  return env;
+}
+
 export async function createTwakMcpBridge(): Promise<McpBridge> {
   const command = process.env.TWAK_MCP_COMMAND || "twak";
   const args = (process.env.TWAK_MCP_ARGS || "serve").split(" ").filter(Boolean);
 
-  const transport = new StdioClientTransport({ command, args });
+  const transport = new StdioClientTransport({
+    command,
+    args,
+    env: twakSubprocessEnv(),
+  });
   activeTransport = transport;
   transport.onerror = (err) => {
     if (isBenignPipeError(err)) {
