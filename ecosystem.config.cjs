@@ -9,7 +9,7 @@ module.exports = {
       name: "neural-agent",
       cwd: "./neural-alpha",
       script: "node",
-      args: "--import tsx src/index.ts",
+      args: "--import ./src/load-env.ts --import tsx src/index.ts",
       interpreter: "none",
       env: {
         NODE_ENV: "production",

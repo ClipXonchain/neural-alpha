@@ -1,9 +1,4 @@
-import { config as dotenvConfig } from "dotenv";
-import { resolve } from "node:path";
-
-// Load .env from repo root (parent of neural-alpha/) so all vars are available
-// regardless of which directory npm/tsx runs from.
-dotenvConfig({ path: resolve(import.meta.dirname, "../../.env") });
+import "./load-env.js";
 import { TradingAgent } from "./agent.js";
 import { createBridge } from "./integrations/create-bridge.js";
 import { closeTwakMcpBridge } from "./integrations/twak-mcp-bridge.js";

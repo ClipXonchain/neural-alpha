@@ -6,8 +6,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "tsx src/index.ts",
-    "dev": "tsx watch src/index.ts",
+    "start": "node --import ./src/load-env.ts --import tsx src/index.ts",
+    "dev": "node --import ./src/load-env.ts --import tsx watch src/index.ts",
     "register": "tsx src/register.ts"
   },
   "dependencies": {
