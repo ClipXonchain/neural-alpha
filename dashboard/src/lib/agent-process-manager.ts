@@ -1,6 +1,11 @@
+/**
+ * Legacy process manager — prefer Agent Supervisor (agent-supervisor/).
+ * Kept as local fallback when SUPERVISOR_URL is unreachable (dev only).
+ * Uses PM2 or native detached spawn (no setsid — macOS compatible).
+ */
 import "server-only";
 import { execFileSync, spawn, spawnSync } from "child_process";
-import { existsSync, mkdirSync, writeFileSync, appendFileSync } from "fs";
+import { existsSync, mkdirSync, writeFileSync, openSync } from "fs";
 import { join } from "path";
 import { getAgentDir } from "./agent-runtime";
 
@@ -55,22 +60,21 @@ function pm2HasApp(name: string): boolean {
 
 /**
  * Launch an agent outside the dashboard process tree.
- * Prefer PM2 (survives `pm2 restart neural-dashboard`); else nohup+setsid.
+ * Prefer PM2; fallback: Node detached spawn (cross-platform).
  */
 export async function launchDetachedAgent(opts: {
   agentId: string;
   neuralAlphaRoot: string;
   env: NodeJS.ProcessEnv;
-}): Promise<{ ok: boolean; pid?: number; via: "pm2" | "setsid"; error?: string }> {
+}): Promise<{ ok: boolean; pid?: number; via: "pm2" | "detached"; error?: string }> {
   const { agentId, neuralAlphaRoot, env } = opts;
   if (!existsSync(join(neuralAlphaRoot, "src", "index.ts"))) {
-    return { ok: false, via: "setsid", error: "neural-alpha entry not found" };
+    return { ok: false, via: "detached", error: "neural-alpha entry not found" };
   }
 
   if (preferPm2()) {
     const name = agentPm2Name(agentId);
     try {
-      // Replace any stale app so env/cwd stay current
       if (pm2HasApp(name)) {
         spawnSync("pm2", ["delete", name], { stdio: "ignore", timeout: 15_000 });
       }
@@ -86,6 +90,8 @@ export async function launchDetachedAgent(opts: {
           neuralAlphaRoot,
           "--interpreter",
           "none",
+          "--max-memory-restart",
+          process.env.AGENT_MAX_MEMORY || "256M",
           "--exp-backoff-restart-delay",
           "1000",
           "--max-restarts",
@@ -115,14 +121,10 @@ export async function launchDetachedAgent(opts: {
         };
       }
 
-      // Give PM2 a moment to register the pid
       await new Promise((r) => setTimeout(r, 800));
       const pid = readPm2Pid(name);
       if (pid) writePid(agentId, pid);
-
-      // Persist so agents come back after VPS reboot (secrets already in root .env)
       spawnSync("pm2", ["save", "--force"], { stdio: "ignore", timeout: 10_000 });
-
       return { ok: true, pid: pid ?? undefined, via: "pm2" };
     } catch (err) {
       return {
@@ -133,60 +135,50 @@ export async function launchDetachedAgent(opts: {
     }
   }
 
-  // Fallback: leave the dashboard process tree so PM2 tree-kill cannot reap agents
   const agentDir = getAgentDir(agentId);
   mkdirSync(agentDir, { recursive: true });
   const logFile = join(agentDir, "agent.log");
-  const pidFile = join(agentDir, "pid");
+  let logFd: number | undefined;
+  try {
+    logFd = openSync(logFile, "a");
+  } catch {
+    /* ignore */
+  }
 
   return await new Promise((resolve) => {
-    const cmd = [
-      "nohup",
-      "setsid",
+    const child = spawn(
       process.execPath,
-      "--import",
-      "./src/load-env.ts",
-      "--import",
-      "tsx",
-      "src/index.ts",
-      "</dev/null",
-      `>>${JSON.stringify(logFile)}`,
-      "2>&1",
-      "&",
-      "echo $!",
-    ].join(" ");
-
-    const child = spawn("bash", ["-c", cmd], {
-      cwd: neuralAlphaRoot,
-      env: { ...process.env, ...env },
-      detached: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-
-    let out = "";
-    child.stdout?.on("data", (d) => (out += d.toString()));
-    child.on("error", (err) => {
-      resolve({ ok: false, via: "setsid", error: err.message });
-    });
-    child.on("close", (code) => {
-      const pid = parseInt(out.trim().split("\n").pop() || "", 10);
-      if (Number.isFinite(pid) && pid > 0) {
-        writeFileSync(pidFile, String(pid), { mode: 0o600 });
-        try {
-          appendFileSync(logFile, `\n[launcher] started pid=${pid}\n`);
-        } catch {
-          /* ignore */
-        }
-        resolve({ ok: true, pid, via: "setsid" });
-      } else {
-        resolve({
-          ok: false,
-          via: "setsid",
-          error: `setsid launcher failed (code=${code})`,
-        });
+      [
+        "--import",
+        "./src/load-env.ts",
+        "--import",
+        "tsx",
+        "src/index.ts",
+      ],
+      {
+        cwd: neuralAlphaRoot,
+        env: { ...process.env, ...env },
+        detached: true,
+        stdio: logFd != null ? ["ignore", logFd, logFd] : "ignore",
       }
+    );
+
+    child.on("error", (err) => {
+      resolve({ ok: false, via: "detached", error: err.message });
     });
-    child.unref();
+
+    const pid = child.pid;
+    if (pid && pid > 0) {
+      writePid(agentId, pid);
+      child.unref();
+      resolve({ ok: true, pid, via: "detached" });
+    } else {
+      resolve({
+        ok: false,
+        via: "detached",
+        error: "failed to spawn detached process",
+      });
+    }
   });
 }
 
@@ -209,7 +201,6 @@ export async function terminateDetachedAgent(
     } catch {
       /* already dead */
     }
-    // Also try process group in case it was session leader
     try {
       process.kill(-pid, "SIGTERM");
     } catch {

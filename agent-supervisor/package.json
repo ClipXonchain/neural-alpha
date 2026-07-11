@@ -1,0 +1,21 @@
+{
+  "name": "@neural-alpha/supervisor",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Neural Alpha Agent Supervisor — process lifecycle control plane",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "node --import ./src/load-env.ts --import tsx src/index.ts",
+    "dev": "tsx watch --import ./src/load-env.ts src/index.ts"
+  },
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.0",
+    "dotenv": "^16.4.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}

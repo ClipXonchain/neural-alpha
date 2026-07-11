@@ -3,6 +3,7 @@ import { getAgentApiSecret } from "@/lib/agent-secrets";
 import { resolveRuntimeUrl } from "@/lib/agent-runtime";
 import { getAgentApiUrl } from "@/lib/agent-url";
 import { getAgent } from "@/lib/platform-registry";
+import { supervisorResolveUrl } from "@/lib/supervisor-client";
 import {
   isMutationMethod,
   isPublicAgentGet,
@@ -107,8 +108,11 @@ async function resolveUpstream(
 
     const bearerSecret = readonly ? undefined : await getAgentApiSecret(agentId);
 
-    const base =
+    const diskOrDb =
       resolveRuntimeUrl(agentId, agent.runtime_url) || agent.runtime_url;
+    // Prefer live Supervisor registry so port drift never leaks to wrong agent
+    const base =
+      (await supervisorResolveUrl(agentId, diskOrDb)) || diskOrDb;
 
     return {
       base: base.replace(/\/$/, ""),
@@ -117,7 +121,11 @@ async function resolveUpstream(
     };
   }
 
-  // Legacy default agent path (single local agent)
+  // Legacy default agent path (single local agent) — disabled when multi-tenant DB is set
+  if (process.env.DATABASE_URL?.trim()) {
+    throw new Error("Agent id required — singleton proxy disabled in multi-tenant mode");
+  }
+
   if (isMutation) {
     await requireOperatorSession();
   } else if (!readonly && !isPublicAgentGet(agentPath)) {

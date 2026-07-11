@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
 import { getServerEnv } from "@/lib/server-env";
+import { isSupervisorUp } from "@/lib/supervisor-client";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Public liveness for nginx / load balancers.
  * Multi-tenant: does not depend on the optional singleton neural-agent.
- * Also kicks agent reconcile so PM2 dashboard restarts auto-respawn traders.
+ * Kicks agent reconcile via Supervisor (preferred) or local fallback.
  */
 export async function GET() {
   void import("@/lib/platform-registry")
@@ -30,14 +31,17 @@ export async function GET() {
     feedError = err instanceof Error ? err.message : String(err);
   }
 
+  const supervisorOk = await isSupervisorUp();
+
   const body = {
     ok: true,
     service: "neural-dashboard",
     ts: Date.now(),
     marketFeed: feedOk ? "up" : "down",
+    supervisor: supervisorOk ? "up" : "down",
     ...(feedError && !feedOk ? { marketFeedError: feedError } : {}),
   };
 
-  // Platform is up if dashboard responds; feed status is informational
+  // Platform is up if dashboard responds; feed/supervisor status is informational
   return NextResponse.json(body, { status: 200 });
 }

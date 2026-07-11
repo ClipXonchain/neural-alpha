@@ -22,6 +22,12 @@ import {
   terminateDetachedAgent,
 } from "./agent-process-manager";
 import {
+  isSupervisorUp,
+  supervisorReconcile,
+  supervisorStartAgent,
+  supervisorStopAgent,
+} from "./supervisor-client";
+import {
   createPublicClient,
   http,
   parseEther,
@@ -50,6 +56,11 @@ export interface AgentRow {
   runtime_url: string | null;
   runtime_port: number | null;
   public_meta: boolean;
+  config_version?: number | null;
+  host_id?: string | null;
+  pm2_name?: string | null;
+  last_health_at?: string | null;
+  process_phase?: string | null;
   created_at: string;
   deployed_at: string | null;
 }
@@ -334,10 +345,36 @@ let runtimeReconciled = false;
 const runningPids = new Map<string, number>();
 let marketFeedPid: number | null = null;
 
-/** On dashboard boot: sync DB status with process health; auto-respawn running agents. */
+/**
+ * Prefer Agent Supervisor reconcile (control plane).
+ * Falls back to local respawn only if supervisor is unreachable.
+ */
 export async function reconcileAgentRuntime(): Promise<void> {
   if (runtimeReconciled || isNextProductionBuild()) return;
   runtimeReconciled = true;
+
+  if (await isSupervisorUp()) {
+    const result = await supervisorReconcile();
+    if (result) {
+      console.log(
+        `[reconcile] via supervisor: checked=${result.checked} healthy=${result.healthy} respawned=${result.respawned}`
+      );
+    }
+    const pool = getPlatformPool();
+    if (pool) {
+      const { rows } = await pool.query<{ id: string }>(
+        `SELECT id FROM agents WHERE status NOT IN ('archived', 'pending')`
+      );
+      for (const row of rows) {
+        await ingestErc8004Result(row.id);
+      }
+    }
+    return;
+  }
+
+  console.warn(
+    "[reconcile] Supervisor unreachable — using local fallback (start agent-supervisor)"
+  );
 
   const pool = getPlatformPool();
   if (!pool) return;
@@ -364,7 +401,6 @@ export async function reconcileAgentRuntime(): Promise<void> {
       continue;
     }
 
-    // Was supposed to be live — respawn after dashboard/PM2 restart (SaaS resilience)
     if (refreshed.status === "running" || refreshed.status === "provisioning") {
       const port = refreshed.runtime_port ?? readAgentApiPort(agent.id);
       if (!port) {
@@ -842,6 +878,35 @@ async function startAgentProcess(
   port: number,
   agentEnv: Record<string, string>
 ): Promise<boolean> {
+  // Prefer control-plane Supervisor (fleet-safe, staggered starts)
+  if (await isSupervisorUp()) {
+    // Do not send WALLET_MASTER_SECRET over HTTP — supervisor loads it from its own env
+    const { WALLET_MASTER_SECRET: _omit, ...safeEnv } = agentEnv as Record<
+      string,
+      string
+    > & { WALLET_MASTER_SECRET?: string };
+    void _omit;
+    const result = await supervisorStartAgent(agentId, safeEnv);
+    if (!result.ok) {
+      console.warn(
+        `Agent ${agentId} supervisor start failed: ${result.error}`
+      );
+      return false;
+    }
+    if (result.runtime?.pid) {
+      runningPids.set(agentId, result.runtime.pid);
+    }
+    console.log(
+      `Agent ${agentId.slice(0, 8)} started via supervisor` +
+        (result.runtime?.via ? ` (${result.runtime.via})` : "")
+    );
+    await updateRuntimeUrlIfDrifted(agentId);
+    return true;
+  }
+
+  console.warn(
+    `[start] Supervisor unreachable — local fallback for ${agentId.slice(0, 8)}`
+  );
   await ensureMarketFeedRunning();
 
   const neuralAlphaRoot = join(process.cwd(), "..", "neural-alpha");
@@ -895,8 +960,13 @@ async function startAgentProcess(
 export async function stopAgent(agentId: string, ownerWallet: string): Promise<void> {
   const agent = await assertAgentOwner(agentId, ownerWallet);
   const pool = getPlatformPool();
-  const pid = runningPids.get(agentId) ?? readAgentPid(agentId);
-  await terminateDetachedAgent(agentId, pid);
+
+  if (await isSupervisorUp()) {
+    await supervisorStopAgent(agentId);
+  } else {
+    const pid = runningPids.get(agentId) ?? readAgentPid(agentId);
+    await terminateDetachedAgent(agentId, pid);
+  }
   runningPids.delete(agentId);
   if (pool) {
     await pool.query(`UPDATE agents SET status = 'stopped' WHERE id = $1`, [agentId]);
@@ -977,6 +1047,10 @@ export async function setAgentConfig(
       [agentId, key, value, secretKeys.has(key)]
     );
   }
+  await pool.query(
+    `UPDATE agents SET config_version = COALESCE(config_version, 0) + 1 WHERE id = $1`,
+    [agentId]
+  );
 
   await syncAgentEnvFile(agentId);
   await audit("config_update", ownerWallet, agentId, { keys: Object.keys(updates) });

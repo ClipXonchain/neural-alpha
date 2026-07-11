@@ -108,9 +108,13 @@ flowchart TB
         Proxy[Authenticated Agent Proxy]
     end
 
+    subgraph control [Control plane]
+        Sup[Agent Supervisor :4200]
+    end
+
     subgraph infra [Localhost services]
         Feed[Market Feed :4100]
-        Agent[Agent API :3847+]
+        Agent[Agent API per-tenant :4000+]
         Keystore[Encrypted Keystore]
     end
 
@@ -121,12 +125,16 @@ flowchart TB
     end
 
     Browser --> SIWE --> Deploy
+    Deploy --> Sup
     Browser --> Proxy --> Agent
+    Sup --> Agent
     Feed --> CMC
     Feed --> Agent
     Agent --> Keystore
     Agent --> Binance --> BSC
 ```
+
+Full design: [`docs/AGENT-INFRA.md`](./docs/AGENT-INFRA.md).
 
 **Trading cycle (per agent):**
 
@@ -191,6 +199,7 @@ NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID=<walletconnect-id>
 # Shared market feed
 MARKET_FEED_URL=http://127.0.0.1:4100
 DISABLE_SINGLETON_AGENT=true
+SUPERVISOR_URL=http://127.0.0.1:4200
 ```
 
 See [`.env.example`](./.env.example) for the full reference.
@@ -205,7 +214,8 @@ npm run dev:all
 |---|---|
 | **Dashboard** | http://localhost:3000 |
 | **Market feed** | http://127.0.0.1:4100/health |
-| **Agent API** | Spawned per deploy (default base port 3847) |
+| **Supervisor** | http://127.0.0.1:4200/health |
+| **Agent API** | Spawned per deploy (ports 4000+) |
 
 Visit `/login` → `/deploy` to create your first agent.
 
@@ -239,7 +249,8 @@ Full VPS guide: [`deploy/DEPLOY.md`](./deploy/DEPLOY.md)
 | `SIWE_DOMAIN` | Public hostname(s), no `https://` |
 | `MARKET_FEED_URL` | Shared snapshot URL (default `http://127.0.0.1:4100`) |
 | `AGENT_UNIVERSE` | `spot` · `alpha` · `both` · `bstocks` (set at deploy) |
-| `DISABLE_SINGLETON_AGENT` | `true` for multi-tenant (dashboard spawns agents) |
+| `DISABLE_SINGLETON_AGENT` | `true` for multi-tenant (Supervisor spawns agents) |
+| `SUPERVISOR_URL` | Agent Supervisor (`http://127.0.0.1:4200`) |
 | `PLATFORM_TREASURY_ADDRESS` | BSC address for deploy fee |
 | `DEPLOY_FEE_BNB` | Default `0.01` |
 
@@ -404,7 +415,7 @@ agents/
 
 | Command | Description |
 |---|---|
-| `npm run dev:all` | Market feed + agent + dashboard (local dev) |
+| `npm run dev:all` | Market feed + supervisor + dashboard (local multi-tenant) |
 | `npm run dev` | Dashboard only |
 | `npm run market-feed` | Shared market snapshot sidecar |
 | `npm run agent:dev` | Single agent with hot reload |

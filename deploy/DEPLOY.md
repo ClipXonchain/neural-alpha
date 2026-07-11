@@ -45,7 +45,11 @@ nano .env   # fill required values (see checklist below)
 bash deploy/setup.sh
 ```
 
-The script installs deps, builds the dashboard, configures Nginx/SSL, and starts PM2 (`neural-market-feed`, `neural-dashboard`, and optionally `neural-agent` when `DISABLE_SINGLETON_AGENT` is unset).
+The script installs deps, builds the dashboard, configures Nginx/SSL, and starts PM2 (`neural-market-feed`, `neural-supervisor`, `neural-dashboard`, and optionally `neural-agent` when `DISABLE_SINGLETON_AGENT` is unset and `DATABASE_URL` is absent).
+
+Per-tenant agents are spawned by the **Agent Supervisor** (`neural-supervisor` on `:4200`) as `neural-agent-<uuid>`.
+
+See [`docs/AGENT-INFRA.md`](../docs/AGENT-INFRA.md) for the control-plane design.
 
 ---
 

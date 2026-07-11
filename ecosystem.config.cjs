@@ -2,17 +2,25 @@
  * PM2 Ecosystem Configuration — Neural Alpha
  * Deploy: pm2 start ecosystem.config.cjs
  *
- * Multi-tenant: per-agent processes are started via `pm2 start` (name neural-agent-<uuid>)
- * so `pm2 restart neural-dashboard` does NOT kill traders. Fallback: nohup+setsid.
- * Set DISABLE_SINGLETON_AGENT=true (default when DATABASE_URL is set in setup.sh)
- * so only market-feed + dashboard are in ecosystem.config.cjs.
+ * Control plane:
+ *   neural-market-feed  — shared CMC/Binance snapshot (:4100)
+ *   neural-supervisor   — agent process lifecycle (:4200)
+ *   neural-dashboard    — Next.js UI (:3000)
+ *
+ * Tenant agents are spawned by the Supervisor as neural-agent-<uuid>
+ * (PM2 preferred; detached spawn fallback). They survive
+ * `pm2 restart neural-dashboard`.
+ *
+ * Set DISABLE_SINGLETON_AGENT=true whenever DATABASE_URL is set
+ * (default in setup.sh) so the legacy singleton neural-agent is omitted.
  *
  * Operator platform: READONLY=false (default).
  * Public monitor: READONLY=true NEXT_PUBLIC_READONLY=true
  */
 const disableSingleton =
   process.env.DISABLE_SINGLETON_AGENT === "true" ||
-  process.env.DISABLE_SINGLETON_AGENT === "1";
+  process.env.DISABLE_SINGLETON_AGENT === "1" ||
+  !!process.env.DATABASE_URL;
 
 const readonly =
   process.env.READONLY === "true" || process.env.NEXT_PUBLIC_READONLY === "true"
@@ -41,6 +49,35 @@ const apps = [
     log_date_format: "YYYY-MM-DD HH:mm:ss Z",
     error_file: "./logs/market-feed-error.log",
     out_file: "./logs/market-feed-out.log",
+    merge_logs: true,
+    kill_timeout: 10000,
+  },
+  {
+    name: "neural-supervisor",
+    cwd: "./agent-supervisor",
+    script: "node",
+    args: "--import ./src/load-env.ts --import tsx src/index.ts",
+    interpreter: "none",
+    env: {
+      NODE_ENV: "production",
+      SUPERVISOR_PORT: "4200",
+      SUPERVISOR_HOST: "127.0.0.1",
+      MARKET_FEED_URL: "http://127.0.0.1:4100",
+      SUPERVISOR_RECONCILE_MS: "30000",
+      SUPERVISOR_MAX_PARALLEL_STARTS: "5",
+      AGENT_MAX_MEMORY: "256M",
+    },
+    instances: 1,
+    exec_mode: "fork",
+    autorestart: true,
+    max_restarts: 10,
+    min_uptime: "10s",
+    restart_delay: 3000,
+    max_memory_restart: "256M",
+    watch: false,
+    log_date_format: "YYYY-MM-DD HH:mm:ss Z",
+    error_file: "./logs/supervisor-error.log",
+    out_file: "./logs/supervisor-out.log",
     merge_logs: true,
     kill_timeout: 10000,
   },
@@ -87,6 +124,7 @@ apps.push({
     READONLY: readonly,
     NEXT_PUBLIC_READONLY: readonly,
     MARKET_FEED_URL: "http://127.0.0.1:4100",
+    SUPERVISOR_URL: "http://127.0.0.1:4200",
   },
   instances: 1,
   exec_mode: "fork",

@@ -104,6 +104,11 @@ CREATE TABLE IF NOT EXISTS agents (
   runtime_url TEXT,
   runtime_port INTEGER,
   public_meta BOOLEAN NOT NULL DEFAULT true,
+  config_version INTEGER NOT NULL DEFAULT 0,
+  host_id TEXT NOT NULL DEFAULT 'local',
+  pm2_name TEXT,
+  last_health_at TIMESTAMPTZ,
+  process_phase TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   deployed_at TIMESTAMPTZ
 );
@@ -150,3 +155,19 @@ CREATE TABLE IF NOT EXISTS audit_log (
 
 CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
 CREATE INDEX IF NOT EXISTS idx_audit_owner ON audit_log(LOWER(owner_wallet));
+
+-- Fleet ops / supervisor events
+CREATE TABLE IF NOT EXISTS agent_events (
+  id BIGSERIAL PRIMARY KEY,
+  agent_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  detail JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id);
+CREATE INDEX IF NOT EXISTS idx_agent_events_created ON agent_events(created_at DESC);
+
+-- Fleet column upgrades for existing DBs are applied by
+-- dashboard ensurePlatformSchema + supervisor ensureFleetSchema
+-- (ALTER TABLE ... ADD COLUMN IF NOT EXISTS).

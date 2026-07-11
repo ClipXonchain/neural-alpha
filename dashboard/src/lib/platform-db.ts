@@ -106,6 +106,25 @@ export async function ensurePlatformSchema(): Promise<boolean> {
           AND fee_tx_hash <> ''
           AND fee_tx_hash !~* '^0x0+$';
     `);
+    // Fleet columns + events (idempotent for existing DBs)
+    for (const sql of [
+      `ALTER TABLE agents ADD COLUMN IF NOT EXISTS config_version INTEGER NOT NULL DEFAULT 0`,
+      `ALTER TABLE agents ADD COLUMN IF NOT EXISTS host_id TEXT NOT NULL DEFAULT 'local'`,
+      `ALTER TABLE agents ADD COLUMN IF NOT EXISTS pm2_name TEXT`,
+      `ALTER TABLE agents ADD COLUMN IF NOT EXISTS last_health_at TIMESTAMPTZ`,
+      `ALTER TABLE agents ADD COLUMN IF NOT EXISTS process_phase TEXT`,
+      `CREATE TABLE IF NOT EXISTS agent_events (
+        id BIGSERIAL PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        event_type TEXT NOT NULL,
+        detail JSONB,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )`,
+      `CREATE INDEX IF NOT EXISTS idx_agent_events_agent ON agent_events(agent_id)`,
+      `CREATE INDEX IF NOT EXISTS idx_agent_events_created ON agent_events(created_at DESC)`,
+    ]) {
+      await pool.query(sql);
+    }
   })();
   await _initPromise;
   scheduleRuntimeReconcile();
