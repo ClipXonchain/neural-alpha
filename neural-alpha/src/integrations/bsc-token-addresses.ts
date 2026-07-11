@@ -1,9 +1,13 @@
 import { logger } from "../utils/logger.js";
+import {
+  getBinanceAlphaContract,
+} from "./binance-alpha-tokens.js";
+import { getBstocksContract } from "./bstocks-tokens.js";
 
 const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/i;
 const CMC_PRO_BASE = process.env.CMC_PRO_BASE_URL || "https://pro-api.coinmarketcap.com";
 
-/** BEP-20 contract addresses for competition-eligible tokens on BSC mainnet. */
+/** BEP-20 contract addresses for tradable tokens on BSC mainnet. */
 export const BSC_TOKEN_ADDRESSES: Record<string, string> = {
   TWT: "0x4B0F1812e5Df2A09796481Ff14017e6005508003",
   CAKE: "0x0E09FaBB73Bd3Ade0a17ECC321fD13a19e81cE82",
@@ -113,6 +117,8 @@ export function knownBscAddress(symbol: string): string | undefined {
   const mapped =
     BSC_TOKEN_ADDRESSES[upper] ??
     BSC_TOKEN_ADDRESSES[symbol] ??
+    getBinanceAlphaContract(upper) ??
+    getBstocksContract(upper) ??
     addressCache.get(upper);
   return mapped && EVM_ADDRESS.test(mapped) ? mapped : undefined;
 }
@@ -178,7 +184,10 @@ function extractBscAddressFromCmcEntry(entry: Record<string, unknown>): string |
 /** Synchronous lookup — static map only (no CMC API round-trip). */
 export function getKnownBscTokenAddress(symbol: string): string | undefined {
   const sym = symbol.toUpperCase();
-  const known = BSC_TOKEN_ADDRESSES[sym] ?? BSC_TOKEN_ADDRESSES[symbol];
+  const known =
+    BSC_TOKEN_ADDRESSES[sym] ??
+    BSC_TOKEN_ADDRESSES[symbol] ??
+    getBstocksContract(sym);
   return known ? normalizeAddress(known) : undefined;
 }
 

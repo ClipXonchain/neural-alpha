@@ -5,6 +5,7 @@ import type { PortfolioSnapshot, TradeOrder, TradeResult } from "../utils/types.
 import { isPaperTxHash } from "../execution/executor.js";
 import { logger } from "../utils/logger.js";
 import { dedupeAndCleanTradeResults } from "../utils/trade-dedupe.js";
+import { getAgentId } from "../wallet/secrets.js";
 
 export interface ChainSyncRecord {
   holdings: Record<string, number>;
@@ -41,7 +42,7 @@ export interface CycleStats {
 
 function tradeStatus(result: TradeResult, mode: string): string {
   if (!result.success) return "failed";
-  if (mode === "paper" || isPaperTxHash(result.txHash)) return "paper";
+  if (isPaperTxHash(result.txHash)) return "paper";
   return "confirmed";
 }
 
@@ -98,11 +99,18 @@ async function deleteOtherRowsForTxHash(
 export class AgentStore {
   private pool: Pool | null = null;
   readonly enabled: boolean;
+  readonly agentId: string;
 
   constructor() {
     const url = process.env.DATABASE_URL?.trim();
     this.enabled = !!url;
+    this.agentId = getAgentId();
     if (url) this.pool = new Pool({ connectionString: url });
+  }
+
+  /** Namespace agent_state keys so multi-tenant agents never collide. */
+  private stateKey(key: string): string {
+    return `${this.agentId}:${key}`;
   }
 
   async init(): Promise<boolean> {
@@ -135,8 +143,8 @@ export class AgentStore {
           order_id, symbol, side, amount_usd,
           from_token, to_token, from_amount, to_amount,
           price_usd, tx_hash, status, error_message,
-          twak_response, realized_pnl, confirmed_at, wallet_address
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+          twak_response, realized_pnl, confirmed_at, wallet_address, agent_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
         ON CONFLICT (order_id) DO UPDATE SET
           to_amount = EXCLUDED.to_amount,
           price_usd = EXCLUDED.price_usd,
@@ -146,7 +154,8 @@ export class AgentStore {
           twak_response = EXCLUDED.twak_response,
           realized_pnl = EXCLUDED.realized_pnl,
           confirmed_at = EXCLUDED.confirmed_at,
-          wallet_address = COALESCE(EXCLUDED.wallet_address, trades.wallet_address)`,
+          wallet_address = COALESCE(EXCLUDED.wallet_address, trades.wallet_address),
+          agent_id = COALESCE(EXCLUDED.agent_id, trades.agent_id)`,
         [
           result.orderId,
           order.symbol,
@@ -164,6 +173,7 @@ export class AgentStore {
           result.realizedPnl ?? null,
           result.success ? new Date(result.timestamp).toISOString() : null,
           walletAddress ? walletAddress.toLowerCase() : null,
+          this.agentId,
         ]
       );
     } catch (err) {
@@ -251,8 +261,8 @@ export class AgentStore {
           total_pnl_usd, total_pnl_pct, mode,
           realized_pnl, daily_pnl, positions_count,
           total_trades, today_trades, win_rate,
-          fear_greed, emergency_mode
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+          fear_greed, emergency_mode, agent_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)`,
         [
           cycleId,
           snap.cashUsd,
@@ -272,6 +282,7 @@ export class AgentStore {
           stats?.winRate ?? null,
           stats?.fearGreed ?? null,
           stats?.emergencyMode ?? null,
+          this.agentId,
         ]
       );
     } catch (err) {
@@ -286,8 +297,8 @@ export class AgentStore {
         `INSERT INTO chain_syncs (
           holdings_json, usdt_balance,
           positions_added, positions_removed,
-          gas_symbol, gas_amount, gas_usd
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          gas_symbol, gas_amount, gas_usd, agent_id
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
         [
           JSON.stringify(record.holdings),
           record.usdtBalance,
@@ -296,6 +307,7 @@ export class AgentStore {
           record.gas?.symbol ?? null,
           record.gas?.amount ?? null,
           record.gas?.valueUsd ?? null,
+          this.agentId,
         ]
       );
     } catch (err) {
@@ -308,9 +320,9 @@ export class AgentStore {
     try {
       await this.pool.query(
         `INSERT INTO agent_state (key, value_json, updated_at)
-         VALUES ('nav_peak', $1, NOW())
+         VALUES ($1, $2, NOW())
          ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = NOW()`,
-        [JSON.stringify(state)]
+        [this.stateKey("nav_peak"), JSON.stringify(state)]
       );
     } catch (err) {
       logger.warn("Failed to persist NAV state", { error: String(err) });
@@ -321,7 +333,8 @@ export class AgentStore {
     if (!this.pool) return null;
     try {
       const { rows } = await this.pool.query<{ value_json: NavPeakState }>(
-        `SELECT value_json FROM agent_state WHERE key = 'nav_peak' LIMIT 1`
+        `SELECT value_json FROM agent_state WHERE key = $1 LIMIT 1`,
+        [this.stateKey("nav_peak")]
       );
       return rows[0]?.value_json ?? null;
     } catch (err) {
@@ -349,7 +362,7 @@ export class AgentStore {
         `SELECT order_id, from_token, to_token, from_amount, to_amount,
                 price_usd, tx_hash, realized_pnl, confirmed_at, created_at
          FROM trades
-         WHERE status IN ('confirmed', 'paper')${walletClause}
+         WHERE status = 'confirmed'${walletClause}
          ORDER BY COALESCE(confirmed_at, created_at) DESC
          LIMIT $1`,
         params
@@ -407,7 +420,7 @@ export class AgentStore {
         `SELECT order_id, from_token, to_token, from_amount, to_amount,
                 price_usd, tx_hash, realized_pnl, confirmed_at, created_at
          FROM trades
-         WHERE status IN ('confirmed', 'paper')${walletClause}
+         WHERE status = 'confirmed'${walletClause}
          ORDER BY COALESCE(confirmed_at, created_at) ASC
          LIMIT $1`,
         params
@@ -424,9 +437,9 @@ export class AgentStore {
     try {
       await this.pool.query(
         `INSERT INTO agent_state (key, value_json, updated_at)
-         VALUES ('position_entries', $1, NOW())
+         VALUES ($1, $2, NOW())
          ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = NOW()`,
-        [JSON.stringify(entries)]
+        [this.stateKey("position_entries"), JSON.stringify(entries)]
       );
     } catch (err) {
       logger.warn("Failed to persist position entries", { error: String(err) });
@@ -437,7 +450,8 @@ export class AgentStore {
     if (!this.pool) return null;
     try {
       const { rows } = await this.pool.query<{ value_json: PositionEntriesState }>(
-        `SELECT value_json FROM agent_state WHERE key = 'position_entries' LIMIT 1`
+        `SELECT value_json FROM agent_state WHERE key = $1 LIMIT 1`,
+        [this.stateKey("position_entries")]
       );
       return rows[0]?.value_json ?? null;
     } catch (err) {
@@ -451,9 +465,9 @@ export class AgentStore {
     try {
       await this.pool.query(
         `INSERT INTO agent_state (key, value_json, updated_at)
-         VALUES ('user_token_blacklist', $1, NOW())
+         VALUES ($1, $2, NOW())
          ON CONFLICT (key) DO UPDATE SET value_json = EXCLUDED.value_json, updated_at = NOW()`,
-        [JSON.stringify({ symbols })]
+        [this.stateKey("user_token_blacklist"), JSON.stringify({ symbols })]
       );
     } catch (err) {
       logger.warn("Failed to persist user token blacklist", { error: String(err) });
@@ -464,7 +478,8 @@ export class AgentStore {
     if (!this.pool) return [];
     try {
       const { rows } = await this.pool.query<{ value_json: { symbols?: string[] } }>(
-        `SELECT value_json FROM agent_state WHERE key = 'user_token_blacklist' LIMIT 1`
+        `SELECT value_json FROM agent_state WHERE key = $1 LIMIT 1`,
+        [this.stateKey("user_token_blacklist")]
       );
       const list = rows[0]?.value_json?.symbols;
       return Array.isArray(list) ? list.map((s) => String(s).toUpperCase()) : [];
@@ -480,7 +495,9 @@ export class AgentStore {
     try {
       const { rows } = await this.pool.query<{ holdings_json: Record<string, number> }>(
         `SELECT holdings_json FROM chain_syncs
-         ORDER BY created_at DESC LIMIT 1`
+         WHERE agent_id = $1
+         ORDER BY timestamp DESC LIMIT 1`,
+        [this.agentId]
       );
       const holdings = rows[0]?.holdings_json;
       return holdings ? Object.keys(holdings) : [];

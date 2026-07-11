@@ -346,7 +346,7 @@ export function ActivityFeed({ activity }: { activity: ActivityItem[] }) {
 
       <div className="flex items-center justify-between mt-3 pt-3 border-t border-border-dim">
         <span className="text-[10px] text-text-muted">
-          {paused ? "Paused — new thoughts still arrive" : "Live decision stream"}
+          {paused ? "Paused: new thoughts still arrive" : "Live decision stream"}
         </span>
         <div
           className="flex items-center gap-3 text-[9px] text-text-muted"

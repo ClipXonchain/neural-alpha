@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { motion } from "framer-motion";
 import {
   Activity,
@@ -9,6 +10,7 @@ import {
   Radio,
   Settings,
   Square,
+  User,
   Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -199,11 +201,17 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
           )}
         </motion.div>
 
-        {/* Controls — hidden on public/read-only deployments */}
+        {/* Controls: hidden on public/read-only deployments */}
+        <Link
+          href="/profile"
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg glass-raised text-[11px] font-mono text-text-muted hover:text-cyan transition-colors"
+        >
+          <User className="size-3.5" /> Agents
+        </Link>
         {readOnly ? (
           <span
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg glass-raised text-[11px] font-mono text-text-muted"
-            title="Public dashboard — monitoring only"
+            title="Public dashboard: monitoring only"
           >
             <Eye className="size-3.5" /> MONITORING
           </span>

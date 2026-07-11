@@ -10,7 +10,6 @@ import {
   Repeat,
   Activity,
   ShieldAlert,
-  Target,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AgentState } from "@/lib/mock-data";
@@ -118,7 +117,7 @@ export function AutonomousPanel({ state }: { state: AgentState }) {
 
   const headline =
     inWarmup && warmupSec !== null
-      ? `Warming up — autonomous trades in ${formatCountdown(warmupSec)}`
+      ? `Warming up: autonomous trades in ${formatCountdown(warmupSec)}`
       : auto.headline;
 
   const blockReason =
@@ -176,12 +175,6 @@ export function AutonomousPanel({ state }: { state: AgentState }) {
             <p className="mt-1.5 text-xs font-mono text-text-secondary flex items-start gap-1.5">
               <AlertTriangle className="size-3 shrink-0 mt-0.5 text-warning" />
               {blockReason}
-            </p>
-          )}
-          {auto.competitionNudge && (
-            <p className="mt-2 text-[11px] font-mono text-warning/90 flex items-center gap-1.5">
-              <Target className="size-3 shrink-0" />
-              Competition: no trades yet today — agent may force a trade after 20:00 UTC
             </p>
           )}
           {auto.failedSwapCooldowns.length > 0 && (

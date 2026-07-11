@@ -6,7 +6,7 @@ const HIDDEN_EVENTS = new Set([
   "Risk status",
   "Market data fetched",
   "Binance Web3 enrichment applied",
-  "TWAK swap raw response",
+  "Swap raw response",
   "Signal refresh loop started",
   "Protective exit loop started",
   "Wallet capital synced from chain",
@@ -38,7 +38,7 @@ function formatLegacyNarrative(log: LogEntry): string | null {
   if (event === "Strategy analysis complete") {
     const buys = Number(d.buys ?? 0);
     const top = d.topSignal ? String(d.topSignal) : null;
-    if (buys === 0) return "Scanned the market — no buy signals strong enough right now.";
+    if (buys === 0) return "Scanned the market: no buy signals strong enough right now.";
     return top
       ? `Found ${buys} buy candidate${buys === 1 ? "" : "s"}. Top signal: ${top}.`
       : `Found ${buys} buy candidate${buys === 1 ? "" : "s"}.`;
@@ -49,8 +49,8 @@ function formatLegacyNarrative(log: LogEntry): string | null {
     const scored = Number(d.scored ?? 0);
     const fullScan = !!d.fullScan;
     return fullScan
-      ? `Full market refresh — ${tokens} tokens updated, ${scored} scored.`
-      : `Market refresh — ${tokens} tokens updated, ${scored} scored.`;
+      ? `Full market refresh: ${tokens} tokens updated, ${scored} scored.`
+      : `Market refresh: ${tokens} tokens updated, ${scored} scored.`;
   }
 
   if (event === "Autonomous cycle summary") {
@@ -58,9 +58,9 @@ function formatLegacyNarrative(log: LogEntry): string | null {
     const queued = Number(d.queued ?? 0);
     const phase = String(d.phase ?? "idle");
     if (executed > 0) {
-      return `Cycle finished — ${executed} trade${executed === 1 ? "" : "s"} executed. Status: ${phase}.`;
+      return `Cycle finished: ${executed} trade${executed === 1 ? "" : "s"} executed. Status: ${phase}.`;
     }
-    return `Cycle finished — no trades needed. Status: ${phase}${queued > 0 ? ` (${queued} were considered)` : ""}.`;
+    return `Cycle finished: no trades needed. Status: ${phase}${queued > 0 ? ` (${queued} were considered)` : ""}.`;
   }
 
   if (event === "Trade not approved" || event === "Autonomous trade blocked") {
@@ -70,7 +70,7 @@ function formatLegacyNarrative(log: LogEntry): string | null {
       : d.reason
         ? [String(d.reason)]
         : ["did not pass checks"];
-    return `Passed on ${sym} — ${reasons[0]}.`;
+    return `Passed on ${sym}: ${reasons[0]}.`;
   }
 
   if (event === "Protective exit triggered in trade cycle" || event === "Protective exit check firing sells") {
@@ -84,7 +84,7 @@ function formatLegacyNarrative(log: LogEntry): string | null {
   }
 
   if (event.startsWith("EMERGENCY MODE")) {
-    return "Drawdown is elevated — pausing new buys, holding current positions.";
+    return "Drawdown is elevated: pausing new buys, holding current positions.";
   }
 
   if (event === "PAPER trade executed" || event.startsWith("Trade persisted to DB")) {
@@ -99,19 +99,19 @@ function formatLegacyNarrative(log: LogEntry): string | null {
     return `Trade failed on ${String(d.symbol ?? "?")}: ${String(d.error ?? "unknown error")}.`;
   }
 
-  if (event === "Live swap not confirmed on-chain — portfolio unchanged") {
-    return `Swap for ${String(d.symbol ?? "?")} did not confirm on-chain — no position change.`;
+  if (event === "Live swap not confirmed on-chain: portfolio unchanged") {
+    return `Swap for ${String(d.symbol ?? "?")} did not confirm on-chain: no position change.`;
   }
 
-  if (event === "Startup cooldown — autonomous trades paused") {
+  if (event === "Startup cooldown: autonomous trades paused") {
     const sec = Number(d.remainingSec ?? 0);
     const q = Number(d.queued ?? 0);
     return q > 0
-      ? `Warming up (${sec}s) — ${q} trade${q === 1 ? "" : "s"} waiting.`
-      : `Warming up — ${sec}s until trading starts.`;
+      ? `Warming up (${sec}s): ${q} trade${q === 1 ? "" : "s"} waiting.`
+      : `Warming up: ${sec}s until trading starts.`;
   }
 
-  if (event === "Agent started — entering trading loop") {
+  if (event === "Agent started: entering trading loop") {
     return "Agent is online and watching the market.";
   }
 

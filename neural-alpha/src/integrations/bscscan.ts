@@ -1,53 +1,52 @@
 import type { PortfolioHolding } from "../utils/types.js";
-import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { createPublicClient, erc20Abi, formatUnits, http, type Address } from "viem";
+import { bsc } from "viem/chains";
 import { isEligibleToken, isStablecoin } from "../config.js";
 import { BSC_TOKEN_ADDRESSES } from "./bsc-token-addresses.js";
-import { getTokenBalanceViaCli } from "./twak-cli-balance.js";
 import { logger } from "../utils/logger.js";
-
-const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
-const SCAN_SCRIPT = join(PKG_ROOT, "scripts/cli-wallet-scan.ts");
-
-function runCliScanSubprocess(walletAddress: string): Promise<string> {
-  if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) {
-    return Promise.reject(new Error("Invalid wallet address format"));
-  }
-  return new Promise((resolve, reject) => {
-    const child = spawn("npx", ["tsx", SCAN_SCRIPT, walletAddress], {
-      cwd: PKG_ROOT,
-      shell: false,
-      windowsHide: true,
-      env: process.env,
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer | string) => {
-      stdout += String(chunk);
-    });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      stderr += String(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code !== 0) {
-        reject(new Error(stderr.trim() || `CLI scan exited with code ${code}`));
-        return;
-      }
-      resolve(stdout);
-    });
-  });
-}
 
 const NATIVE_GAS = new Set(["BNB"]);
 const BATCH_SIZE = 4;
 
+function rpcUrl(): string {
+  return (
+    process.env.BSC_RPC_URL?.trim() ||
+    process.env.RPC_URL?.trim() ||
+    "https://bsc-dataseed.binance.org"
+  );
+}
+
+async function getErc20Balance(
+  walletAddress: string,
+  tokenAddress: string,
+  symbol: string
+): Promise<PortfolioHolding | null> {
+  const client = createPublicClient({ chain: bsc, transport: http(rpcUrl()) });
+  try {
+    const [bal, decimals] = await Promise.all([
+      client.readContract({
+        address: tokenAddress as Address,
+        abi: erc20Abi,
+        functionName: "balanceOf",
+        args: [walletAddress as Address],
+      }),
+      client.readContract({
+        address: tokenAddress as Address,
+        abi: erc20Abi,
+        functionName: "decimals",
+      }).catch(() => 18),
+    ]);
+    const amount = Number(formatUnits(bal, Number(decimals)));
+    if (!(amount > 0)) return null;
+    return { symbol: symbol.toUpperCase(), amount };
+  } catch {
+    return null;
+  }
+}
+
 /**
- * Probe known BEP-20 contracts for non-zero balances.
- * Prefer queryBalance (TWAK MCP bridge — CLI inside) when provided;
- * falls back to direct TWAK CLI when run out-of-process (scripts/tests).
+ * Probe known BEP-20 contracts for non-zero balances via BSC RPC.
+ * Prefer queryBalance (bridge) when provided.
  */
 export async function scanKnownBscTokenBalances(
   walletAddress: string,
@@ -70,17 +69,7 @@ export async function scanKnownBscTokenBalances(
     }
     const tokenAddress = BSC_TOKEN_ADDRESSES[sym];
     if (!tokenAddress) return null;
-    try {
-      const bal = await getTokenBalanceViaCli("bsc", walletAddress, tokenAddress, sym);
-      if (!bal || !(bal.amount > 0)) return null;
-      return {
-        symbol: bal.symbol,
-        amount: bal.amount,
-        ...(bal.valueUsd && bal.valueUsd > 0 ? { valueUsd: bal.valueUsd } : {}),
-      };
-    } catch {
-      return null;
-    }
+    return getErc20Balance(walletAddress, tokenAddress, sym);
   };
 
   for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
@@ -101,36 +90,11 @@ export async function scanKnownBscTokenBalances(
   return holdings;
 }
 
-/**
- * Run the CLI wallet scan in a child process so TWAK MCP wallet lock
- * doesn't block balance reads while `twak serve` is active in the agent.
- */
+/** Alias kept for callers that previously used a CLI subprocess. */
 export async function scanWalletViaCliSubprocess(
   walletAddress: string
 ): Promise<PortfolioHolding[]> {
-  if (!existsSync(SCAN_SCRIPT)) {
-    logger.warn("CLI wallet scan script missing", { path: SCAN_SCRIPT });
-    return scanKnownBscTokenBalances(walletAddress);
-  }
-
-  try {
-    const stdout = await runCliScanSubprocess(walletAddress);
-    if (!stdout.trim()) {
-      logger.warn("CLI wallet scan returned empty stdout");
-      return [];
-    }
-    const jsonLine = stdout
-      .trim()
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .reverse()
-      .find((line) => line.startsWith("[{") || line === "[]");
-    const parsed = JSON.parse(jsonLine ?? "[]") as PortfolioHolding[];
-    return Array.isArray(parsed) ? parsed : [];
-  } catch (err) {
-    logger.warn("CLI subprocess wallet scan failed", { error: String(err) });
-    return [];
-  }
+  return scanKnownBscTokenBalances(walletAddress);
 }
 
 /** @deprecated BSCScan tokenlist API was shut down — returns empty. */

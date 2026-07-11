@@ -14,22 +14,12 @@ import {
   stopAgent,
   resyncAgent,
   syncWallet,
-  registerCompetition,
-  switchWalletMode,
-  saveAgentConfig,
   sendCommand,
 } from "@/lib/agent-api";
 import { mapTrack1ToDashboard, enrichStateWithWallet, mergeWalletLiveIntoSignals } from "@/lib/map-agent-state";
-import { generateOfflineState } from "@/lib/mock-data";
 
 function offlineMessage(): string {
-  if (typeof window !== "undefined") {
-    const host = window.location.hostname;
-    if (host === "localhost" || host === "127.0.0.1") {
-      return "Agent offline — start the agent with: npm run dev";
-    }
-  }
-  return "Agent API unreachable — reconnecting automatically…";
+  return "Agent process is offline: start it to resume trading.";
 }
 
 export function useAgentConnection() {
@@ -42,6 +32,8 @@ export function useAgentConnection() {
   const [agentConfig, setAgentConfig] = useState<Track1Snapshot["config"] | null>(null);
   const connectedRef = useRef(false);
   const walletRef = useRef<WalletSnapshot | null>(null);
+  const sseUnsubRef = useRef<(() => void) | undefined>(undefined);
+  const logsRef = useRef<LogEntry[]>([]);
 
   const refreshWallet = useCallback(async () => {
     if (!connectedRef.current) return;
@@ -58,12 +50,55 @@ export function useAgentConnection() {
           : prev
       );
     } catch {
-      /* agent may not have TWAK */
+      /* agent wallet may be unavailable */
     }
   }, []);
 
+  const bootstrapLive = useCallback(async () => {
+    const [snap, logs] = await Promise.all([
+      fetchAgentState(),
+      fetchLogs().catch(() => [] as LogEntry[]),
+    ]);
+    logsRef.current = logs;
+    setState(mapTrack1ToDashboard(snap, logs));
+    setBridgeSource(snap.bridgeSource || "agent");
+    setAgentConfig(snap.config);
+    setError(null);
+    await refreshWallet();
+
+    sseUnsubRef.current?.();
+    sseUnsubRef.current = subscribeAgentEvents(
+      (liveSnap) => {
+        setState((prev) => {
+          const next = enrichStateWithWallet(
+            mapTrack1ToDashboard(liveSnap, logsRef.current),
+            walletRef.current?.binancePositions
+          );
+          if (prev && next.activity.length <= 1) {
+            next.activity = prev.activity;
+          }
+          return next;
+        });
+        setBridgeSource(liveSnap.bridgeSource || "agent");
+        setAgentConfig(liveSnap.config);
+      },
+      (logEntry) => {
+        logsRef.current = [logEntry, ...logsRef.current].slice(0, 200);
+        setState((prev) => {
+          if (!prev) return prev;
+          const newItem = logEntryToActivity(
+            logEntry,
+            `${logEntry.timestamp}-${Math.random().toString(36).slice(2, 6)}`
+          );
+          if (!newItem) return prev;
+          const activity = [newItem, ...prev.activity].slice(0, 120);
+          return { ...prev, activity };
+        });
+      }
+    );
+  }, [refreshWallet]);
+
   useEffect(() => {
-    let unsub: (() => void) | undefined;
     let cancelled = false;
     let walletPoll: ReturnType<typeof setInterval> | undefined;
 
@@ -75,64 +110,25 @@ export function useAgentConnection() {
 
       if (ok) {
         try {
-          const [snap, logs] = await Promise.all([
-            fetchAgentState(),
-            fetchLogs().catch(() => []),
-          ]);
-          if (cancelled) return;
-          setState(mapTrack1ToDashboard(snap, logs));
-          setBridgeSource(snap.bridgeSource || "agent");
-          setAgentConfig(snap.config);
-          await refreshWallet();
-
-          // Keep the Binance Web3 holdings overlay fresh.
-          // Use a shorter initial interval to catch the first successful response
-          // after the agent finishes its initial sync, then switch to 30s.
+          await bootstrapLive();
           let pollCount = 0;
           walletPoll = setInterval(() => {
             pollCount++;
             void refreshWallet();
             if (pollCount >= 6 && walletPoll) {
               clearInterval(walletPoll);
-              walletPoll = setInterval(() => { void refreshWallet(); }, 30000);
+              walletPoll = setInterval(() => {
+                void refreshWallet();
+              }, 30000);
             }
           }, 5000);
-
-          unsub = subscribeAgentEvents(
-            (liveSnap) => {
-              setState((prev) => {
-                const next = enrichStateWithWallet(
-                  mapTrack1ToDashboard(liveSnap, logs),
-                  walletRef.current?.binancePositions
-                );
-                if (prev && next.activity.length <= 1) {
-                  next.activity = prev.activity;
-                }
-                return next;
-              });
-              setBridgeSource(liveSnap.bridgeSource || "agent");
-              setAgentConfig(liveSnap.config);
-            },
-            (logEntry) => {
-              setState((prev) => {
-                if (!prev) return prev;
-                const newItem = logEntryToActivity(
-                  logEntry,
-                  `${logEntry.timestamp}-${Math.random().toString(36).slice(2, 6)}`
-                );
-                if (!newItem) return prev;
-                const activity = [newItem, ...prev.activity].slice(0, 120);
-                return { ...prev, activity };
-              });
-            }
-          );
         } catch (e) {
           if (cancelled) return;
           setError(String(e));
-          setState(generateOfflineState());
+          setState(null);
         }
       } else {
-        setState(generateOfflineState());
+        setState(null);
         setError(offlineMessage());
       }
 
@@ -141,40 +137,42 @@ export function useAgentConnection() {
 
     return () => {
       cancelled = true;
-      unsub?.();
+      sseUnsubRef.current?.();
       if (walletPoll) clearInterval(walletPoll);
     };
-  }, [refreshWallet]);
+  }, [bootstrapLive, refreshWallet]);
 
-  // Retry when the agent was down on first load (e.g. PM2 restart).
+  // Retry when the agent was down on first load: reconnect without full page reload.
   useEffect(() => {
     if (connected) return;
     const retry = setInterval(async () => {
       const ok = await checkAgentConnection();
-      if (ok) window.location.reload();
+      if (!ok) return;
+      connectedRef.current = true;
+      setConnected(true);
+      setError(null);
+      try {
+        await bootstrapLive();
+      } catch (e) {
+        setError(String(e));
+      }
     }, 10_000);
     return () => clearInterval(retry);
-  }, [connected]);
+  }, [connected, bootstrapLive]);
 
   const handleStart = useCallback(async () => {
-    if (connectedRef.current) {
-      await startAgent();
-      const snap = await fetchAgentState();
-      setState(enrichStateWithWallet(mapTrack1ToDashboard(snap), walletRef.current?.binancePositions));
-    } else {
-      setState((prev) =>
-        prev ? { ...prev, status: "running" } : prev
-      );
+    if (!connectedRef.current) {
+      throw new Error("Agent offline: start the agent process first.");
     }
+    await startAgent();
+    const snap = await fetchAgentState();
+    setState(enrichStateWithWallet(mapTrack1ToDashboard(snap), walletRef.current?.binancePositions));
   }, []);
 
   const handleStop = useCallback(async () => {
-    if (connectedRef.current) {
-      await stopAgent();
-      setState((prev) => (prev ? { ...prev, status: "paused" } : prev));
-    } else {
-      setState((prev) => (prev ? { ...prev, status: "paused" } : prev));
-    }
+    if (!connectedRef.current) return;
+    await stopAgent();
+    setState((prev) => (prev ? { ...prev, status: "paused" } : prev));
   }, []);
 
   const handleSyncWallet = useCallback(async () => {
@@ -200,32 +198,10 @@ export function useAgentConnection() {
     });
   }, [refreshWallet]);
 
-  const handleRegister = useCallback(async () => {
-    const result = await registerCompetition();
-    await refreshWallet();
-    return result;
-  }, [refreshWallet]);
-
-  const handleSwitchWallet = useCallback(
-    async (mode: "local" | "walletconnect") => {
-      const result = await switchWalletMode(mode);
-      await refreshWallet();
-      return result;
-    },
-    [refreshWallet]
-  );
-
-  const handleSaveConfig = useCallback(
-    async (updates: Record<string, unknown>) => {
-      return saveAgentConfig(updates);
-    },
-    []
-  );
-
   const handleSellPosition = useCallback(
     async (symbol: string) => {
       if (!connectedRef.current) {
-        throw new Error("Agent offline — start the agent first.");
+        throw new Error("Agent offline: start the agent first.");
       }
       const result = await sendCommand(`sell all ${symbol}`);
       if (!result.ok) {
@@ -258,10 +234,21 @@ export function useAgentConnection() {
     handleStop,
     handleSyncWallet,
     handleResync,
-    handleRegister,
-    handleSwitchWallet,
-    handleSaveConfig,
     handleSellPosition,
     refreshWallet,
+    reconnect: async () => {
+      const ok = await checkAgentConnection();
+      if (!ok) return false;
+      connectedRef.current = true;
+      setConnected(true);
+      setError(null);
+      try {
+        await bootstrapLive();
+        return true;
+      } catch (e) {
+        setError(String(e));
+        return false;
+      }
+    },
   };
 }

@@ -6,14 +6,9 @@ import { PortfolioTracker } from "../risk/portfolio.js";
 import { getLatestPrice } from "../data/market.js";
 import { logger } from "../utils/logger.js";
 /**
- * Trade executor that routes all swaps through TWAK MCP.
- * This module constructs trade orders and processes results.
- * Actual MCP calls (swap, get_swap_quote) are invoked by the
- * agent orchestrator and results are fed back here.
- *
- * Design: TWAK is the SOLE execution layer — no direct RPC calls,
- * no custodial intermediaries. Keys stay with the user's local
- * wallet (self-custody integrity for the TWAK special prize).
+ * Trade executor — constructs trade orders and processes results.
+ * Actual swaps are executed by the EVM wallet bridge (viem + Binance Web3 aggregator).
+ * Keys stay in the encrypted per-agent keystore (self-custody).
  */
 
 let orderCounter = 0;
@@ -53,6 +48,8 @@ export function createTradeOrder(
     fromToken,
     toToken,
     slippage: config.slippageTolerance,
+    ...(config.bscGasPriceGwei > 0 ? { gasPriceGwei: config.bscGasPriceGwei } : {}),
+    ...(config.bscSwapGasLimit > 0 ? { gasLimit: config.bscSwapGasLimit } : {}),
   };
 }
 
@@ -63,7 +60,7 @@ export function floorTokenAmount(amount: number, decimals = 8): number {
   return Math.floor(amount * factor + 1e-12) / factor;
 }
 
-/** TWAK swap amount: USD for buys (USDT in), token units for sells (token out). */
+/** Swap amount: USD for buys (USDT in), token units for sells (token out). */
 export function resolveSwapAmount(order: TradeOrder): string {
   if (order.side === "sell" && order.fromTokenAmount !== undefined && order.fromTokenAmount > 0) {
     return String(order.fromTokenAmount);
@@ -71,11 +68,7 @@ export function resolveSwapAmount(order: TradeOrder): string {
   return String(order.amountUsd);
 }
 /**
- * Build the TWAK MCP swap parameters from a TradeOrder.
- * Returns the argument object to pass to CallMcpTool("swap").
- */
-/**
- * Resolve token identifier for TWAK swap.
+ * Resolve token identifier for swap.
  * USDT uses the BEP-20 contract; BNB uses the native symbol.
  */
 export function resolveSwapToken(token: string): string {
@@ -95,6 +88,8 @@ export function buildSwapParams(order: TradeOrder): {
   toToken: string;
   amount: string;
   slippage: string;
+  gasPriceGwei?: number;
+  gasLimit?: number;
 } {
   return {
     fromChain: BSC_CHAIN,
@@ -103,10 +98,14 @@ export function buildSwapParams(order: TradeOrder): {
     toToken: resolveSwapToken(order.toToken),
     amount: resolveSwapAmount(order),
     slippage: String(order.slippage),
+    ...(order.gasPriceGwei && order.gasPriceGwei > 0
+      ? { gasPriceGwei: order.gasPriceGwei }
+      : {}),
+    ...(order.gasLimit && order.gasLimit > 0 ? { gasLimit: order.gasLimit } : {}),
   };
 }
 /**
- * Build TWAK MCP quote parameters for pre-trade price check.
+ * Build quote parameters for pre-trade price check.
  */
 export function buildQuoteParams(order: TradeOrder): {
   fromChain: string;
@@ -144,7 +143,7 @@ export function isConfirmedTxHash(
   return isOnChainTxHash(txHash);
 }
 
-/** TWAK swap failures use `success: false` plus a `code` / `message` (not always `error`). */
+/** Swap failures use `success: false` plus a `code` / `message` (not always `error`). */
 export function isSwapFailure(mcpResult: Record<string, unknown>): boolean {
   if (mcpResult.success === false) return true;
   if (mcpResult.isError === true) return true;
@@ -170,7 +169,7 @@ function swapFailureMessage(mcpResult: Record<string, unknown>): string | undefi
   return typeof code === "string" ? code : undefined;
 }
 
-/** Pull swap tx hash from TWAK MCP payloads (structured fields only — never from error text). */
+/** Pull swap tx hash from bridge payloads (structured fields only — never from error text). */
 export function extractTxHash(mcpResult: Record<string, unknown>, depth = 0): string | undefined {
   if (depth > 4) return undefined;
 
@@ -193,7 +192,7 @@ export function extractTxHash(mcpResult: Record<string, unknown>, depth = 0): st
   return undefined;
 }
 
-/** Parse TWAK summary like "4.9 TWT -> 1.84 USDT" or output "113.3 USDT". */
+/** Parse swap summary like "4.9 TWT -> 1.84 USDT" or output "113.3 USDT". */
 function parseSwapSummary(summary: string): { fromAmount?: string; toAmount?: string } {
   const arrow = summary.match(/^([\d.]+)\s+\S+\s*->\s*([\d.]+)/);
   if (arrow) return { fromAmount: arrow[1], toAmount: arrow[2] };
@@ -203,7 +202,7 @@ function parseSwapSummary(summary: string): { fromAmount?: string; toAmount?: st
 }
 
 /**
- * Process the swap result from TWAK MCP into our TradeResult format.
+ * Process the swap result from the EVM bridge into our TradeResult format.
  * Live trades require a confirmed on-chain tx hash before counting as success.
  */
 export function processSwapResult(
@@ -329,13 +328,14 @@ export function validateAndCreateOrder(
   config: AgentConfig,
   opts: { manual?: boolean; amountUsd?: number } = {}
 ): { approved: boolean; order?: TradeOrder; violations?: string[] } {
-  // Tradeable on BSC = curated allowlist OR any token we can resolve to a
-  // verified BEP-20 contract (static map / runtime CMC cache). This lifts the
-  // hard allowlist limit so the assistant can trade arbitrary BSC tokens.
-  if (!isEligibleToken(signal.symbol) && !hasBscSwapAddress(signal.symbol)) {
+  // Safe list for new buys — Binance Spot ∪ Binance Alpha.
+  // Sells may unwind held tokens even if they later leave the list.
+  if (signal.action === "buy" && !isEligibleToken(signal.symbol)) {
     return {
       approved: false,
-      violations: [`No verified BEP-20 contract for ${signal.symbol} on BSC — cannot route swap`],
+      violations: [
+        `${signal.symbol} is not on the Binance Spot / Alpha allowlist — blocked for safety`,
+      ],
     };
   }
 
@@ -345,7 +345,7 @@ export function validateAndCreateOrder(
   ) {
     return {
       approved: false,
-      violations: [`${signal.symbol} is blocklisted or below min tradable price`],
+      violations: [`${signal.symbol} is blocklisted, mega-cap, or below min tradable price`],
     };
   }
 
@@ -354,7 +354,6 @@ export function validateAndCreateOrder(
   }
 
   // Skip buys we can't route on BSC (no verified BEP-20 contract address).
-  // Prevents wasted attempts / TOKEN_NOT_FOUND errors on the next candidate.
   if (signal.action === "buy" && !hasBscSwapAddress(signal.symbol)) {
     return {
       approved: false,

@@ -2,7 +2,8 @@ import type { TradingAgent } from "../agent.js";
 import { computeSignals, generateSignal, getTokenMomentumMetrics } from "../strategy/signals.js";
 import { analyzeSingleSignal, isAiAnalysisEnabled } from "../strategy/ai-analyst.js";
 import { buildMarketData, getLatestPrice } from "../data/market.js";
-import { isEligibleToken, isStablecoin, ELIGIBLE_TOKENS } from "../config.js";
+import { isEligibleToken, isStablecoin, getEligibleScanUniverse } from "../config.js";
+import { getBinanceAlphaTokenCount } from "../integrations/binance-alpha-tokens.js";
 import { hasBscSwapAddress, resolveBscTokenAddress } from "../integrations/bsc-token-addresses.js";
 import { logger } from "../utils/logger.js";
 import { isLlmConfigured, llmParseCommand, type LlmParsedIntent } from "./llm.js";
@@ -43,19 +44,58 @@ function extractAmount(text: string): number | undefined {
   return undefined;
 }
 
+const TOKEN_STOP_WORDS = [
+  "BUY", "SELL", "SWAP", "FOR", "WITH", "TO", "OF", "THE", "AND",
+  "TOKEN", "TOKENS", "SIGNAL", "SIGNALS", "ANALYSIS", "MARKET",
+  "DETAIL", "DETAILS", "WORTH", "USD", "USDT", "STATUS", "PORTFOLIO",
+  "PNL", "HELP", "SHOW", "GET", "CHECK", "WHAT", "HOW", "ABOUT",
+  "MUCH", "PRICE", "IS", "ME", "MY", "ALL", "CAN", "YOU", "DO", "RUN",
+  "TOP", "OPPORTUNITIES", "OVERVIEW", "SHOULD", "TRADE", "AGENT",
+  "PLEASE", "COULD", "WOULD", "WANT", "NEED", "SOME", "ANY", "ARE",
+  "LONG", "PURCHASE", "DUMP", "EXIT", "CLOSE", "INTO", "FROM",
+];
+
+function tokenStopSet(exclude?: Set<string>): Set<string> {
+  return new Set([...TOKEN_STOP_WORDS, ...(exclude ? [...exclude] : [])]);
+}
+
+/** First ticker-like word (legacy — prefer extractTradeSymbol for buy/sell). */
 function extractToken(text: string, exclude?: Set<string>): string | undefined {
+  const words = text.toUpperCase().match(/\b[A-Z]{2,10}\b/g) ?? [];
+  const stop = tokenStopSet(exclude);
+  return words.find((w) => !stop.has(w) && w.length >= 2);
+}
+
+/**
+ * Resolve trade token from NL commands. Prefers ticker after "$200 SKYAI",
+ * otherwise the last ticker-like word ("can you buy $200 SKYAI" → SKYAI).
+ */
+function extractTradeSymbol(text: string, excludeVerb?: string): string | undefined {
   const upper = text.toUpperCase();
+  const stop = tokenStopSet(
+    excludeVerb ? new Set([excludeVerb.toUpperCase()]) : undefined
+  );
+
+  const afterMoney = upper.match(
+    /\$\s*[\d.]+\s*(?:WORTH\s+OF\s+|OF\s+)?([A-Z]{2,10})\b/
+  );
+  if (afterMoney?.[1] && !stop.has(afterMoney[1])) {
+    return afterMoney[1];
+  }
+
+  const afterUsd = upper.match(
+    /[\d.]+\s*(?:USD|USDT|DOLLARS?)\s+(?:WORTH\s+OF\s+|OF\s+)?([A-Z]{2,10})\b/
+  );
+  if (afterUsd?.[1] && !stop.has(afterUsd[1])) {
+    return afterUsd[1];
+  }
+
   const words = upper.match(/\b[A-Z]{2,10}\b/g) ?? [];
-  const STOP = new Set([
-    "BUY", "SELL", "SWAP", "FOR", "WITH", "TO", "OF", "THE", "AND",
-    "TOKEN", "TOKENS", "SIGNAL", "SIGNALS", "ANALYSIS", "MARKET",
-    "DETAIL", "DETAILS", "WORTH", "USD", "USDT", "STATUS", "PORTFOLIO",
-    "PNL", "HELP", "SHOW", "GET", "CHECK", "WHAT", "HOW", "ABOUT",
-    "MUCH", "PRICE", "IS", "ME", "MY", "ALL", "CAN", "DO", "RUN",
-    "TOP", "OPPORTUNITIES", "OVERVIEW", "SHOULD", "TRADE", "AGENT",
-    ...(exclude ? [...exclude] : []),
-  ]);
-  return words.find((w) => !STOP.has(w) && w.length >= 2);
+  for (let i = words.length - 1; i >= 0; i--) {
+    const w = words[i];
+    if (!stop.has(w) && w.length >= 2) return w;
+  }
+  return undefined;
 }
 
 /** Parse explicit trade commands: [buy|sell] [amount] [token] */
@@ -69,7 +109,7 @@ function parseTradeCommand(text: string): ParsedIntent | undefined {
     /^(buy|long|purchase)$/i.test(verb) ? "buy" : "sell";
 
   const amount = extractAmount(text);
-  const symbol = extractToken(text, new Set([verb.toUpperCase()]));
+  const symbol = extractTradeSymbol(text, verb);
 
   if (symbol || amount !== undefined) {
     return { action, symbol, amount };
@@ -115,11 +155,11 @@ export function parseCommand(raw: string): ParsedIntent {
   if (trade) return trade;
 
   if (/\b(buy|long|purchase|opportunit)/i.test(lower)) {
-    const symbol = extractToken(text);
+    const symbol = extractTradeSymbol(text, "buy");
     return { action: "buy", symbol, amount: extractAmount(text) };
   }
   if (/\b(sell|dump|exit|close)\b/.test(lower)) {
-    const symbol = extractToken(text);
+    const symbol = extractTradeSymbol(text, "sell");
     return { action: "sell", symbol, amount: extractAmount(text) };
   }
 
@@ -241,12 +281,25 @@ export async function executeCommand(
       const context = buildAgentContext(agent);
       const llmIntent = await llmParseCommand(raw, context);
       intent = llmIntent;
-      // Regex wins for explicit amount/token when the LLM omits them.
-      if (regexIntent.amount !== undefined && intent.amount === undefined) {
-        intent.amount = regexIntent.amount;
+      // User's literal $ amount and ticker beat LLM guesses (e.g. "$200" not default $50).
+      const rawAmount = extractAmount(raw);
+      if (rawAmount !== undefined) {
+        intent.amount = rawAmount;
       }
-      if (regexIntent.symbol && !intent.symbol) {
-        intent.symbol = regexIntent.symbol;
+      if (
+        (regexIntent.action === "buy" || regexIntent.action === "sell") &&
+        TRADE_ACTION_RE.test(raw)
+      ) {
+        intent.action = regexIntent.action;
+        const verb = regexIntent.action === "buy" ? "buy" : "sell";
+        intent.symbol =
+          extractTradeSymbol(raw, verb) ??
+          regexIntent.symbol ??
+          intent.symbol;
+      } else {
+        if (regexIntent.symbol && !intent.symbol) {
+          intent.symbol = regexIntent.symbol;
+        }
       }
       if (
         (intent.action === "chat" || intent.action === "unknown") &&
@@ -367,7 +420,7 @@ function ineligibleTokenResponse(
 ): CommandResult {
   const held = [...agent.getPortfolio().getAllPositions().keys()];
   const heldEligible = held.filter((s) => isEligibleToken(s));
-  const sample = ELIGIBLE_TOKENS.filter((t) => !isStablecoin(t)).slice(0, 10).join(", ");
+  const sample = getEligibleScanUniverse().filter((t) => !isStablecoin(t)).slice(0, 10).join(", ");
 
   if (isStablecoin(symbol)) {
     return {
@@ -394,31 +447,34 @@ function ineligibleTokenResponse(
     ok: false,
     intent,
     message: [
-      `⚠️ CAN'T ROUTE ${symbol}`,
+      `⚠️ ${symbol} NOT ON SAFE LIST`,
       `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-      `Couldn't find a verified BEP-20 contract for ${symbol} on BSC, so it can't be swapped.`,
+      `Only Binance Spot + Binance Alpha tokens are tradable (lower risk vs unknown coins).`,
       heldHint,
       ``,
-      `Examples you can trade: ${sample}`,
-    ].join("\n"),
+      `Examples: ${sample}…`,
+      `Ask "eligible tokens" for the full list.`,
+    ].filter(Boolean).join("\n"),
     suggestions: [
+      "eligible tokens",
       "Buy opportunities",
-      "Eligible tokens",
-      heldEligible.length > 0 ? `signal ${heldEligible[0]}` : "Top signals",
+      heldEligible.length > 0 ? `sell ${heldEligible[0]}` : "Top signals",
     ],
   };
 }
 
 function getEligibleTokensSummary(agent: TradingAgent): CommandResult {
-  const tradeable = ELIGIBLE_TOKENS.filter((t) => !isStablecoin(t));
+  const tradeable = getEligibleScanUniverse().filter((t) => !isStablecoin(t));
   const held = [...agent.getPortfolio().getAllPositions().keys()]
     .filter((s) => isEligibleToken(s));
   const watchlist = agent.getStateSnapshot().watchlist.slice(0, 12);
+  const alphaLive = getBinanceAlphaTokenCount();
 
   const lines = [
-    `📋 ELIGIBLE TOKENS`,
+    `📋 SAFE TOKEN LIST`,
     `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-    `${tradeable.length} tokens on BSC (USDT-only trading).`,
+    `${tradeable.length} tokens: Binance Spot ∪ Binance Alpha on BSC (USDT settlement).`,
+    `  Alpha: ~${alphaLive} live BSC listings (synced from Binance API).`,
     ``,
     `▸ Settlement only`,
     `  USDT / stables — not bought directly`,
@@ -429,10 +485,7 @@ function getEligibleTokensSummary(agent: TradingAgent): CommandResult {
     `▸ Your Wallet`,
     ...formatWalletHoldingsLines(agent),
     ``,
-    `▸ Note`,
-    `  BNB is gas (not an open trade position) but is in your wallet & NAV`,
-    ``,
-    `▸ Your holdings (eligible tokens)`,
+    `▸ Your holdings (safe-list tokens)`,
     held.length > 0 ? `  ${held.join(", ")}` : `  none`,
     ``,
     `▸ Active watchlist`,
@@ -491,27 +544,27 @@ async function executeTrade(
   }
 
   const symbol = intent.symbol.toUpperCase();
-  // No hard allowlist limit: the assistant can trade ANY token it can route on
-  // BSC. Resolve a verified BEP-20 contract (static map → runtime CMC lookup);
-  // only stablecoins and truly unroutable symbols get the guidance response.
-  if (!isEligibleToken(symbol)) {
-    if (isStablecoin(symbol)) {
-      return ineligibleTokenResponse(agent, symbol, intent.action);
-    }
+  // Buys: Binance Spot ∪ Alpha only. Sells: allow unwinding held tokens even if
+  // they later leave the allowlist (still need a routable BSC contract).
+  if (intent.action === "buy" && !isEligibleToken(symbol)) {
+    return ineligibleTokenResponse(agent, symbol, intent.action);
+  }
+  if (intent.action === "buy" && isStablecoin(symbol)) {
+    return ineligibleTokenResponse(agent, symbol, intent.action);
+  }
+  if (!isEligibleToken(symbol) && intent.action === "sell") {
     let routable = hasBscSwapAddress(symbol);
     if (!routable) {
       try {
         routable = (await resolveBscTokenAddress(symbol)) !== undefined;
       } catch (err) {
-        logger.warn("Token address resolve failed for manual trade", {
+        logger.warn("Token address resolve failed for manual sell", {
           symbol,
           error: String(err),
         });
       }
     }
-    // Buys need a routable contract; sells fall through to the holdings check
-    // (a held token can still be unwound even if it left the static map).
-    if (!routable && intent.action !== "sell") {
+    if (!routable) {
       return ineligibleTokenResponse(agent, symbol, intent.action);
     }
   }
@@ -537,7 +590,8 @@ async function executeTrade(
     }
   }
 
-  const amount = intent.amount ?? config.maxPositionSizeUsd;
+  const requestedUsd = intent.amount;
+  const displayUsd = requestedUsd ?? config.maxPositionSizeUsd;
 
   const signal = {
     symbol,
@@ -554,10 +608,10 @@ async function executeTrade(
   try {
     const sellAll = intent.action === "sell" && intent.amount === undefined;
     const { result, violations, tradeSizeUsd } = await agent.executeManualTrade(signal, {
-      amountUsd: intent.amount,
+      amountUsd: requestedUsd,
       sellAll,
     });
-    const sizeUsd = tradeSizeUsd ?? amount;
+    const sizeUsd = tradeSizeUsd ?? displayUsd;
     if (!result) {
       const reason =
         violations?.length
@@ -569,13 +623,14 @@ async function executeTrade(
         message: [
           `⚠️ ${intent.action.toUpperCase()} REJECTED`,
           `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
-          `Token:   ${symbol}`,
-          `Size:    $${sizeUsd.toFixed(2)}`,
-          `Reason:  ${reason}`,
+          `Token:     ${symbol}`,
+          `Requested: ${requestedUsd !== undefined ? `$${requestedUsd.toFixed(2)}` : "(full position)"}`,
+          `Size:      $${sizeUsd.toFixed(2)}`,
+          `Reason:    ${reason}`,
           ``,
           ...(intent.action === "sell"
             ? [`💡 Swaps to USDT: "sell ${symbol}" or "swap ${symbol} for USDT"`]
-            : [`💡 Check "status" for risk limits.`]),
+            : [`💡 Check USDT balance, blacklist, or on-chain routing.`]),
         ].join("\n"),
         suggestions:
           intent.action === "sell"
@@ -585,10 +640,21 @@ async function executeTrade(
     }
     const r = result;
     if (r.success) {
-      const soldQty =
-        r.fromAmount && parseFloat(r.fromAmount) > 0
-          ? `${parseFloat(r.fromAmount).toFixed(4)} ${symbol}`
-          : `$${sizeUsd.toFixed(2)}`;
+      const spentUsd =
+        intent.action === "buy" && r.fromAmount && parseFloat(r.fromAmount) > 0
+          ? parseFloat(r.fromAmount)
+          : sizeUsd;
+      const qtyLine =
+        intent.action === "buy"
+          ? `Spent:   $${spentUsd.toFixed(2)}`
+          : r.fromAmount && parseFloat(r.fromAmount) > 0
+            ? `${parseFloat(r.fromAmount).toFixed(4)} ${symbol}`
+            : `$${sizeUsd.toFixed(2)}`;
+      const partialNote =
+        requestedUsd !== undefined &&
+        requestedUsd > spentUsd + 0.01
+          ? [`Note:    Requested $${requestedUsd.toFixed(2)} — only $${spentUsd.toFixed(2)} USDT available.`]
+          : [];
       return {
         ok: true,
         intent: intent.action,
@@ -596,7 +662,8 @@ async function executeTrade(
           `✅ ${intent.action.toUpperCase()} EXECUTED`,
           `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`,
           `Token:   ${symbol}`,
-          `Amount:  ${soldQty}`,
+          qtyLine,
+          ...partialNote,
           `Tx:      ${r.txHash ?? "confirmed"}`,
           ``,
           `💡 Check "portfolio" to see updated positions.`,
@@ -782,7 +849,7 @@ async function getSignalDetail(
 
   let price = getLatestPrice(upper);
   if (price === null) {
-    // Resolve contract + live price on demand (CMC → TWAK) for any eligible
+    // Resolve contract + live price on demand (CMC → bridge) for any eligible
     // token that isn't currently on the watchlist.
     const primed = await agent.primeTokenForTrade(upper);
     price = primed.price ?? getLatestPrice(upper);

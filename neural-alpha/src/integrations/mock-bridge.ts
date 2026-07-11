@@ -3,8 +3,7 @@ import { buildQuoteParams, buildSwapParams } from "../execution/executor.js";
 
 /**
  * Mock bridge for offline paper trading.
- * x402Request simulates CMC Agent Hub response shapes so the same
- * parsing path runs as with real TWAK x402 payments.
+ * x402Request simulates CMC Agent Hub response shapes.
  */
 export function createMockBridge(): McpBridge {
   const basePrices: Record<string, number> = {
@@ -114,20 +113,8 @@ export function createMockBridge(): McpBridge {
       return { balance: 1000, symbol: "USDT" };
     },
 
-    async switchWalletMode(mode: "local" | "walletconnect") {
-      return { mode, state: mode === "local" ? "local" : "wc-pairing" };
-    },
-
     async getWalletStatus() {
-      return { state: "local", mode: "local", walletType: "local" };
-    },
-
-    async competitionRegister() {
-      return { ok: true, simulated: true, txHash: `0xmock${Date.now()}` };
-    },
-
-    async competitionStatus() {
-      return { registered: false, registrationOpen: true, simulated: true };
+      return { state: "unlocked", mode: "local", walletType: "evm-local" };
     },
   };
 }

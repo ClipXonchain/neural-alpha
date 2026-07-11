@@ -1,7 +1,8 @@
 import type { TechnicalSignals, MarketData, TradeSignal, SignalStrength } from "../utils/types.js";
 import { getClosePrices, getVolumes, getPriceHistory } from "../data/market.js";
 import { isStablecoin } from "../config.js";
-import type { NewsSentiment } from "./news-sentiment.js";
+import type { TrendingRank } from "./trending-rank.js";
+import { scoreTrendingRank } from "./trending-rank.js";
 import * as ind from "./indicators.js";
 import {
   getStrategyProfile,
@@ -148,17 +149,14 @@ function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
 
-function scoreNews(newsSentiment: NewsSentiment | null | undefined): ScoreComponent {
-  if (!newsSentiment || newsSentiment.articles === 0) {
-    return { name: "News", key: "news", score: 0, active: false, reason: "No news coverage" };
-  }
-
+function scoreTrending(trendingRank: TrendingRank | null | undefined): ScoreComponent {
+  const { score, active, reason } = scoreTrendingRank(trendingRank);
   return {
-    name: "News",
-    key: "news",
-    score: clamp(newsSentiment.score, -100, 100),
-    active: true,
-    reason: newsSentiment.reasons[0] || `News sentiment (${newsSentiment.articles} articles)`,
+    name: "Trending",
+    key: "trending",
+    score,
+    active,
+    reason,
   };
 }
 
@@ -309,7 +307,7 @@ export function generateSignal(
   market: MarketData,
   signals: TechnicalSignals,
   fearGreed: number | null,
-  newsSentiment?: NewsSentiment | null,
+  trendingRank?: TrendingRank | null,
   strategy?: StrategyProfile | string | null
 ): TradeSignal {
   const profile =
@@ -339,7 +337,7 @@ export function generateSignal(
     scoreVolume(signals.volumeRatio),
     scoreMcapVolRatio(market.volume24h, market.marketCap),
     scoreSentiment(fearGreed),
-    scoreNews(newsSentiment),
+    scoreTrending(trendingRank),
   ];
 
   // Active components weighted by the chosen strategy profile.

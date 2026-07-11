@@ -128,7 +128,7 @@ export function CommandPanel({ connected }: { connected: boolean }) {
     {
       id: "welcome",
       role: "agent",
-      text: "Hey! I'm your Neural Alpha AI assistant. Ask me anything — trade tokens, check signals, analyze the market, or just chat about crypto.",
+      text: "Hey! I'm your Neural Alpha AI assistant. Ask me anything: trade tokens, check signals, analyze the market, or just chat about crypto.",
       timestamp: Date.now(),
       ok: true,
     },
@@ -167,14 +167,14 @@ export function CommandPanel({ connected }: { connected: boolean }) {
       setLoading(true);
       setLoadingHint(
         /^(buy|sell|swap)\b/i.test(cmd)
-          ? "Executing on-chain — may take up to 2 minutes…"
+          ? "Executing on-chain: may take up to 2 minutes…"
           : null
       );
 
       try {
         const result: CommandResult = connected
           ? await sendCommand(cmd)
-          : { ok: false, intent: "offline", message: "Agent is offline — start it first." };
+          : { ok: false, intent: "offline", message: "Agent is offline: start it first." };
 
         setMessages((prev) => [
           ...prev,
@@ -188,7 +188,13 @@ export function CommandPanel({ connected }: { connected: boolean }) {
           },
         ]);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        let msg = err instanceof Error ? err.message : String(err);
+        if (/^unauthorized$/i.test(msg.trim())) {
+          msg =
+            "Unauthorized: the dashboard could not authenticate with the agent. " +
+            "On localhost: restart the dashboard after pulling latest (it now reads API_SECRET from the repo .env). " +
+            "On agents.clipx.app: trading is disabled (monitoring-only).";
+        }
         setMessages((prev) => [
           ...prev,
           {

@@ -1,6 +1,6 @@
 import type { MarketData, TradeSignal, AgentConfig } from "../utils/types.js";
 import { computeSignals, generateSignal } from "./signals.js";
-import type { NewsSentiment } from "./news-sentiment.js";
+import type { TrendingRank } from "./trending-rank.js";
 import { isStablecoin, isTradableToken } from "../config.js";
 import { logger } from "../utils/logger.js";
 
@@ -12,22 +12,29 @@ export function analyzeMarkets(
   markets: MarketData[],
   fearGreedIndex: number | null,
   config: AgentConfig,
-  newsSentiment?: Map<string, NewsSentiment>
+  trendingRanks?: Map<string, TrendingRank>
 ): TradeSignal[] {
   const signals: TradeSignal[] = [];
 
   for (const market of markets) {
     if (isStablecoin(market.symbol)) continue;
-    if (!isTradableToken(market.symbol, market.price)) continue;
+    if (!isTradableToken(market.symbol, market.price, market.marketCap)) continue;
 
     const technicals = computeSignals(market.symbol);
-    const news = newsSentiment?.get(market.symbol) ?? null;
-    const signal = generateSignal(market, technicals, fearGreedIndex, news, config.strategy);
+    const trending = trendingRanks?.get(market.symbol) ?? null;
+    const signal = generateSignal(market, technicals, fearGreedIndex, trending, config.strategy);
     signals.push(signal);
   }
 
-  // Sort by absolute score — strongest signals first
-  signals.sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
+  // Sort: strongest blended score first; on near-ties prefer tokens on Binance trending
+  signals.sort((a, b) => {
+    const scoreDiff = Math.abs(b.score) - Math.abs(a.score);
+    if (Math.abs(scoreDiff) >= 2) return scoreDiff;
+    const aTrend = a.reasons.some((r) => /Binance trending/i.test(r)) ? 1 : 0;
+    const bTrend = b.reasons.some((r) => /Binance trending/i.test(r)) ? 1 : 0;
+    if (bTrend !== aTrend) return bTrend - aTrend;
+    return scoreDiff;
+  });
 
   const actionable = signals.filter((s) => s.action !== "hold");
   if (actionable.length > 0) {

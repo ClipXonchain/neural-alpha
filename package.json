@@ -8,11 +8,13 @@
     "dashboard"
   ],
   "scripts": {
-    "dev": "concurrently -n agent,dashboard -c yellow,cyan \"npm run dev --workspace=neural-alpha\" \"npm run dev --workspace=dashboard\"",
+    "dev": "npm run dev --workspace=dashboard",
+    "dev:all": "concurrently -n feed,agent,dashboard -c green,yellow,cyan \"npm run market-feed --workspace=neural-alpha\" \"MARKET_FEED_URL=http://127.0.0.1:4100 npm run dev --workspace=neural-alpha\" \"npm run dev --workspace=dashboard\"",
+    "dev:feed": "npm run market-feed --workspace=neural-alpha",
     "build": "npm run build --workspace=neural-alpha && npm run build --workspace=dashboard",
     "agent": "npm run start --workspace=neural-alpha",
     "agent:dev": "npm run dev --workspace=neural-alpha",
-    "register": "npm run register --workspace=neural-alpha",
+    "market-feed": "npm run market-feed --workspace=neural-alpha",
     "dashboard": "npm run dev --workspace=dashboard",
     "dashboard:build": "npm run build --workspace=dashboard",
     "dashboard:start": "npm run start --workspace=dashboard",

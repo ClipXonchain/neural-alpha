@@ -163,7 +163,7 @@ export function RiskPanel({ state }: { state: AgentState }) {
             </span>
           </div>
           <span className="text-[10px] font-mono text-neon">
-            149 BEP-20 active
+            Binance Spot ∪ Alpha
           </span>
         </div>
         <div className="flex items-center justify-between mt-2">
@@ -181,7 +181,7 @@ export function RiskPanel({ state }: { state: AgentState }) {
           <div className="flex items-center gap-2">
             <CheckCircle2 className="size-3 text-neon" />
             <span className="text-[11px] font-mono text-text-secondary">
-              Self-Custody (TWAK)
+              Self-Custody (EVM)
             </span>
           </div>
           <span className="text-[10px] font-mono text-neon">

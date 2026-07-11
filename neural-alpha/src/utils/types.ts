@@ -60,11 +60,15 @@ export interface TradeOrder {
   symbol: string;
   side: "buy" | "sell";
   amountUsd: number;
-  /** For sells: full token quantity to swap (TWAK expects token units, not USD). */
+  /** For sells: full token quantity to swap (token units, not USD). */
   fromTokenAmount?: number;
   fromToken: string;
   toToken: string;
   slippage: number;
+  /** Fixed BSC gas price (gwei); omit or 0 = network estimate. */
+  gasPriceGwei?: number;
+  /** Swap tx gas limit; omit or 0 = viem auto-estimate. */
+  gasLimit?: number;
 }
 
 export interface TradeResult {
@@ -128,9 +132,14 @@ export interface RiskCheck {
 }
 
 export interface AgentConfig {
-  mode: "live" | "paper";
-  /** Active risk-tiered strategy preset: safe | medium | momentum. */
-  strategy: "safe" | "medium" | "momentum";
+  mode: "live";
+  /** Active risk-tiered strategy preset: safe | medium | momentum | bstocks. */
+  strategy: "safe" | "medium" | "momentum" | "bstocks";
+  /**
+   * Deploy-time trading universe:
+   * spot = Binance Spot only, alpha = Binance Alpha only, both = Spot ∪ Alpha.
+   */
+  agentUniverse: "spot" | "alpha" | "both" | "bstocks";
   /** Multiplier on computed position size (set by the strategy preset). */
   positionSizeMultiplier: number;
   tradeIntervalMs: number;
@@ -144,6 +153,12 @@ export interface AgentConfig {
   /** How often to check stop-loss / take-profit / trailing (independent of trade cycle). */
   protectiveExitCheckMs: number;
   slippageTolerance: number;
+  /** USD value of BNB kept for gas — not used for buys. */
+  minGasReserveUsd: number;
+  /** Fixed BSC gas price (gwei); 0 = network estimate. */
+  bscGasPriceGwei: number;
+  /** Swap tx gas limit; 0 = viem auto-estimate. */
+  bscSwapGasLimit: number;
   baseCurrency: string;
   /** Currencies used to fund buys (USDT first, then BNB). Sells settle to baseCurrency. */
   swapCurrencies: string[];
@@ -174,6 +189,8 @@ export interface AgentConfig {
   excludedTokens?: string[];
   /** Dashboard / API: minimum USD price to consider tradable. */
   minTradablePriceUsd?: number;
+  /** Dashboard / API: exclude tokens at or above this market cap (USD). */
+  maxTradableMarketCapUsd?: number;
 }
 
 export interface PortfolioHolding {

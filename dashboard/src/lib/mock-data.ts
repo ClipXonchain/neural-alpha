@@ -14,7 +14,7 @@ export interface Position {
   distanceToTakeProfitPct?: number;
   peakPnlPct?: number;
   entryFromTrades?: boolean;
-  /** Entry not yet resolved from trades — position still shown from wallet. */
+  /** Entry not yet resolved from trades: position still shown from wallet. */
   entryUnknown?: boolean;
 }
 
@@ -42,8 +42,8 @@ export interface Signal {
   confidence: number;
   price: number;
   change24h: number;
-  newsScore?: number | null;
-  newsArticles?: number;
+  trendingRank?: number | null;
+  trendingChange5m?: number | null;
   volumeRatio?: number | null;
   aiSummary?: string;
   aiVerdict?: "bullish" | "bearish" | "neutral" | "caution";
@@ -68,12 +68,12 @@ export interface ActivityItem {
 
 export interface AgentState {
   status: "running" | "paused" | "stopped";
-  mode: "live" | "paper";
+  mode: "live";
   uptime: number;
   cycleCount: number;
   portfolioValue: number;
   cashBalance: number;
-  /** Competition / wallet baseline for lifetime PnL. */
+  /** Wallet baseline for lifetime PnL. */
   initialNavUsd: number;
   totalPnl: number;
   totalPnlPct: number;
@@ -149,7 +149,7 @@ function generateDrawdownCurve(): Array<{ time: string; drawdown: number }> {
 const DEMO_AUTONOMOUS: AutonomousStatus = {
   phase: "idle",
   ready: true,
-  headline: "Autonomous — next scan in 28m 14s",
+  headline: "Autonomous: next scan in 28m 14s",
   tradesToday: 4,
   maxTradesToday: 10,
   tradesLast24h: 6,
@@ -168,7 +168,6 @@ const DEMO_AUTONOMOUS: AutonomousStatus = {
   autoExitEnabled: false,
   strategy: "medium",
   failedSwapCooldowns: [],
-  competitionNudge: false,
 };
 
 export function generateMockState(): AgentState {
@@ -177,7 +176,7 @@ export function generateMockState(): AgentState {
 
   return {
     status: "running",
-    mode: "paper",
+    mode: "live",
     uptime: 3 * 86400 + 14 * 3600 + 22 * 60,
     cycleCount: 847,
     portfolioValue: latestValue,
@@ -233,11 +232,11 @@ export function generateMockState(): AgentState {
     ],
     activity: [
       { id: "a1", timestamp: Date.now() - 60000, type: "brain", message: "Bought ETH (~$156.50)." },
-      { id: "a2", timestamp: Date.now() - 180000, type: "brain", message: "Scan complete — 6 signals found. Best pick: AVAX (strong buy, score 62)." },
+      { id: "a2", timestamp: Date.now() - 180000, type: "brain", message: "Scan complete: 6 signals found. Best pick: AVAX (strong buy, score 62)." },
       { id: "a3", timestamp: Date.now() - 300000, type: "brain", message: "Plan for this cycle: buy AVAX." },
-      { id: "a4", timestamp: Date.now() - 420000, type: "brain", message: "Cycle done — watching the market, no trades needed. Status: idle." },
+      { id: "a4", timestamp: Date.now() - 420000, type: "brain", message: "Cycle done: watching the market, no trades needed. Status: idle." },
       { id: "a5", timestamp: Date.now() - 600000, type: "trade", message: "Sold DOGE (~$82.16).", detail: "PnL: +$4.12 (+5.28%)" },
-      { id: "a6", timestamp: Date.now() - 900000, type: "risk", message: "Passed on ADA — already holding ADA — no duplicate buy." },
+      { id: "a6", timestamp: Date.now() - 900000, type: "risk", message: "Passed on ADA: already holding ADA: no duplicate buy." },
       { id: "a7", timestamp: Date.now() - 1200000, type: "signal", message: "Found 3 buy candidates. Top signal: UNI buy (29)." },
       { id: "a8", timestamp: Date.now() - 1800000, type: "error", message: "Trade failed on SHIB: No verified BEP-20 contract." },
     ],
@@ -246,7 +245,7 @@ export function generateMockState(): AgentState {
   };
 }
 
-/** Empty shell when the agent API is unreachable — not fake demo portfolio data. */
+/** Empty shell when the agent API is unreachable: not fake demo portfolio data. */
 export function generateOfflineState(): AgentState {
   return {
     status: "stopped",
@@ -295,7 +294,6 @@ export function generateOfflineState(): AgentState {
       autoExitEnabled: false,
       strategy: "medium",
       failedSwapCooldowns: [],
-      competitionNudge: false,
     },
     maxDrawdownLimit: 20,
     maxDailyTradesLimit: 10,

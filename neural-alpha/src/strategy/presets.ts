@@ -16,7 +16,8 @@
  * with wider stops and lets winners run.
  */
 
-export type StrategyName = "safe" | "medium" | "momentum";
+export type StrategyName = "safe" | "medium" | "momentum" | "bstocks";
+
 
 export interface SignalWeights {
   rsi: number;
@@ -29,7 +30,8 @@ export interface SignalWeights {
   /** 24h volume / market cap — turnover / liquidity-adjusted interest. */
   mcapVolRatio: number;
   sentiment: number;
-  news: number;
+  /** Binance Web3 trending rank (5m % sorted, Spot/Alpha). High weight = chase heat. */
+  trending: number;
 }
 
 export interface StrategyProfile {
@@ -82,15 +84,15 @@ export const STRATEGY_PRESETS: Record<StrategyName, StrategyProfile> = {
     description:
       "Capital-preservation. Confirmed mean-reversion, tight stops, smallest size — lowest drawdown, steadier but smaller ROI.",
     signalWeights: {
-      rsi: 22,
+      rsi: 18,
       macd: 14,
-      ema: 14,
-      bollinger: 12,
+      ema: 12,
+      bollinger: 10,
       momentum: 8,
       volume: 8,
       mcapVolRatio: 4,
-      sentiment: 10,
-      news: 8,
+      sentiment: 6,
+      trending: 20,
     },
     thresholds: { strongBuy: 45, buy: 24, sell: -15, strongSell: -42 },
     alloc: { strongBuy: 14, buy: 7 },
@@ -116,17 +118,17 @@ export const STRATEGY_PRESETS: Record<StrategyName, StrategyProfile> = {
     name: "medium",
     label: "Medium",
     description:
-      "Balanced. Trend + momentum + volume weighted evenly, moderate stops and sizing — middle ground on risk and return.",
+      "Balanced. Binance trending heat + momentum/volume, with RSI/MACD confirmation — middle ground on risk and return.",
     signalWeights: {
-      rsi: 15,
-      macd: 13,
-      ema: 11,
-      bollinger: 6,
-      momentum: 18,
-      volume: 18,
-      mcapVolRatio: 7,
-      sentiment: 6,
-      news: 10,
+      rsi: 12,
+      macd: 11,
+      ema: 10,
+      bollinger: 5,
+      momentum: 14,
+      volume: 14,
+      mcapVolRatio: 6,
+      sentiment: 4,
+      trending: 24,
     },
     thresholds: { strongBuy: 40, buy: 15, sell: -12, strongSell: -40 },
     alloc: { strongBuy: 18, buy: 10 },
@@ -154,17 +156,17 @@ export const STRATEGY_PRESETS: Record<StrategyName, StrategyProfile> = {
     name: "momentum",
     label: "Momentum",
     description:
-      "Return-seeking. Chases volume spikes, momentum and turnover breakouts; wider stops, larger size, lets winners run — highest ROI, highest drawdown risk.",
+      "Return-seeking. Prioritises Binance trending leaders + volume/momentum breakouts; wider stops, larger size — highest ROI, highest drawdown risk.",
     signalWeights: {
-      rsi: 8,
-      macd: 12,
-      ema: 12,
-      bollinger: 4,
-      momentum: 26,
-      volume: 26,
-      mcapVolRatio: 12,
+      rsi: 6,
+      macd: 10,
+      ema: 10,
+      bollinger: 3,
+      momentum: 18,
+      volume: 18,
+      mcapVolRatio: 8,
       sentiment: 2,
-      news: 8,
+      trending: 25,
     },
     thresholds: { strongBuy: 35, buy: 12, sell: -12, strongSell: -42 },
     alloc: { strongBuy: 24, buy: 13 },
@@ -181,12 +183,54 @@ export const STRATEGY_PRESETS: Record<StrategyName, StrategyProfile> = {
       trailingGivebackPct: 4,
     },
   },
+
+  /**
+   * Equity Trend (bStocks) — for on-chain tokenized equities.
+   * Favours EMA/MACD trend + RSI confirmation over meme volume/trending rank.
+   * Wider stops (equity-like swings), fewer names, patient take-profit.
+   */
+  bstocks: {
+    name: "bstocks",
+    label: "Equity Trend",
+    description:
+      "bStocks equity trend. EMA/MACD-led with RSI confirmation, moderate size, wider stops for stock-like swings.",
+    signalWeights: {
+      rsi: 16,
+      macd: 22,
+      ema: 24,
+      bollinger: 10,
+      momentum: 14,
+      volume: 6,
+      mcapVolRatio: 2,
+      sentiment: 4,
+      trending: 2,
+    },
+    thresholds: { strongBuy: 38, buy: 18, sell: -16, strongSell: -40 },
+    alloc: { strongBuy: 18, buy: 10 },
+    positionSizeMultiplier: 0.85,
+    requireReversalConfirmation: true,
+    risk: {
+      maxDrawdownPct: 18,
+      maxDailyTrades: 4,
+      maxPortfolioTokens: 5,
+      minBuyConfidence: 0.55,
+      stopLossPct: 7,
+      takeProfitPct: 16,
+      trailingActivatePct: 6,
+      trailingGivebackPct: 3,
+    },
+  },
 };
 
 export const DEFAULT_STRATEGY: StrategyName = "medium";
 
 export function isStrategyName(value: unknown): value is StrategyName {
-  return value === "safe" || value === "medium" || value === "momentum";
+  return (
+    value === "safe" ||
+    value === "medium" ||
+    value === "momentum" ||
+    value === "bstocks"
+  );
 }
 
 export function resolveStrategyName(raw?: string | null): StrategyName {
@@ -195,7 +239,10 @@ export function resolveStrategyName(raw?: string | null): StrategyName {
   // Friendly aliases.
   if (v === "safetrade" || v === "conservative" || v === "low") return "safe";
   if (v === "balanced" || v === "mid") return "medium";
-  if (v === "aggressive" || v === "high" || v === "momentum") return "momentum";
+  if (v === "aggressive" || v === "high") return "momentum";
+  if (v === "equity" || v === "equity-trend" || v === "bstock" || v === "stocks") {
+    return "bstocks";
+  }
   return DEFAULT_STRATEGY;
 }
 

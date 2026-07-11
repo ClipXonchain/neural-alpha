@@ -173,7 +173,7 @@ export function PositionsTable({
             <tr className="text-text-muted text-[10px] uppercase tracking-wider">
               <th className="text-left pb-3 pr-4">Token</th>
               <th className="text-right pb-3 pr-4">Amount</th>
-              <th className="text-right pb-3 pr-4" title="Fixed at buy execution — not live price">
+              <th className="text-right pb-3 pr-4" title="Fixed at buy execution: not live price">
                 Entry
               </th>
               <th className="text-right pb-3 pr-4">Current</th>
@@ -214,7 +214,7 @@ export function PositionsTable({
                     className="text-right py-3 pr-4 text-text-secondary tabular-nums"
                     title={
                       pos.entryUnknown
-                        ? "Entry pending — resync agent or wait for trade history"
+                        ? "Entry pending: resync agent or wait for trade history"
                         : pos.entryFromTrades
                           ? "Entry from confirmed buy trades"
                           : "Entry price"

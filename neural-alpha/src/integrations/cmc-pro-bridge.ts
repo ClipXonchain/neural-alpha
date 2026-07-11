@@ -33,11 +33,8 @@ async function cmcFetch(path: string, apiKey: string): Promise<Record<string, un
 }
 
 /**
- * Bridge that fetches real market data from CMC Pro API (traditional API key auth)
- * while still routing execution through TWAK MCP or paper simulation.
- *
- * Best of both worlds: real CMC data without needing x402 / funded TWAK wallet.
- * The CMC hackathon team provides free Pro API keys to participants.
+ * Bridge that fetches real market data from CMC Pro API (traditional API key auth).
+ * Market data only — swaps require the EVM wallet bridge.
  */
 export function createCmcProBridge(apiKey: string): McpBridge {
   return {
@@ -67,10 +64,9 @@ export function createCmcProBridge(apiKey: string): McpBridge {
     },
 
     async executeSwap(_params: ReturnType<typeof buildSwapParams>) {
-      return {
-        txHash: `paper-${Date.now()}`,
-        toAmount: "0",
-      };
+      throw new Error(
+        "BRIDGE_MODE=cmc-pro does not support swaps — use BRIDGE_MODE=evm for live BSC execution"
+      );
     },
 
     async getAddress(_chain: string) {

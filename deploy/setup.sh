@@ -60,19 +60,51 @@ if ! grep -q "^NODE_ENV=" .env; then
   echo "  ✓ NODE_ENV=production added to .env"
 fi
 
-# Public dashboard — hide controls on agents.clipx.app (baked into Next.js client bundle)
-if ! grep -q "^NEXT_PUBLIC_READONLY=" .env; then
-  echo "NEXT_PUBLIC_READONLY=true" >> .env
-  echo "  ✓ NEXT_PUBLIC_READONLY=true added to .env"
-fi
-if ! grep -q "^READONLY=" .env; then
-  echo "READONLY=true" >> .env
-  echo "  ✓ READONLY=true added to .env"
+# Production secrets — generate if missing (operator platform)
+if ! grep -q "^SESSION_SECRET=" .env || [ -z "$(grep '^SESSION_SECRET=' .env | cut -d= -f2-)" ]; then
+  SESSION_SECRET=$(openssl rand -hex 32)
+  echo "SESSION_SECRET=$SESSION_SECRET" >> .env
+  echo "  ✓ SESSION_SECRET generated and added to .env"
 fi
 
-# Next.js reads dashboard/.env.local at build time for NEXT_PUBLIC_* vars
+if ! grep -q "^WALLET_MASTER_SECRET=" .env || [ -z "$(grep '^WALLET_MASTER_SECRET=' .env | cut -d= -f2-)" ]; then
+  WALLET_MASTER_SECRET=$(openssl rand -hex 32)
+  echo "WALLET_MASTER_SECRET=$WALLET_MASTER_SECRET" >> .env
+  echo "  ✓ WALLET_MASTER_SECRET generated and added to .env"
+fi
+
+if ! grep -q "^MARKET_FEED_URL=" .env; then
+  echo "MARKET_FEED_URL=http://127.0.0.1:4100" >> .env
+  echo "  ✓ MARKET_FEED_URL added to .env"
+fi
+
+if ! grep -q "^BRIDGE_MODE=" .env; then
+  echo "BRIDGE_MODE=evm" >> .env
+  echo "  ✓ BRIDGE_MODE=evm added to .env"
+fi
+
+# Public dashboard — default OPERATOR mode (full controls).
+# For a public monitor showcase, set both to true explicitly before build.
+if ! grep -q "^NEXT_PUBLIC_READONLY=" .env; then
+  echo "NEXT_PUBLIC_READONLY=false" >> .env
+  echo "  ✓ NEXT_PUBLIC_READONLY=false (operator) added to .env"
+fi
+if ! grep -q "^READONLY=" .env; then
+  echo "READONLY=false" >> .env
+  echo "  ✓ READONLY=false (operator) added to .env"
+fi
+
+# Multi-tenant: skip singleton neural-agent when DATABASE_URL is configured
+if grep -q "^DATABASE_URL=.\+" .env 2>/dev/null; then
+  if ! grep -q "^DISABLE_SINGLETON_AGENT=" .env; then
+    echo "DISABLE_SINGLETON_AGENT=true" >> .env
+    echo "  ✓ DISABLE_SINGLETON_AGENT=true (multi-tenant) added to .env"
+  fi
+fi
+
+# Next.js reads dashboard/.env.local at build time for server + NEXT_PUBLIC_* vars
 mkdir -p dashboard
-grep -E '^(NEXT_PUBLIC_READONLY|READONLY|API_SECRET|AGENT_API_URL)=' .env > dashboard/.env.local 2>/dev/null || true
+grep -E '^(NEXT_PUBLIC_READONLY|READONLY|API_SECRET|AGENT_API_URL|DATABASE_URL|SESSION_SECRET|WALLET_MASTER_SECRET|SIWE_DOMAIN|CMC_PRO_API_KEY|CMC_API_KEY|BINANCE_WEB3_API_KEY|BINANCE_WEB3_API_SECRET|MARKET_FEED_URL|NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID|PLATFORM_TREASURY_ADDRESS|SKIP_DEPLOY_FEE|DEPLOY_FEE_BNB|BSC_RPC_URL|DISABLE_SINGLETON_AGENT|NODE_ENV|PUBLIC_BASE_URL)=' .env > dashboard/.env.local 2>/dev/null || true
 echo "  ✓ dashboard/.env.local synced from .env"
 
 echo "  ✓ Environment configured"
@@ -80,7 +112,8 @@ echo "  ✓ Environment configured"
 # ─── 3. Install dependencies ───────────────────────────────────
 echo ""
 echo "▸ Installing dependencies..."
-npm ci --omit=dev 2>/dev/null || npm install --omit=dev
+# Include devDependencies: Next build needs tailwind/postcss/typescript; agents run via tsx.
+npm ci 2>/dev/null || npm install
 echo "  ✓ Dependencies installed"
 
 # ─── 4. Build dashboard ────────────────────────────────────────
@@ -129,7 +162,11 @@ fi
 echo ""
 echo "▸ Starting services with PM2..."
 
-pm2 delete neural-agent neural-dashboard 2>/dev/null || true
+pm2 delete neural-market-feed neural-agent neural-dashboard 2>/dev/null || true
+set -a
+# shellcheck disable=SC1091
+source .env
+set +a
 pm2 start ecosystem.config.cjs
 pm2 save
 
@@ -147,8 +184,14 @@ echo "║   ✓ Deployment complete!                         ║"
 echo "║                                                  ║"
 echo "║   Dashboard: https://$DOMAIN           ║"
 echo "║   Agent API: http://127.0.0.1:3847/api          ║"
-echo "║   Health:    https://$DOMAIN/api/health║"
+echo "║   Health:    https://$DOMAIN/api/health          ║"
+echo "║   Market feed: http://127.0.0.1:4100/health      ║"
 echo "║                                                  ║"
+echo "║   Operator platform: SIWE_DOMAIN=$DOMAIN         ║"
+echo "║   READONLY=false (default). Monitor: set true.   ║"
+echo "║   DISABLE_SINGLETON_AGENT=true with DATABASE_URL ║"
+echo "║   Required: SESSION_SECRET, WALLET_MASTER_SECRET ║"
+echo "║   BINANCE_WEB3_API_KEY + SECRET, CMC_PRO_API_KEY ║"
 echo "║   PM2 commands:                                  ║"
 echo "║     pm2 status                                   ║"
 echo "║     pm2 logs neural-agent                        ║"

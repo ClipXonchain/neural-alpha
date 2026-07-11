@@ -90,15 +90,24 @@ function MetricCard({
 }
 
 export function MetricCards({ state }: { state: AgentState }) {
-  const pnlTrend = state.totalPnl >= 0 ? "up" : "down";
-  const dailyTrend = state.dailyPnl >= 0 ? "up" : "down";
+  const unfunded = state.portfolioValue < 1 && state.initialNavUsd < 1;
+  const pnlTrend = unfunded
+    ? "neutral"
+    : state.totalPnl >= 0
+      ? "up"
+      : "down";
+  const dailyTrend = unfunded
+    ? "neutral"
+    : state.dailyPnl >= 0
+      ? "up"
+      : "down";
 
   return (
     <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
       <MetricCard
         label="Portfolio Value"
         value={formatUsd(state.portfolioValue)}
-        subValue={formatPct(state.totalPnlPct)}
+        subValue={unfunded ? "Awaiting deposit" : formatPct(state.totalPnlPct)}
         icon={<Wallet className="size-4" />}
         trend={pnlTrend}
         accentColor="cyan"
@@ -106,20 +115,30 @@ export function MetricCards({ state }: { state: AgentState }) {
       />
       <MetricCard
         label="Total PnL"
-        value={formatUsd(state.totalPnl)}
-        subValue={formatPct(state.totalPnlPct)}
-        icon={state.totalPnl >= 0 ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}
+        value={unfunded ? formatUsd(0) : formatUsd(state.totalPnl)}
+        subValue={unfunded ? "—" : formatPct(state.totalPnlPct)}
+        icon={
+          unfunded || state.totalPnl >= 0 ? (
+            <TrendingUp className="size-4" />
+          ) : (
+            <TrendingDown className="size-4" />
+          )
+        }
         trend={pnlTrend}
-        accentColor={state.totalPnl >= 0 ? "neon" : "danger"}
+        accentColor={
+          unfunded ? "cyan" : state.totalPnl >= 0 ? "neon" : "danger"
+        }
         delay={0.05}
       />
       <MetricCard
         label="Daily PnL"
-        value={formatUsd(state.dailyPnl)}
-        subValue={formatPct(state.dailyPnlPct)}
+        value={unfunded ? formatUsd(0) : formatUsd(state.dailyPnl)}
+        subValue={unfunded ? "—" : formatPct(state.dailyPnlPct)}
         icon={<BarChart3 className="size-4" />}
         trend={dailyTrend}
-        accentColor={state.dailyPnl >= 0 ? "neon" : "danger"}
+        accentColor={
+          unfunded ? "cyan" : state.dailyPnl >= 0 ? "neon" : "danger"
+        }
         delay={0.1}
       />
       <MetricCard

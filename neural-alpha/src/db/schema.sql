@@ -56,6 +56,8 @@ ALTER TABLE nav_snapshots ADD COLUMN IF NOT EXISTS today_trades INTEGER;
 ALTER TABLE nav_snapshots ADD COLUMN IF NOT EXISTS win_rate DOUBLE PRECISION;
 ALTER TABLE nav_snapshots ADD COLUMN IF NOT EXISTS fear_greed INTEGER;
 ALTER TABLE nav_snapshots ADD COLUMN IF NOT EXISTS emergency_mode BOOLEAN;
+ALTER TABLE nav_snapshots ADD COLUMN IF NOT EXISTS agent_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_nav_snapshots_agent ON nav_snapshots(agent_id);
 
 CREATE TABLE IF NOT EXISTS chain_syncs (
   id BIGSERIAL PRIMARY KEY,
@@ -70,9 +72,81 @@ CREATE TABLE IF NOT EXISTS chain_syncs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chain_syncs_timestamp ON chain_syncs(timestamp DESC);
+ALTER TABLE chain_syncs ADD COLUMN IF NOT EXISTS agent_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_chain_syncs_agent ON chain_syncs(agent_id);
 
 CREATE TABLE IF NOT EXISTS agent_state (
   key TEXT PRIMARY KEY,
   value_json JSONB NOT NULL,
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS agent_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_trades_agent ON trades(agent_id);
+
+-- ── Platform multi-tenant registry ──
+CREATE TABLE IF NOT EXISTS users (
+  wallet_address TEXT PRIMARY KEY,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_login TIMESTAMPTZ
+);
+
+CREATE TABLE IF NOT EXISTS agents (
+  id TEXT PRIMARY KEY,
+  owner_wallet TEXT NOT NULL REFERENCES users(wallet_address),
+  trading_wallet TEXT,
+  display_name TEXT,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending', 'provisioning', 'running', 'stopped', 'archived', 'failed')),
+  erc8004_agent_id TEXT,
+  agent_number SERIAL,
+  api_secret_hash TEXT,
+  runtime_url TEXT,
+  runtime_port INTEGER,
+  public_meta BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  deployed_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_agents_owner ON agents(LOWER(owner_wallet));
+CREATE INDEX IF NOT EXISTS idx_agents_status ON agents(status);
+
+CREATE TABLE IF NOT EXISTS agent_config (
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value TEXT,
+  is_secret BOOLEAN NOT NULL DEFAULT false,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (agent_id, key)
+);
+
+CREATE TABLE IF NOT EXISTS deployments (
+  id BIGSERIAL PRIMARY KEY,
+  agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+  container_id TEXT,
+  host TEXT,
+  port INTEGER,
+  fee_tx_hash TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_deployments_agent ON deployments(agent_id);
+
+-- Prevent fee-tx replay (skip zero-hash used in fee-skip / dev)
+CREATE UNIQUE INDEX IF NOT EXISTS idx_deployments_fee_tx_unique
+  ON deployments (LOWER(fee_tx_hash))
+  WHERE fee_tx_hash IS NOT NULL
+    AND fee_tx_hash <> ''
+    AND fee_tx_hash !~* '^0x0+$';
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id BIGSERIAL PRIMARY KEY,
+  agent_id TEXT,
+  owner_wallet TEXT,
+  action TEXT NOT NULL,
+  payload JSONB,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_agent ON audit_log(agent_id);
+CREATE INDEX IF NOT EXISTS idx_audit_owner ON audit_log(LOWER(owner_wallet));

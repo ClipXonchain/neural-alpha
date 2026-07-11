@@ -1,14 +1,14 @@
 import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot } from "./utils/types.js";
-import { loadConfig, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
+import { loadConfig, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, getEligibleScanUniverse, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, MAX_TRADABLE_MARKET_CAP_USD, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
 import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, parseCmcQuotesBatch, parseCmcTrending, parseFearGreedIndex, unwrapX402Response } from "./data/market.js";
-import { fetchNewsFeed } from "./data/news.js";
+import { fetchBinanceWeb3Trending, trendingToSymbolList, filterTrendingSymbols } from "./integrations/binance-web3-trending.js";
 import { analyzeMarkets, selectTrades } from "./strategy/index.js";
 import { getStrategyProfile, isStrategyName } from "./strategy/presets.js";
 import { resolveBscTokenAddress, hasBscSwapAddress } from "./integrations/bsc-token-addresses.js";
 import { computeSignals, getTokenMomentumMetrics, getTokenDisplayMetrics } from "./strategy/signals.js";
 import { enrichSignalsWithAi, applyAiInsight } from "./strategy/ai-analyst.js";
 import type { AiSignalInsight } from "./strategy/ai-analyst.js";
-import { analyzeNewsSentiment, type NewsSentiment } from "./strategy/news-sentiment.js";
+import { buildTrendingRankMap, type TrendingRank } from "./strategy/trending-rank.js";
 import { RiskManager } from "./risk/manager.js";
 import { PortfolioTracker } from "./risk/portfolio.js";
 import {
@@ -48,6 +48,10 @@ import {
 } from "./utils/brain-log.js";
 import { getAgentStore } from "./db/store.js";
 import { fetchBscTokenBalances, scanWalletViaCliSubprocess } from "./integrations/bscscan.js";
+import {
+  isMarketFeedEnabled,
+  pullMarketFeed,
+} from "./market-feed/client.js";
 import { fetchWalletTradeHistory } from "./integrations/trade-history.js";
 import { fetchRpcRecentTradeHistory } from "./integrations/bsc-rpc-trade-history.js";
 import { fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
@@ -55,26 +59,22 @@ import {
   enrichSymbolsFromBinance,
   iconFromWalletRow,
   normalizeBinanceIcon,
+  buildTokenIconMap,
   listKnownBscTokenSymbols,
   isPlausibleLivePrice,
   type BinanceLiveQuote,
 } from "./integrations/binance-web3-market.js";
-import { knownBscAddress, trustWalletIconUrl } from "./integrations/bsc-token-addresses.js";
+import { getBinanceAlphaIcon } from "./integrations/binance-alpha-tokens.js";
+import { knownBscAddress } from "./integrations/bsc-token-addresses.js";
 
 /**
  * Core autonomous trading agent — Neural Alpha.
  *
  * Architecture:
- *   CMC Agent Hub (x402) → Market Data → Strategy Engine → Risk Manager → TWAK Swap → BSC
+ *   CMC Pro → Market Data → Strategy Engine → Risk Manager → EVM Wallet Swap → BSC
  *
- * The agent operates in two modes:
- * 1. MCP-orchestrated: An AI agent calls TWAK MCP tools and feeds results
- *    to this engine. The agent class provides the decision logic.
- * 2. Standalone: The agent runs its own loop (for demo/testing), using
- *    direct HTTP calls or mock data.
- *
- * All execution goes through TWAK — self-custody, local signing, no
- * custodial intermediaries.
+ * Execution uses a self-custodial encrypted keystore (viem + PancakeSwap).
+ * The bridge interface abstracts market data + on-chain execution.
  */
 
 export interface McpBridge {
@@ -92,10 +92,7 @@ export interface McpBridge {
   getPortfolio?(chain: string): Promise<PortfolioHolding[] | null>;
   /** Direct on-chain balance for a single token symbol (reliable fallback). */
   getTokenBalance?(chain: string, symbol: string): Promise<PortfolioHolding | null>;
-  switchWalletMode?(mode: "local" | "walletconnect"): Promise<Record<string, unknown> | null>;
   getWalletStatus?(): Promise<Record<string, unknown> | null>;
-  competitionRegister?(): Promise<Record<string, unknown> | null>;
-  competitionStatus?(): Promise<Record<string, unknown> | null>;
 }
 
 export interface WalletInfo {
@@ -104,8 +101,6 @@ export interface WalletInfo {
   usdtBalance: number;
   walletMode: string;
   walletState: string;
-  registered: boolean;
-  registrationOpen: boolean;
   binancePositions?: BinanceWeb3Position[];
 }
 
@@ -121,8 +116,8 @@ export class TradingAgent {
   private watchlist: string[];
   private lastSignals: Map<string, number> = new Map();
   private lastSignalConfidence: Map<string, number> = new Map();
-  private lastNewsSentiment: Map<string, NewsSentiment> = new Map();
-  private lastNewsCount = 0;
+  private lastTrendingRanks: Map<string, TrendingRank> = new Map();
+  private lastTrendingCount = 0;
   private lastAiInsights = new Map<string, AiSignalInsight>();
   private bridgeSource = "unknown";
   private x402Payment = process.env.CMC_X402_MAX_PAYMENT || "10000";
@@ -133,7 +128,10 @@ export class TradingAgent {
   private autonomousOnChainTxToday = 0;
   private autonomousTxDay = "";
   private cycleInProgress = false;
+  /** Consecutive cycle failures — auto-pause after threshold. */
+  private consecutiveCycleFailures = 0;
   private lastCycleCompletedAt = 0;
+
   private lastCycleDurationMs = 0;
   private lastCycleTradesExecuted = 0;
   private lastCycleSignalsQueued = 0;
@@ -152,11 +150,15 @@ export class TradingAgent {
   private livePrices = new Map<string, BinanceLiveQuote>();
   private lastMarketData: MarketData[] = [];
 
-  constructor(mcp: McpBridge, initialCashUsd = 1000, bridgeSource = "unknown") {
+  constructor(mcp: McpBridge, initialCashUsd = 0, bridgeSource = "unknown") {
     this.config = loadConfig();
     // Live mode defers the NAV baseline until the real on-chain balance is
     // synced, so a placeholder cash value can't trigger a false drawdown.
-    this.portfolio = new PortfolioTracker(initialCashUsd, this.config.mode === "live");
+    this.portfolio = new PortfolioTracker(
+      initialCashUsd,
+      this.config.mode === "live",
+      this.config.minGasReserveUsd
+    );
     this.riskManager = new RiskManager(this.config, this.portfolio);
     this.mcp = mcp;
     this.bridgeSource = bridgeSource;
@@ -244,6 +246,12 @@ export class TradingAgent {
         });
       } catch (err) {
         logger.error("Cycle failed", { error: String(err) });
+        this.consecutiveCycleFailures++;
+        if (this.consecutiveCycleFailures >= 5) {
+          logger.error("Pausing agent after 5 consecutive cycle failures");
+          this.stop();
+          break;
+        }
       }
 
       if (this.running && generation === this.runGeneration) {
@@ -273,11 +281,11 @@ export class TradingAgent {
 
   /**
    * Execute one full trading cycle:
-   * 1. Fetch market data from CMC (x402) and TWAK
+   * 1. Fetch market data from CMC Pro
    * 2. Compute technical signals
    * 3. Generate trade decisions
    * 4. Validate against risk guardrails
-   * 5. Execute approved trades via TWAK
+   * 5. Execute approved trades via EVM wallet
    * 6. Update portfolio and log results
    */
   async runCycle(): Promise<CycleResult> {
@@ -306,7 +314,7 @@ export class TradingAgent {
 
     // Step 2: Fetch macro sentiment (Fear & Greed via CMC x402) then re-score for trades.
     await this.fetchSentiment();
-    brainSentiment(this.fearGreedIndex, this.lastNewsCount);
+    brainSentiment(this.fearGreedIndex, this.lastTrendingCount);
 
     const materialHeld = [...this.portfolio.getMaterialPositionSymbols()].sort();
     brainPortfolioContext(
@@ -318,7 +326,7 @@ export class TradingAgent {
     );
 
     // Step 3: Analyze markets and generate signals (includes updated F&G).
-    let signals = analyzeMarkets(markets, this.fearGreedIndex, this.config, this.lastNewsSentiment);
+    let signals = analyzeMarkets(markets, this.fearGreedIndex, this.config, this.lastTrendingRanks);
     brainSignalOverview(markets.length, signals);
 
     // Step 4b: AI technical analysis on top actionable signals (optional)
@@ -444,28 +452,9 @@ export class TradingAgent {
     // Step 8: Log risk summary
     logger.info("Risk status", this.riskManager.riskSummary());
 
-    // Step 9: Min daily trade enforcement (competition requires ≥1 trade/day)
-    const todayTrades = this.portfolio.getTodayTradeCount();
-    const hour = new Date().getUTCHours();
-    if (
-      todayTrades === 0 &&
-      hour >= 20 &&
-      this.config.mode === "live" &&
-      !this.isInStartupCooldown() &&
-      autonomousExecuted < maxPerCycle
-    ) {
-      logger.risk("WARNING: 0 trades today — competition requires ≥1 trade/day. Forcing best available trade.");
-      const bestSignal = signals.find((s) => s.action !== "hold" && Math.abs(s.score) > 5);
-      if (bestSignal) {
-        const result = await this.executeTrade(bestSignal);
-        if (result?.success) tradeResults.push(result);
-      }
-    } else if (todayTrades === 0 && hour >= 18) {
-      logger.warn("No trades today yet — competition requires ≥1/day (June 22-28)", { hour });
-    }
-
     const duration = Date.now() - startTime;
     this.lastCycleCompletedAt = Date.now();
+    this.consecutiveCycleFailures = 0;
     this.lastCycleDurationMs = duration;
     this.lastCycleTradesExecuted = tradeResults.length;
     this.lastCycleSignalsQueued = tradesToExecute.length;
@@ -580,7 +569,7 @@ export class TradingAgent {
     }));
   }
 
-  /** Live prices for open positions — Binance live → market cache → TWAK fallback. */
+  /** Live prices for open positions — Binance live → market cache → bridge fallback. */
   private buildPositionPrices(): Map<string, number> {
     const prices = new Map<string, number>();
     for (const sym of this.portfolio.getMaterialPositionSymbols()) {
@@ -690,11 +679,89 @@ export class TradingAgent {
     this.signalRefreshInProgress = true;
     const started = Date.now();
     try {
+      // Shared feed: one CMC/Binance/ClipX poll serves all agents.
+      if (isMarketFeedEnabled()) {
+        const focus = [
+          ...new Set([
+            ...this.watchlist,
+            ...this.portfolio.getAllPositions().keys(),
+          ]),
+        ];
+        const feed = await pullMarketFeed({
+          symbols: focus,
+          fullScan: !!opts.fullScan,
+        });
+        if (feed) {
+          if (opts.updateSentiment && feed.fearGreed !== null) {
+            this.fearGreedIndex = feed.fearGreed;
+          } else if (opts.updateSentiment) {
+            await this.fetchSentiment().catch(() => undefined);
+          }
+
+          if (feed.trending.length > 0) {
+            this.lastTrendingCount = feed.trending.length;
+            this.lastTrendingRanks = buildTrendingRankMap(feed.trending);
+          } else {
+            await this.fetchTrendingRanks();
+          }
+
+          const markets = [...feed.markets];
+          // Promote full-scan movers into watchlist using feed quotes
+          if (opts.fullScan) {
+            this.promoteFromFeedScan(markets);
+          }
+          this.rotateWatchlist(trendingToSymbolList(feed.trending), markets);
+
+          // Feed already has quotes + 15m OHLCV — skip per-agent Binance/CMC.
+          // Still seed synthetic history only if a symbol somehow lacks candles.
+          for (const md of markets) {
+            if (!hasRealHistory(md.symbol)) {
+              seedPriceHistory(md.symbol, md.price, 50, 3.5);
+            }
+            recordPrice(md.symbol, md.price, md.volume24h, md.marketCap);
+          }
+
+          for (const [symbol, url] of Object.entries(feed.tokenIcons ?? {})) {
+            const sym = symbol.toUpperCase();
+            const normalized = normalizeBinanceIcon(url) ?? url;
+            if (normalized) this.tokenIcons.set(sym, normalized);
+          }
+          const missingFeedIcons = markets
+            .map((md) => md.symbol)
+            .filter((s) => !this.tokenIcons.has(s.toUpperCase()));
+          if (missingFeedIcons.length > 0) {
+            const resolved = await buildTokenIconMap(missingFeedIcons, {
+              alphaIcon: getBinanceAlphaIcon,
+            });
+            for (const [symbol, url] of Object.entries(resolved)) {
+              this.tokenIcons.set(symbol, url);
+            }
+          }
+
+          const signals = this.runSignalAnalysis(markets);
+          this.lastMarketData = markets;
+          this.lastSignalRefreshAt = Date.now();
+
+          if (!this.cycleInProgress) {
+            brainSignalPulse(!!opts.fullScan, markets.length, signals);
+          }
+
+          logger.info("Market signals refreshed (shared feed)", {
+            tokens: markets.length,
+            scored: this.lastSignals.size,
+            fullScan: !!opts.fullScan,
+            ohlcv: feed.ohlcvLoaded.length,
+            durationMs: Date.now() - started,
+          });
+          return markets;
+        }
+      }
+
       if (opts.updateSentiment) {
         await this.fetchSentiment().catch(() => undefined);
       }
 
-      await this.fetchNews();
+      await this.fetchTrendingRanks();
       const markets = await this.collectMarketData(!!opts.fullScan);
       await this.applyBinanceEnrichment(markets, !!opts.fullScan);
       const signals = this.runSignalAnalysis(markets);
@@ -720,19 +787,43 @@ export class TradingAgent {
     }
   }
 
+  /** Promote top movers from a full-universe feed snapshot into the watchlist. */
+  private promoteFromFeedScan(markets: MarketData[]) {
+    const ranked = markets
+      .filter((md) => isTradableToken(md.symbol, md.price, md.marketCap))
+      .map((md) => {
+        const trendingBoost = this.lastTrendingRanks.get(md.symbol)?.percentChange5m ?? 0;
+        const change = md.change24h ?? 0;
+        const rankScore = Math.abs(change) + Math.abs(trendingBoost) * 0.3;
+        return { symbol: md.symbol, change, rankScore };
+      })
+      .sort((a, b) => b.rankScore - a.rankScore)
+      .slice(0, FULL_SCAN_PROMOTE_COUNT);
+
+    if (ranked.length === 0) return;
+    const promoted = ranked.map((r) => r.symbol);
+    for (const symbol of promoted) {
+      this.watchlist = [...new Set([...this.watchlist, symbol])];
+    }
+    logger.info("Feed full scan promoted breakout tokens", {
+      promoted,
+      topChange: ranked[0]?.change,
+    });
+  }
+
   private runSignalAnalysis(markets: MarketData[]): import("./utils/types.js").TradeSignal[] {
     const signals = analyzeMarkets(
       markets,
       this.fearGreedIndex,
       this.config,
-      this.lastNewsSentiment
+      this.lastTrendingRanks
     );
     for (const s of signals) {
       this.lastSignals.set(s.symbol, s.score);
       this.lastSignalConfidence.set(s.symbol, s.confidence);
     }
     for (const md of markets) {
-      if (!isTradableToken(md.symbol, md.price)) {
+      if (!isTradableToken(md.symbol, md.price, md.marketCap)) {
         this.lastSignals.delete(md.symbol);
         this.lastSignalConfidence.delete(md.symbol);
         continue;
@@ -756,7 +847,7 @@ export class TradingAgent {
       ]),
     ].filter((s) => {
       const md = markets.find((m) => m.symbol === s);
-      return isTradableToken(s, md?.price ?? getLatestPrice(s));
+      return isTradableToken(s, md?.price ?? getLatestPrice(s), md?.marketCap);
     });
 
     const ohlcvSymbols = fullScan
@@ -798,11 +889,14 @@ export class TradingAgent {
       }
     }
 
-    for (const symbol of enrichTargets) {
-      const sym = symbol.toUpperCase();
-      if (this.tokenIcons.has(sym)) continue;
-      const addr = knownBscAddress(sym);
-      if (addr) this.tokenIcons.set(sym, trustWalletIconUrl(addr));
+    const missingIcons = enrichTargets.filter((s) => !this.tokenIcons.has(s.toUpperCase()));
+    if (missingIcons.length > 0) {
+      const resolved = await buildTokenIconMap(missingIcons, {
+        alphaIcon: getBinanceAlphaIcon,
+      });
+      for (const [symbol, url] of Object.entries(resolved)) {
+        this.tokenIcons.set(symbol, url);
+      }
     }
 
     for (const md of markets) {
@@ -845,9 +939,9 @@ export class TradingAgent {
     if (live && live.price > 0 && isPlausibleLivePrice(ref, live.price)) {
       md.price = live.price;
       if (Number.isFinite(live.change24hPct)) md.change24h = live.change24hPct;
-      recordPrice(md.symbol, live.price, live.volume24h || md.volume24h);
+      recordPrice(md.symbol, live.price, live.volume24h || md.volume24h, md.marketCap);
     } else {
-      recordPrice(md.symbol, md.price, md.volume24h);
+      recordPrice(md.symbol, md.price, md.volume24h, md.marketCap);
     }
   }
 
@@ -872,7 +966,7 @@ export class TradingAgent {
       markets.push(md);
     }
 
-    // Fallback: TWAK spot prices for symbols CMC did not return
+    // Fallback: bridge spot prices for symbols CMC did not return
     for (const symbol of symbols) {
       if (cmcQuotes.has(symbol)) continue;
       try {
@@ -884,24 +978,42 @@ export class TradingAgent {
           markets.push(buildMarketData(symbol, priceData.price));
         }
       } catch (err) {
-        logger.warn(`TWAK price fallback failed for ${symbol}`, { error: String(err) });
+        logger.warn(`Bridge price fallback failed for ${symbol}`, { error: String(err) });
       }
     }
 
-    // Trending: CMC Agent Hub x402 first, TWAK fallback
+    // Trending: Binance Web3 (5m % sorted, Spot/Alpha only), CMC bridge fallback
     try {
-      const raw = await this.mcp.x402Request(CMC_ENDPOINTS.trending(), this.x402Payment);
-      trendingTokens = parseCmcTrending(unwrapX402Response(raw));
-      if (trendingTokens?.length) {
-        logger.info("CMC trending tokens (x402)", { count: trendingTokens.length });
+      const binanceTrending = await fetchBinanceWeb3Trending({ limit: 50 });
+      if (binanceTrending.length > 0) {
+        this.lastTrendingCount = binanceTrending.length;
+        this.lastTrendingRanks = buildTrendingRankMap(binanceTrending);
+        trendingTokens = trendingToSymbolList(binanceTrending);
+        logger.info("Binance Web3 trending tokens", { count: binanceTrending.length });
       }
     } catch (err) {
-      logger.warn("CMC trending x402 failed", { error: String(err) });
+      logger.warn("Binance Web3 trending failed", { error: String(err) });
     }
 
     if (!trendingTokens) {
       try {
-        trendingTokens = await this.mcp.getTrendingTokens(20);
+        const raw = await this.mcp.x402Request(CMC_ENDPOINTS.trending(), this.x402Payment);
+        const parsed = parseCmcTrending(unwrapX402Response(raw));
+        trendingTokens = parsed ? filterTrendingSymbols(parsed) : null;
+        if (trendingTokens?.length) {
+          logger.info("CMC trending tokens (x402 fallback, Spot/Alpha only)", {
+            count: trendingTokens.length,
+          });
+        }
+      } catch (err) {
+        logger.warn("CMC trending x402 failed", { error: String(err) });
+      }
+    }
+
+    if (!trendingTokens) {
+      try {
+        const bridgeTrending = await this.mcp.getTrendingTokens(20);
+        trendingTokens = bridgeTrending ? filterTrendingSymbols(bridgeTrending) : null;
       } catch {
         // supplementary
       }
@@ -958,7 +1070,7 @@ export class TradingAgent {
    * promote top movers into the active watchlist.
    */
   private async runFullTokenScan(existingMarkets: MarketData[]) {
-    const tradable = ELIGIBLE_TOKENS.filter((s) => isTradableToken(s));
+    const tradable = getEligibleScanUniverse().filter((s) => isTradableToken(s));
     const already = new Set(existingMarkets.map((m) => m.symbol));
     const allQuotes = new Map<string, MarketData>();
 
@@ -971,7 +1083,7 @@ export class TradingAgent {
       const batch = tradable.slice(i, i + FULL_SCAN_BATCH_SIZE);
       const quotes = await this.fetchCmcQuotes(batch);
       for (const [symbol, md] of quotes) {
-        if (!isTradableToken(symbol, md.price)) continue;
+        if (!isTradableToken(symbol, md.price, md.marketCap)) continue;
         allQuotes.set(symbol, md);
         if (!already.has(symbol)) {
           existingMarkets.push(md);
@@ -980,12 +1092,12 @@ export class TradingAgent {
       }
     }
 
-    // Promote top movers by 24h change + news sentiment boost
+    // Promote top movers by 24h change + Binance trending 5m boost
     const ranked = [...allQuotes.entries()]
       .map(([symbol, md]) => {
-        const newsBoost = this.lastNewsSentiment.get(symbol)?.score ?? 0;
+        const trendingBoost = this.lastTrendingRanks.get(symbol)?.percentChange5m ?? 0;
         const change = md.change24h ?? 0;
-        const rankScore = Math.abs(change) + Math.abs(newsBoost) * 0.3;
+        const rankScore = Math.abs(change) + Math.abs(trendingBoost) * 0.3;
         return { symbol, change, rankScore };
       })
       .sort((a, b) => b.rankScore - a.rankScore)
@@ -1051,7 +1163,7 @@ export class TradingAgent {
     }
 
     for (const m of markets) {
-      if (MOMENTUM_VOLATILE.includes(m.symbol) && isTradableToken(m.symbol, m.price)) {
+      if (MOMENTUM_VOLATILE.includes(m.symbol) && isTradableToken(m.symbol, m.price, m.marketCap)) {
         next.add(m.symbol);
       }
     }
@@ -1098,21 +1210,18 @@ export class TradingAgent {
     }
   }
 
-  /** Fetch ClipX news and compute per-token sentiment map. */
-  private async fetchNews(): Promise<Map<string, NewsSentiment>> {
+  /** Fetch Binance Web3 trending (5m % sorted, Spot/Alpha only) and build per-token rank map. */
+  private async fetchTrendingRanks(): Promise<Map<string, TrendingRank>> {
     try {
-      const articles = await fetchNewsFeed(30);
-      this.lastNewsCount = articles.length;
-
-      // Scan all eligible tokens — not just active watchlist
-      const sentiment = analyzeNewsSentiment(articles);
-      this.lastNewsSentiment = sentiment;
-      return sentiment;
+      const tokens = await fetchBinanceWeb3Trending({ limit: 50 });
+      this.lastTrendingCount = tokens.length;
+      this.lastTrendingRanks = buildTrendingRankMap(tokens);
+      return this.lastTrendingRanks;
     } catch (err) {
-      logger.warn("News fetch failed — using last known sentiment", {
+      logger.warn("Binance trending fetch failed — using last known ranks", {
         error: String(err),
       });
-      return this.lastNewsSentiment;
+      return this.lastTrendingRanks;
     }
   }
 
@@ -1238,68 +1347,57 @@ export class TradingAgent {
       order = validation.order;
     }
 
-    if (this.config.mode === "paper") {
-      logger.trade("PAPER trade executed", {
-        orderId: order.id,
-        symbol: order.symbol,
-        side: order.side,
-        amountUsd: order.amountUsd,
-      });
-
-      const price = getLatestPrice(order.symbol) || 0;
-      const result: TradeResult = {
-        orderId: order.id,
-        success: true,
-        txHash: `paper-${Date.now()}`,
-        fromToken: order.fromToken,
-        toToken: order.toToken,
-        fromAmount: String(order.amountUsd),
-        toAmount: price > 0 ? String(order.amountUsd / price) : "0",
-        priceAtExecution: price,
-        timestamp: Date.now(),
-      };
-
-      applyTradeToPortfolio(order, result, this.portfolio);
-      await this.persistTrade(order, result);
-      brainTradeExecuted(order.side, order.symbol, order.amountUsd, result.txHash);
-      return result;
-    }
-
-    // Live mode: get quote first, then execute
+    // Live execution: get quote first, then execute
     try {
       // For sells, use the wallet's actual transferable balance. Partial sells
       // only when the operator specifies an explicit USD amount.
       if (order.side === "sell") {
         const onChainBalance = await this.getOnChainTokenBalance(order.fromToken);
-        if (onChainBalance !== null && onChainBalance > 0) {
-          const partialUsd =
-            opts.amountUsd !== undefined && opts.amountUsd > 0;
-          const sellAll = !partialUsd || opts.sellAll === true;
-          const tracked = order.fromTokenAmount ?? onChainBalance;
-          const sellable = sellAll
-            ? onChainBalance
-            : Math.min(tracked, onChainBalance);
-          // Full exits: floor to 8 decimals (no 0.1% haircut — that left ~$0.05
-          // dust on every ~$50 sell). Partial sells keep a tiny margin.
-          const safeAmount = sellAll
-            ? floorTokenAmount(sellable, 8)
-            : floorTokenAmount(sellable * 0.999, 8);
-          if (safeAmount > 0) {
-            logger.info("Reconciled sell amount to on-chain balance", {
-              symbol: order.symbol,
-              sellAll,
-              trackedAmount: tracked,
-              onChainBalance,
-              sellAmount: safeAmount,
-            });
-            order.fromTokenAmount = safeAmount;
-          }
-        } else {
-          logger.warn("Could not resolve on-chain balance for sell — using tracked amount", {
+        const tracked = order.fromTokenAmount ?? 0;
+
+        if (onChainBalance === null || onChainBalance <= 0) {
+          return this.sellBlockedResult(
+            order,
+            `Wallet balance for ${order.symbol} not confirmed on-chain` +
+              (tracked > 0 ? ` (bookkeeping shows ${tracked.toFixed(4)})` : "") +
+              " — run dashboard resync or verify on Binance Web3"
+          );
+        }
+
+        const partialUsd =
+          opts.amountUsd !== undefined && opts.amountUsd > 0;
+        const sellAll = !partialUsd || opts.sellAll === true;
+        const sellable = sellAll
+          ? onChainBalance
+          : Math.min(tracked > 0 ? tracked : onChainBalance, onChainBalance);
+        const safeAmount = sellAll
+          ? floorTokenAmount(sellable, 8)
+          : floorTokenAmount(sellable * 0.999, 8);
+
+        if (safeAmount <= 0) {
+          return this.sellBlockedResult(
+            order,
+            `Verified ${order.symbol} balance is too small to sell (${onChainBalance})`
+          );
+        }
+
+        if (tracked > 0 && Math.abs(tracked - onChainBalance) / onChainBalance > 0.05) {
+          logger.warn("Sell amount adjusted — bookkeeping differs from wallet", {
             symbol: order.symbol,
-            trackedAmount: order.fromTokenAmount,
+            trackedAmount: tracked,
+            onChainBalance,
+            sellAmount: safeAmount,
           });
         }
+
+        logger.info("Reconciled sell amount to verified wallet balance", {
+          symbol: order.symbol,
+          sellAll,
+          trackedAmount: tracked,
+          onChainBalance,
+          sellAmount: safeAmount,
+        });
+        order.fromTokenAmount = safeAmount;
       }
 
       const quoteParams = buildQuoteParams(order);
@@ -1308,6 +1406,40 @@ export class TradingAgent {
       if (!quote) {
         logger.warn("No quote available", { symbol: order.symbol });
         return null;
+      }
+
+      if (typeof quote.error === "string" && quote.error) {
+        logger.warn("Swap quote rejected", {
+          symbol: order.symbol,
+          error: quote.error,
+        });
+        brainTradeFailed(order.symbol, quote.error);
+        if (!opts.manual) this.markFailedSwap(order.symbol);
+        return null;
+      }
+
+      // Value sanity: refuse buys where DEX quote is junk vs market price
+      // (e.g. 5 USDT → $0.31 LAB on a dust Pancake pair).
+      if (order.side === "buy" && order.amountUsd > 0) {
+        const estOut = parseFloat(String(quote.estimatedOutput ?? "0"));
+        const mark = getLatestPrice(order.symbol) || 0;
+        if (estOut > 0 && mark > 0) {
+          const quotedUsd = estOut * mark;
+          const minUsd = order.amountUsd * 0.85;
+          if (quotedUsd < minUsd) {
+            const msg = `Quote value too low: ~$${quotedUsd.toFixed(2)} for $${order.amountUsd.toFixed(2)} spent (mark $${mark}) — likely illiquid pool`;
+            logger.risk("Aborting buy — DEX quote vs market price mismatch", {
+              symbol: order.symbol,
+              amountUsd: order.amountUsd,
+              estimatedOutput: estOut,
+              markPrice: mark,
+              quotedUsd,
+            });
+            brainTradeFailed(order.symbol, msg);
+            if (!opts.manual) this.markFailedSwap(order.symbol);
+            return null;
+          }
+        }
       }
 
       // Check token risk before execution
@@ -1321,7 +1453,7 @@ export class TradingAgent {
       if (!opts.manual) this.reserveAutonomousOnChainTx();
       const swapResult = await this.mcp.executeSwap(swapParams);
 
-      logger.info("TWAK swap raw response", {
+      logger.info("Swap raw response", {
         symbol: order.symbol,
         side: order.side,
         keys: Object.keys(swapResult),
@@ -1378,7 +1510,7 @@ export class TradingAgent {
   /**
    * Make a token tradable on demand for assistant/manual commands, even if it
    * isn't on the active watchlist. Resolves the BEP-20 contract (static map →
-   * CMC lookup, cached) and fetches a live price (CMC quote → TWAK spot),
+   * CMC lookup, cached) and fetches a live price (CMC quote → bridge spot),
    * seeding price history so sizing/execution have real numbers.
    *
    * Returns whether the token can now be routed (has a contract + price).
@@ -1414,7 +1546,7 @@ export class TradingAgent {
           seedPriceHistory(sym, priceData.price, 50, 3.5);
         }
       } catch (err) {
-        logger.warn("Manual-trade TWAK price prime failed", { symbol: sym, error: String(err) });
+        logger.warn("Manual-trade bridge price prime failed", { symbol: sym, error: String(err) });
       }
     }
 
@@ -1487,15 +1619,15 @@ export class TradingAgent {
    */
   updateConfig(partial: Partial<AgentConfig>) {
     const changed: Record<string, unknown> = {};
+    let restartSignalLoop = false;
+    let restartProtectiveLoop = false;
 
-    // Switching strategy applies that preset's risk profile + sizing first;
-    // any explicit fields in the same payload then override on top.
     if (partial.strategy !== undefined && isStrategyName(partial.strategy)) {
       const profile = getStrategyProfile(partial.strategy);
       this.config.strategy = profile.name;
       this.config.positionSizeMultiplier = profile.positionSizeMultiplier;
       this.config.maxDrawdownPct = profile.risk.maxDrawdownPct;
-      if (!process.env.MAX_DAILY_TRADES?.trim()) {
+      if (partial.maxDailyTrades === undefined) {
         this.config.maxDailyTrades = profile.risk.maxDailyTrades;
       }
       this.config.maxPortfolioTokens = profile.risk.maxPortfolioTokens;
@@ -1512,15 +1644,46 @@ export class TradingAgent {
       "maxDrawdownPct", "slippageTolerance", "maxPortfolioTokens",
       "minTradeAmountUsd", "minBuyConfidence", "stopLossPct", "takeProfitPct",
       "trailingActivatePct", "trailingGivebackPct", "autoExitEnabled",
-      "protectiveExitCheckMs", "signalRefreshMs",
+      "protectiveExitCheckMs", "signalRefreshMs", "drawdownLimitEnabled",
       "maxAutonomousTradesPerCycle", "maxOnChainTxPerDay",
+      "bscGasPriceGwei", "bscSwapGasLimit",
     ];
     for (const key of safe) {
       if (partial[key] !== undefined) {
         (this.config as unknown as Record<string, unknown>)[key] = partial[key];
         changed[key] = partial[key];
+        if (key === "signalRefreshMs") restartSignalLoop = true;
+        if (
+          key === "protectiveExitCheckMs" ||
+          key === "autoExitEnabled" ||
+          key === "stopLossPct" ||
+          key === "takeProfitPct"
+        ) {
+          restartProtectiveLoop = true;
+        }
       }
     }
+
+    if (partial.minGasReserveUsd !== undefined) {
+      this.config.minGasReserveUsd = partial.minGasReserveUsd;
+      this.portfolio.setMinGasReserveUsd(partial.minGasReserveUsd);
+      changed.minGasReserveUsd = partial.minGasReserveUsd;
+    }
+
+    if (this.running) {
+      const gen = this.runGeneration;
+      if (restartSignalLoop) {
+        if (this.signalRefreshTimer) {
+          clearInterval(this.signalRefreshTimer);
+          this.signalRefreshTimer = undefined;
+        }
+        this.startSignalRefreshLoop(gen);
+      }
+      if (restartProtectiveLoop) {
+        this.startProtectiveExitLoop(gen);
+      }
+    }
+
     if (Object.keys(changed).length > 0) {
       logger.info("Config updated via dashboard", changed);
     }
@@ -1538,11 +1701,15 @@ export class TradingAgent {
   async restart() {
     this.running = false;
 
-    const initialCash = parseFloat(process.env.INITIAL_CASH_USD || "10");
-    this.portfolio = new PortfolioTracker(initialCash, this.config.mode === "live");
+    const initialCash = parseFloat(process.env.INITIAL_CASH_USD || "0");
+    this.portfolio = new PortfolioTracker(
+      initialCash,
+      this.config.mode === "live",
+      this.config.minGasReserveUsd
+    );
     this.cycleCount = 0;
     this.lastSignals.clear();
-    this.lastNewsSentiment.clear();
+    this.lastTrendingRanks.clear();
     this.startedAt = Date.now();
 
     logger.info("Agent RESET — portfolio/PnL/drawdown cleared, restarting");
@@ -1571,7 +1738,7 @@ export class TradingAgent {
 
   /**
    * Resolve the real BSC wallet address.
-   * Prefers the live TWAK MCP address; falls back to AGENT_WALLET_ADDRESS env
+   * Prefers the live wallet address; falls back to AGENT_WALLET_ADDRESS env
    * when the bridge returns nothing or a known placeholder (mock/cmc-pro modes).
    */
   private resolveWalletAddress(mcpAddress?: string | null): string | null {
@@ -1588,7 +1755,7 @@ export class TradingAgent {
     return this.resolveWalletAddress(this._cachedWalletInfo?.address ?? null);
   }
 
-  /** Read TWAK wallet address + on-chain balances for dashboard. */
+  /** Read agent wallet address + on-chain balances for dashboard. */
   private _cachedWalletInfo: WalletInfo | null = null;
   private _walletInfoRefreshing = false;
 
@@ -1611,8 +1778,6 @@ export class TradingAgent {
 
     let walletMode = "local";
     let walletState = "unknown";
-    let registered = false;
-    let registrationOpen = false;
     let binancePositions: BinanceWeb3Position[] | undefined;
 
     if (address) {
@@ -1651,20 +1816,12 @@ export class TradingAgent {
       walletState = String(status?.state ?? "unknown");
     }
 
-    if (this.mcp.competitionStatus) {
-      const comp = await this.mcp.competitionStatus();
-      registered = Boolean(comp?.registered ?? comp?.isRegistered);
-      registrationOpen = Boolean(comp?.registrationOpen ?? comp?.windowOpen);
-    }
-
     const info: WalletInfo = {
       address,
       bnbBalance: Math.round(bnbBalance * 10000) / 10000,
       usdtBalance: Math.round(usdtBalance * 100) / 100,
       walletMode,
       walletState,
-      registered,
-      registrationOpen,
       ...(binancePositions && binancePositions.length > 0 ? { binancePositions } : {}),
     };
     this._cachedWalletInfo = info;
@@ -1681,8 +1838,6 @@ export class TradingAgent {
       usdtBalance: 0,
       walletMode: "local",
       walletState: "unknown",
-      registered: false,
-      registrationOpen: false,
     };
     this._cachedWalletInfo = {
       ...base,
@@ -1870,7 +2025,7 @@ export class TradingAgent {
 
     const wallet = await this.resolveBootstrapWalletAddress();
     if (!wallet) {
-      logger.warn("Trade history backfill skipped — set AGENT_WALLET_ADDRESS or bind TWAK wallet");
+      logger.warn("Trade history backfill skipped — set AGENT_WALLET_ADDRESS or unlock agent keystore");
       return;
     }
 
@@ -1958,7 +2113,7 @@ export class TradingAgent {
     }
   }
 
-  /** Wallet address for DB scoping before TWAK cache is warm. */
+  /** Wallet address for DB scoping before wallet cache is warm. */
   private async resolveBootstrapWalletAddress(): Promise<string | null> {
     const envAddr = this.resolveWalletAddress(process.env.AGENT_WALLET_ADDRESS);
     if (envAddr) return envAddr;
@@ -1987,7 +2142,7 @@ export class TradingAgent {
           side: order.side,
           symbol: order.symbol,
           amountUsd: order.amountUsd,
-          status: this.config.mode === "paper" ? "paper" : "confirmed",
+          status: "confirmed",
           realizedPnl: result.realizedPnl,
         },
         result.txHash
@@ -2076,8 +2231,7 @@ export class TradingAgent {
    */
   /**
    * Best-effort lookup of the wallet's actual transferable balance for a single
-   * token symbol. Prefers the direct per-token balance call, then falls back to
-   * scanning the full on-chain portfolio. Returns null when neither is available.
+   * token. Bridge per-token → portfolio → Binance Web3 cache → live fetch.
    */
   private async getOnChainTokenBalance(symbol: string): Promise<number | null> {
     const sym = symbol.toUpperCase();
@@ -2086,6 +2240,10 @@ export class TradingAgent {
       try {
         const bal = await this.mcp.getTokenBalance(BSC_CHAIN, sym);
         if (bal && typeof bal.amount === "number" && bal.amount > 0) {
+          logger.info("Sell balance resolved via getTokenBalance", {
+            symbol: sym,
+            amount: bal.amount,
+          });
           return bal.amount;
         }
       } catch (err) {
@@ -2101,6 +2259,10 @@ export class TradingAgent {
         const holdings = await this.mcp.getPortfolio(BSC_CHAIN);
         const match = holdings?.find((h) => h.symbol.toUpperCase() === sym);
         if (match && typeof match.amount === "number" && match.amount > 0) {
+          logger.info("Sell balance resolved via getPortfolio", {
+            symbol: sym,
+            amount: match.amount,
+          });
           return match.amount;
         }
       } catch (err) {
@@ -2111,7 +2273,63 @@ export class TradingAgent {
       }
     }
 
+    const cached = this._cachedWalletInfo?.binancePositions?.find(
+      (p) => p.symbol.toUpperCase() === sym
+    );
+    if (cached && cached.remainQty > 0) {
+      logger.info("Sell balance resolved via Binance Web3 cache", {
+        symbol: sym,
+        amount: cached.remainQty,
+      });
+      return cached.remainQty;
+    }
+
+    const address = this.currentWalletAddress();
+    if (address) {
+      try {
+        const positions = await fetchWalletPositions(address);
+        if (positions.length > 0) {
+          this.primeWalletCache(address, positions);
+          const live = positions.find((p) => p.symbol.toUpperCase() === sym);
+          if (live && live.remainQty > 0) {
+            logger.info("Sell balance resolved via Binance Web3 live fetch", {
+              symbol: sym,
+              amount: live.remainQty,
+            });
+            return live.remainQty;
+          }
+        }
+      } catch (err) {
+        logger.warn("Binance Web3 balance lookup failed during sell", {
+          symbol: sym,
+          error: String(err),
+        });
+      }
+    }
+
     return null;
+  }
+
+  private sellBlockedResult(
+    order: import("./utils/types.js").TradeOrder,
+    error: string
+  ): import("./utils/types.js").TradeResult {
+    logger.warn("Sell blocked — wallet balance not verified", {
+      symbol: order.symbol,
+      error,
+      trackedAmount: order.fromTokenAmount,
+    });
+    brainTradeSkipped(order.symbol, "sell", error);
+    return {
+      orderId: order.id,
+      success: false,
+      fromToken: order.fromToken,
+      toToken: order.toToken,
+      fromAmount: "0",
+      priceAtExecution: getLatestPrice(order.symbol) ?? 0,
+      timestamp: Date.now(),
+      error,
+    };
   }
 
   private async syncOnChainPositions(): Promise<{
@@ -2161,7 +2379,7 @@ export class TradingAgent {
       if (!isEligibleToken(symbol) || isStablecoin(symbol)) return;
       if (!(h.amount > 0)) return;
 
-      // TWAK balance APIs can echo native BNB for unrelated ERC-20 queries.
+      // Balance APIs can echo native BNB for unrelated ERC-20 queries.
       if (nativeGasAmount > 0) {
         const rel = Math.abs(h.amount - nativeGasAmount) / nativeGasAmount;
         if (rel < 1e-6) return;
@@ -2353,7 +2571,7 @@ export class TradingAgent {
 
     const stable = await this.mcp.getStablecoinBalance(BSC_CHAIN);
     if (!stable) {
-      logger.warn("Could not read USDT balance — TWAK wallet not connected?");
+      logger.warn("Could not read USDT balance — agent wallet not ready?");
       return { usdtBalance: this.portfolio.cash, synced: false };
     }
 
@@ -2366,6 +2584,7 @@ export class TradingAgent {
     if (this.portfolio.hasPendingNavRestore()) {
       this.portfolio.applyPendingNavRestore(navUsd);
     } else if (!this.portfolio.hasBaseline) {
+      // Anchor even at $0 so an empty wallet shows $0 PnL, not −100%.
       this.portfolio.setBaselineNav(navUsd);
     } else {
       this.portfolio.realignNavBaselineIfStale(navUsd);
@@ -2389,26 +2608,6 @@ export class TradingAgent {
     return total;
   }
 
-  async registerCompetition(): Promise<Record<string, unknown>> {
-    if (!this.mcp.competitionRegister) {
-      throw new Error("Competition registration requires TWAK MCP (twak serve)");
-    }
-    const result = await this.mcp.competitionRegister();
-    if (!result) throw new Error("Registration failed — check TWAK logs");
-    logger.info("Competition registration submitted", result);
-    return result;
-  }
-
-  async switchWalletMode(mode: "local" | "walletconnect"): Promise<Record<string, unknown>> {
-    if (!this.mcp.switchWalletMode) {
-      throw new Error("Wallet mode switch requires TWAK MCP (twak serve)");
-    }
-    const result = await this.mcp.switchWalletMode(mode);
-    if (!result) throw new Error("Wallet mode switch failed");
-    logger.info("Wallet mode switched", { mode });
-    return result;
-  }
-
   /**
    * Structured autonomous-mode status for dashboard / API.
    */
@@ -2426,7 +2625,6 @@ export class TradingAgent {
     );
     const cooldownSec = Math.ceil(this.getStartupCooldownRemainingMs() / 1000);
     const emergencyMode = this.riskManager.isEmergencyMode();
-    const hourUtc = new Date().getUTCHours();
 
     const failedSwapCooldowns: AutonomousStatus["failedSwapCooldowns"] = [];
     for (const [symbol, until] of this.failedSwapUntil) {
@@ -2502,8 +2700,6 @@ export class TradingAgent {
       tradesToday < maxTradesToday &&
       txRemaining >= TradingAgent.TX_PER_SWAP;
 
-    const competitionNudge = tradesToday === 0 && hourUtc >= 18;
-
     return {
       phase,
       ready,
@@ -2529,7 +2725,6 @@ export class TradingAgent {
       autoExitEnabled: this.config.autoExitEnabled,
       strategy: this.config.strategy,
       failedSwapCooldowns,
-      competitionNudge,
     };
   }
 
@@ -2579,8 +2774,8 @@ export class TradingAgent {
       atrPct: number | null;
       volumeRatio: number | null;
       score: number | null;
-      newsScore: number | null;
-      newsArticles: number;
+      trendingRank: number | null;
+      trendingChange5m: number | null;
       confidence?: number | null;
       rsi: number | null;
       macd: number | null;
@@ -2594,7 +2789,7 @@ export class TradingAgent {
     for (const symbol of reportSymbols) {
       const { momentum, atrPct, volumeRatio } = getTokenMomentumMetrics(symbol);
       const sig = this.lastSignals.get(symbol);
-      const news = this.lastNewsSentiment.get(symbol);
+      const trending = this.lastTrendingRanks.get(symbol);
       const tech = computeSignals(symbol);
       const display = getTokenDisplayMetrics(symbol, currentPrices.get(symbol));
       const ai = this.lastAiInsights.get(symbol.toUpperCase());
@@ -2604,8 +2799,11 @@ export class TradingAgent {
         volumeRatio: volumeRatio !== null ? Math.round(volumeRatio * 100) / 100 : null,
         score: sig !== undefined ? Math.round(sig) : null,
         confidence: this.lastSignalConfidence.get(symbol) ?? null,
-        newsScore: news?.score ?? null,
-        newsArticles: news?.articles ?? 0,
+        trendingRank: trending?.rank ?? null,
+        trendingChange5m:
+          trending?.percentChange5m != null
+            ? Math.round(trending.percentChange5m * 10) / 10
+            : null,
         rsi: tech.rsi !== null ? Math.round(tech.rsi * 10) / 10 : null,
         macd: display.macdPct !== null ? Math.round(display.macdPct * 100) / 100 : null,
         bbPosition:
@@ -2629,7 +2827,9 @@ export class TradingAgent {
       config: {
         ...this.config,
         minTradablePriceUsd: MIN_TRADABLE_PRICE_USD,
+        maxTradableMarketCapUsd: MAX_TRADABLE_MARKET_CAP_USD,
         excludedTokens: [...EXCLUDED_TOKENS],
+        agentUniverse: this.config.agentUniverse,
       },
       portfolio: portfolioSnap,
       snapshots,
@@ -2640,7 +2840,7 @@ export class TradingAgent {
       prices: Object.fromEntries(currentPrices),
       bridgeSource: this.bridgeSource,
       tokenMetrics,
-      newsCount: this.lastNewsCount,
+      trendingCount: this.lastTrendingCount,
       lastSignalRefreshAt: this.lastSignalRefreshAt || null,
       tokenIcons: Object.fromEntries(
         [...this.tokenIcons.entries()].map(([sym, url]) => [
@@ -2703,8 +2903,8 @@ export interface AgentState {
     atrPct: number | null;
     volumeRatio?: number | null;
     score: number | null;
-    newsScore?: number | null;
-    newsArticles?: number;
+    trendingRank?: number | null;
+    trendingChange5m?: number | null;
     confidence?: number | null;
     rsi?: number | null;
     macd?: number | null;
@@ -2714,7 +2914,7 @@ export interface AgentState {
     aiVerdict?: string;
     aiAgrees?: boolean;
   }>;
-  newsCount?: number;
+  trendingCount?: number;
   startedAt?: number;
   startupCooldownActive?: boolean;
   startupCooldownRemainingMs?: number;
@@ -2752,7 +2952,6 @@ export interface AutonomousStatus {
   autoExitEnabled: boolean;
   strategy: string;
   failedSwapCooldowns: Array<{ symbol: string; remainingMin: number }>;
-  competitionNudge: boolean;
 }
 
 function formatDurationSec(totalSec: number): string {

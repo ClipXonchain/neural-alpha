@@ -7,38 +7,44 @@ import {
   Copy,
   Check,
   RefreshCw,
-  Shield,
   ExternalLink,
   ArrowDownToLine,
   Coins,
   TrendingUp,
   TrendingDown,
+  KeyRound,
+  Loader2,
+  ShieldAlert,
+  EyeOff,
 } from "lucide-react";
 import { cn, formatUsd, formatMetric, shortenHash } from "@/lib/utils";
 import type { WalletSnapshot } from "@/lib/agent-api";
 
 interface WalletPanelProps {
   wallet: WalletSnapshot | null;
-  mode: "live" | "paper";
   connected: boolean;
   onSync: () => Promise<{ usdtBalance: number; synced: boolean }>;
-  onRegister: () => Promise<Record<string, unknown>>;
-  onSwitchMode: (mode: "local" | "walletconnect") => Promise<Record<string, unknown>>;
   readOnly?: boolean;
+  ownerWallet?: string | null;
+  /** When set, owner can export the trading wallet seed phrase */
+  agentId?: string;
 }
 
 export function WalletPanel({
   wallet,
-  mode,
   connected,
   onSync,
-  onRegister,
   readOnly,
+  ownerWallet,
+  agentId,
 }: WalletPanelProps) {
   const [copied, setCopied] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [registering, setRegistering] = useState(false);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const [privateKey, setPrivateKey] = useState<string | null>(null);
+  const [keyCopied, setKeyCopied] = useState(false);
 
   const copyAddress = () => {
     if (!wallet?.address) return;
@@ -52,7 +58,7 @@ export function WalletPanel({
     setActionMsg(null);
     try {
       const r = await onSync();
-      setActionMsg(r.synced ? `Synced ${formatUsd(r.usdtBalance)} USDT` : "Sync skipped (paper/mock)");
+      setActionMsg(r.synced ? `Synced ${formatUsd(r.usdtBalance)} USDT` : "Sync skipped (mock bridge)");
     } catch (e) {
       setActionMsg(String(e));
     } finally {
@@ -60,16 +66,28 @@ export function WalletPanel({
     }
   };
 
-  const handleRegister = async () => {
-    setRegistering(true);
-    setActionMsg(null);
+  const handleBackup = async () => {
+    if (!agentId) return;
+    const ok = window.confirm(
+      "Reveal the trading wallet private key?\n\nAnyone with this key can move all funds. Only continue on a private device."
+    );
+    if (!ok) return;
+
+    setBackupBusy(true);
+    setBackupError(null);
     try {
-      await onRegister();
-      setActionMsg("Registration submitted on BSC");
+      const res = await fetch(`/api/agents/${agentId}/backup`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirm: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Backup failed");
+      setPrivateKey(data.privateKey as string);
     } catch (e) {
-      setActionMsg(String(e));
+      setBackupError(e instanceof Error ? e.message : String(e));
     } finally {
-      setRegistering(false);
+      setBackupBusy(false);
     }
   };
 
@@ -89,25 +107,20 @@ export function WalletPanel({
             className="text-sm font-semibold tracking-wide uppercase"
             style={{ fontFamily: "var(--font-display)" }}
           >
-            TWAK Wallet
+            Agent Wallet
           </h3>
         </div>
         <span
-          className={cn(
-            "text-[10px] font-bold px-2 py-0.5 rounded uppercase",
-            mode === "live"
-              ? "bg-neon/10 text-neon border border-neon/20"
-              : "bg-warning/10 text-warning border border-warning/20"
-          )}
+          className="text-[10px] font-bold px-2 py-0.5 rounded uppercase bg-neon/10 text-neon border border-neon/20"
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          {mode} mode
+          live
         </span>
       </div>
 
       {!connected && (
         <p className="text-xs text-warning mb-4" style={{ fontFamily: "var(--font-mono)" }}>
-          Agent not connected — restart with <code className="text-neon">npm run dev</code>
+          Agent not connected: check deployment status in My Agents
         </p>
       )}
 
@@ -134,12 +147,17 @@ export function WalletPanel({
           </div>
         ) : (
           <p className="text-xs text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
-            Connect TWAK MCP (`twak serve`) to bind wallet
+            Waiting for self-custodial wallet unlock…
           </p>
         )}
         {wallet && (
           <p className="text-[10px] text-text-muted mt-1.5" style={{ fontFamily: "var(--font-mono)" }}>
             {wallet.walletState} · {wallet.walletMode}
+          </p>
+        )}
+        {ownerWallet && (
+          <p className="text-[10px] text-text-muted mt-1.5" style={{ fontFamily: "var(--font-mono)" }}>
+            Owner: {ownerWallet.slice(0, 6)}…{ownerWallet.slice(-4)}
           </p>
         )}
       </div>
@@ -166,10 +184,10 @@ export function WalletPanel({
         </div>
       </div>
 
-      {/* Token holdings — scanned via Binance Web3 public API */}
+      {/* Token holdings: scanned via Binance Web3 public API */}
       <TokenHoldings positions={wallet?.binancePositions} />
 
-      {/* Deposit instructions — hidden on public/read-only deployments */}
+      {/* Deposit instructions: hidden on public/read-only deployments */}
       {!readOnly && (
         <div className="rounded-lg border border-cyan/15 bg-cyan/5 p-3 mb-4">
           <div className="flex items-start gap-2">
@@ -199,15 +217,19 @@ export function WalletPanel({
           </button>
         )}
 
-        {!readOnly && (
+        {!readOnly && agentId && (
           <button
-            onClick={handleRegister}
-            disabled={!connected || registering || wallet?.registered}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-cyan/10 text-cyan border border-cyan/20 hover:bg-cyan/20 disabled:opacity-40 transition-colors"
+            onClick={handleBackup}
+            disabled={backupBusy}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-warning/10 text-warning border border-warning/25 hover:bg-warning/20 disabled:opacity-40 transition-colors"
             style={{ fontFamily: "var(--font-mono)" }}
           >
-            <Shield className="size-3.5" />
-            {wallet?.registered ? "Registered" : "Register Competition"}
+            {backupBusy ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
+              <KeyRound className="size-3.5" />
+            )}
+            Backup key
           </button>
         )}
 
@@ -224,6 +246,48 @@ export function WalletPanel({
         )}
       </div>
 
+      {backupError && (
+        <p className="text-[10px] text-danger mt-3 font-mono">{backupError}</p>
+      )}
+
+      {privateKey && (
+        <div className="mt-4 rounded-xl border border-warning/40 bg-warning/10 p-3">
+          <div className="flex items-start justify-between gap-2 mb-2">
+            <div className="flex items-start gap-2">
+              <ShieldAlert className="size-3.5 text-warning shrink-0 mt-0.5" />
+              <p className="text-[11px] text-warning font-semibold">
+                Private key: store offline & never share
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setPrivateKey(null)}
+              className="text-text-muted hover:text-cyan"
+              title="Hide private key"
+            >
+              <EyeOff className="size-3.5" />
+            </button>
+          </div>
+          <code
+            className="block break-all rounded bg-void/50 border border-border-dim px-2 py-2 font-mono text-[10px] text-text-primary mb-2"
+          >
+            {privateKey}
+          </code>
+          <button
+            type="button"
+            onClick={async () => {
+              await navigator.clipboard.writeText(privateKey);
+              setKeyCopied(true);
+              setTimeout(() => setKeyCopied(false), 2000);
+            }}
+            className="flex items-center gap-1 text-[10px] text-cyan font-mono"
+          >
+            {keyCopied ? <Check className="size-3" /> : <Copy className="size-3" />}
+            {keyCopied ? "Copied" : "Copy private key"}
+          </button>
+        </div>
+      )}
+
       {actionMsg && (
         <p className="text-[10px] text-text-secondary mt-3" style={{ fontFamily: "var(--font-mono)" }}>
           {actionMsg}
@@ -235,7 +299,7 @@ export function WalletPanel({
 
 type BinancePosition = NonNullable<WalletSnapshot["binancePositions"]>[number];
 
-/** Match backend / portfolio MIN_POSITION_VALUE_USD — hide dust & airdrop spam. */
+/** Match backend / portfolio MIN_POSITION_VALUE_USD: hide dust & airdrop spam. */
 const DUST_THRESHOLD_USD = 1;
 
 function TokenHoldings({ positions }: { positions?: BinancePosition[] }) {

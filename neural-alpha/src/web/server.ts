@@ -6,8 +6,10 @@ import { addLogListener, removeLogListener, type LogListener } from "../utils/lo
 import { logger } from "../utils/logger.js";
 import type { LogEntry } from "../utils/types.js";
 import { executeCommand } from "../commands/handler.js";
+import { buildAgentMeta } from "./agent-meta.js";
 
 const DASHBOARD_PORT = parseInt(process.env.DASHBOARD_PORT || "3847", 10);
+let boundPort = DASHBOARD_PORT;
 const API_SECRET = process.env.API_SECRET?.trim();
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const MAX_SSE_CLIENTS = 20;
@@ -57,7 +59,12 @@ function extractBearerToken(req: IncomingMessage): string | null {
 }
 
 function isAuthenticated(req: IncomingMessage): boolean {
-  if (!API_SECRET) return true; // no secret configured = dev mode
+  if (!API_SECRET) {
+    if (process.env.NODE_ENV === "production") {
+      return false;
+    }
+    return true; // dev only when unset
+  }
   const token = extractBearerToken(req) ?? (req.headers["x-api-key"] as string | undefined);
   return token === API_SECRET;
 }
@@ -164,11 +171,18 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
 
   // Health check — no auth required
   if (url === "/api/health" && req.method === "GET") {
+    const snap = agentRef?.getStateSnapshot?.();
     json(req, res, {
       status: "ok",
+      initialized: !!agentRef,
       running: agentRef?.isRunning() ?? false,
       uptime: process.uptime(),
       timestamp: Date.now(),
+      agentId: process.env.AGENT_ID || null,
+      port: boundPort,
+      lastCycleAt: snap?.autonomous?.lastCycleAt ?? null,
+      cycleCount: snap?.cycleCount ?? 0,
+      emergencyMode: snap?.autonomous?.emergencyMode ?? false,
     });
     return true;
   }
@@ -271,42 +285,6 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
     return true;
   }
 
-  if (url === "/api/wallet/mode" && req.method === "POST") {
-    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
-    readBody(req)
-      .then((body) => {
-        try {
-          const { mode } = JSON.parse(body) as { mode: string };
-          if (mode !== "local" && mode !== "walletconnect") {
-            return json(req, res, { error: "mode must be 'local' or 'walletconnect'" }, 400);
-          }
-          agentRef!.switchWalletMode(mode)
-            .then((r) => json(req, res, { ok: true, ...r }))
-            .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
-        } catch {
-          json(req, res, { error: "Invalid JSON" }, 400);
-        }
-      })
-      .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 413));
-    return true;
-  }
-
-  if (url === "/api/competition/register" && req.method === "POST") {
-    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
-    agentRef.registerCompetition().then((r) => json(req, res, r)).catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
-    return true;
-  }
-
-  if (url === "/api/competition/status" && req.method === "GET") {
-    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
-    agentRef.getWalletInfo().then((w) => json(req, res, {
-      registered: w.registered,
-      registrationOpen: w.registrationOpen,
-      address: w.address,
-    })).catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
-    return true;
-  }
-
   if (url === "/api/blacklist" && req.method === "GET") {
     if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
     const snap = agentRef.getStateSnapshot();
@@ -381,6 +359,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
             "trailingActivatePct", "trailingGivebackPct", "autoExitEnabled",
             "protectiveExitCheckMs", "signalRefreshMs",
             "maxAutonomousTradesPerCycle", "maxOnChainTxPerDay", "strategy",
+            "drawdownLimitEnabled", "minGasReserveUsd", "bscGasPriceGwei", "bscSwapGasLimit",
           ]);
           const disallowed = Object.keys(updates).filter((k) => !ALLOWED_CONFIG_KEYS.has(k));
           if (disallowed.length > 0) {
@@ -393,6 +372,14 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
         }
       })
       .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 413));
+    return true;
+  }
+
+  if (url === "/api/meta" && req.method === "GET") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    buildAgentMeta(agentRef)
+      .then((meta) => json(req, res, meta))
+      .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
     return true;
   }
 
@@ -430,7 +417,7 @@ export function startDashboard(agent: TradingAgent) {
   addLogListener(logListener);
 
   if (!API_SECRET && process.env.NODE_ENV === "production") {
-    logger.warn("API_SECRET not set — agent API is UNAUTHENTICATED. Set API_SECRET in .env for production.");
+    logger.error("API_SECRET not set — refusing unauthenticated agent API in production");
   }
 
   const server = createServer((req, res) => {
@@ -463,7 +450,7 @@ export function startDashboard(agent: TradingAgent) {
     res.end("Not found");
   });
 
-  // Trades + wallet sync can take 1–3 min (TWAK quote, approval, on-chain swap).
+  // Trades + wallet sync can take 1–3 min (quote, approval, on-chain swap).
   const HTTP_IDLE_TIMEOUT_MS = 300_000;
   server.keepAliveTimeout = HTTP_IDLE_TIMEOUT_MS + 5_000;
   server.headersTimeout = HTTP_IDLE_TIMEOUT_MS + 10_000;
@@ -473,11 +460,18 @@ export function startDashboard(agent: TradingAgent) {
     httpServer.requestTimeout = HTTP_IDLE_TIMEOUT_MS;
   }
 
-  const portFile = resolve(import.meta.dirname, "../../../.agent-api-port");
+  function agentPortFilePath(): string {
+    const dataDir = process.env.AGENT_DATA_DIR?.trim();
+    const agentId = process.env.AGENT_ID?.trim();
+    if (dataDir && agentId) {
+      return resolve(dataDir, agentId, "api-port");
+    }
+    return resolve(import.meta.dirname, "../../../.agent-api-port");
+  }
 
   function writePortFile(p: number) {
     try {
-      writeFileSync(portFile, String(p), { encoding: "utf8", mode: 0o600 });
+      writeFileSync(agentPortFilePath(), String(p), { encoding: "utf8", mode: 0o600 });
     } catch (err) {
       logger.warn("Could not write agent port file", { error: String(err) });
     }
@@ -490,6 +484,7 @@ export function startDashboard(agent: TradingAgent) {
     if (err.code === "EADDRINUSE" && port < DASHBOARD_PORT + MAX_PORT_RETRIES) {
       logger.warn(`Port ${port} in use — trying ${port + 1}`);
       port++;
+      boundPort = port;
       server.listen(port, "127.0.0.1");
       return;
     }
@@ -507,6 +502,7 @@ export function startDashboard(agent: TradingAgent) {
   });
 
   server.on("listening", () => {
+    boundPort = port;
     writePortFile(port);
     logger.info("Agent API server started", { port, auth: !!API_SECRET });
     if (port !== DASHBOARD_PORT) {

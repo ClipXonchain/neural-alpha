@@ -130,7 +130,7 @@ export function AllocationChart({
               type="button"
               onClick={handleRefresh}
               disabled={refreshing}
-              title="Hard refresh — re-sync on-chain holdings"
+              title="Hard refresh: re-sync on-chain holdings"
               className={cn(
                 "flex items-center justify-center size-7 rounded-md transition-colors",
                 "bg-surface-overlay/60 text-text-muted hover:text-cyan hover:bg-cyan/10",

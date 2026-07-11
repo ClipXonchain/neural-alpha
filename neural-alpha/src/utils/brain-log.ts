@@ -13,8 +13,8 @@ function fmtSignal(s: TradeSignal): string {
 export function brainCycleStart(cycleId: number, tokenCount: number, fullScan: boolean) {
   brain(
     fullScan
-      ? `Cycle ${cycleId} — full scan of ${tokenCount} eligible tokens starting.`
-      : `Cycle ${cycleId} — refreshing ${tokenCount} watchlist tokens.`
+      ? `Cycle ${cycleId}: full scan of ${tokenCount} eligible tokens starting.`
+      : `Cycle ${cycleId}: refreshing ${tokenCount} watchlist tokens.`
   );
 }
 
@@ -27,11 +27,11 @@ export function brainPortfolioContext(
 ) {
   const hold = holdings.length > 0 ? holdings.join(", ") : "none";
   brain(
-    `Portfolio check — ${slotsUsed}/${maxSlots} slots used · $${Math.round(cashUsd)} USDT free · ${drawdownPct.toFixed(1)}% drawdown. Holding: ${hold}.`
+    `Portfolio check: ${slotsUsed}/${maxSlots} slots used · $${Math.round(cashUsd)} USDT free · ${drawdownPct.toFixed(1)}% drawdown. Holding: ${hold}.`
   );
 }
 
-export function brainSentiment(fearGreed: number | null, newsArticles?: number) {
+export function brainSentiment(fearGreed: number | null, trendingCount?: number) {
   if (fearGreed == null) return;
   const mood =
     fearGreed <= 25
@@ -43,11 +43,11 @@ export function brainSentiment(fearGreed: number | null, newsArticles?: number) 
           : fearGreed <= 75
             ? "greed"
             : "extreme greed";
-  const news =
-    newsArticles != null && newsArticles > 0
-      ? ` · ${newsArticles} news articles scanned`
+  const trending =
+    trendingCount != null && trendingCount > 0
+      ? ` · ${trendingCount} Binance Web3 trending tokens tracked`
       : "";
-  brain(`Market mood — Fear & Greed ${fearGreed} (${mood})${news}.`);
+  brain(`Market mood: Fear & Greed ${fearGreed} (${mood})${trending}.`);
 }
 
 export function brainSignalOverview(
@@ -69,21 +69,21 @@ export function brainSignalOverview(
   if (topBuys.length > 0) parts.push(`top buys: ${topBuys.join(", ")}`);
   if (topSells.length > 0) parts.push(`top sells: ${topSells.join(", ")}`);
 
-  brain(`Signal overview — ${parts.join(" · ")}.`);
+  brain(`Signal overview: ${parts.join(" · ")}.`);
 }
 
 export function brainScanComplete(actionable: number, topBuy?: TradeSignal) {
   if (actionable === 0) {
-    brain("Scan complete — no actionable signals, staying patient.");
+    brain("Scan complete: no actionable signals, staying patient.");
     return;
   }
   if (topBuy?.action === "buy") {
     brain(
-      `Scan complete — ${actionable} actionable signal${actionable === 1 ? "" : "s"}. Best buy: ${fmtSignal(topBuy)}.`
+      `Scan complete: ${actionable} actionable signal${actionable === 1 ? "" : "s"}. Best buy: ${fmtSignal(topBuy)}.`
     );
     return;
   }
-  brain(`Scan complete — ${actionable} actionable signal${actionable === 1 ? "" : "s"}.`);
+  brain(`Scan complete: ${actionable} actionable signal${actionable === 1 ? "" : "s"}.`);
 }
 
 /** Lighter heartbeat between full trade cycles (signal refresh loop). */
@@ -95,11 +95,11 @@ export function brainSignalPulse(
   const buys = signals.filter((s) => s.action === "buy").slice(0, 3);
   const label = fullScan ? "Full market pulse" : "Market pulse";
   if (buys.length === 0) {
-    brain(`${label} — ${tokenCount} tokens updated, no strong buys yet.`);
+    brain(`${label}: ${tokenCount} tokens updated, no strong buys yet.`);
     return;
   }
   brain(
-    `${label} — ${tokenCount} tokens updated. Leading buys: ${buys.map(fmtSignal).join(", ")}.`
+    `${label}: ${tokenCount} tokens updated. Leading buys: ${buys.map(fmtSignal).join(", ")}.`
   );
 }
 
@@ -107,7 +107,7 @@ export function brainQueuedTrades(trades: TradeSignal[]) {
   const buys = trades.filter((t) => t.action === "buy");
   const sells = trades.filter((t) => t.action === "sell");
   if (buys.length === 0 && sells.length === 0) {
-    brain("Trade plan — nothing to execute this cycle.");
+    brain("Trade plan: nothing to execute this cycle.");
     return;
   }
   const parts: string[] = [];
@@ -117,7 +117,7 @@ export function brainQueuedTrades(trades: TradeSignal[]) {
   if (buys.length > 0) {
     parts.push(`buy ${buys.map((s) => s.symbol).join(", ")}`);
   }
-  brain(`Trade plan — ${parts.join(" · ")}.`);
+  brain(`Trade plan: ${parts.join(" · ")}.`);
 }
 
 export function brainTradeExecuted(
@@ -131,11 +131,11 @@ export function brainTradeExecuted(
 }
 
 export function brainTradeSkipped(symbol: string, action: string, reason: string) {
-  brain(`Skipped ${action} ${symbol} — ${reason}.`, { symbol, action, reason });
+  brain(`Skipped ${action} ${symbol}: ${reason}.`, { symbol, action, reason });
 }
 
 export function brainTradeFailed(symbol: string, reason: string) {
-  brain(`Trade failed on ${symbol} — ${reason}.`, { symbol, reason });
+  brain(`Trade failed on ${symbol}: ${reason}.`, { symbol, reason });
 }
 
 export function brainProtectiveExit(symbols: string[], reasons: string[]) {
@@ -144,14 +144,14 @@ export function brainProtectiveExit(symbols: string[], reasons: string[]) {
     return;
   }
   brain(
-    `Protective exits on ${symbols.join(", ")} — ${reasons.filter(Boolean).slice(0, 2).join("; ") || "risk limits"}.`
+    `Protective exits on ${symbols.join(", ")}: ${reasons.filter(Boolean).slice(0, 2).join("; ") || "risk limits"}.`
   );
 }
 
 export function brainProtectiveWatch(positions: string[]) {
   if (positions.length === 0) return;
   brain(
-    `Watching ${positions.length} open position${positions.length === 1 ? "" : "s"} for stop-loss / take-profit — ${positions.join(", ")}.`
+    `Watching ${positions.length} open position${positions.length === 1 ? "" : "s"} for stop-loss / take-profit: ${positions.join(", ")}.`
   );
 }
 
@@ -188,26 +188,26 @@ export function brainCycleDone(
 
   if (executed > 0) {
     brain(
-      `Cycle ${cycleId} complete${dur} — ${executed}/${queued} planned trade${executed === 1 ? "" : "s"} executed.${today}${nav}${wait} Status: ${phase}.`
+      `Cycle ${cycleId} complete${dur}: ${executed}/${queued} planned trade${executed === 1 ? "" : "s"} executed.${today}${nav}${wait} Status: ${phase}.`
     );
     return;
   }
   if (queued > 0) {
     brain(
-      `Cycle ${cycleId} complete${dur} — ${queued} trade${queued === 1 ? "" : "s"} considered but none executed.${today}${nav}${wait} Status: ${phase}.`
+      `Cycle ${cycleId} complete${dur}: ${queued} trade${queued === 1 ? "" : "s"} considered but none executed.${today}${nav}${wait} Status: ${phase}.`
     );
     return;
   }
   brain(
-    `Cycle ${cycleId} complete${dur} — no trades needed.${today}${nav}${wait} Status: ${phase}.`
+    `Cycle ${cycleId} complete${dur}: no trades needed.${today}${nav}${wait} Status: ${phase}.`
   );
 }
 
 export function brainStartupCooldown(remainingSec: number, queued: number) {
   brain(
     queued > 0
-      ? `Warming up (${remainingSec}s left) — ${queued} trade${queued === 1 ? "" : "s"} queued until ready.`
-      : `Warming up — ${remainingSec}s until autonomous trading starts.`
+      ? `Warming up (${remainingSec}s left): ${queued} trade${queued === 1 ? "" : "s"} queued until ready.`
+      : `Warming up: ${remainingSec}s until autonomous trading starts.`
   );
 }
 
@@ -219,9 +219,9 @@ export function brainAgentStarted(mode: string, intervalMin: number, signalRefre
 
 export function brainLoopsStarted(protectiveSec: number, autoExit: boolean) {
   if (!autoExit || protectiveSec <= 0) return;
-  brain(`Protective exits armed — checking SL/TP every ${protectiveSec}s.`);
+  brain(`Protective exits armed: checking SL/TP every ${protectiveSec}s.`);
 }
 
 export function brainRefreshLoopStarted(intervalSec: number) {
-  brain(`Signal refresh loop started — market pulse every ${Math.max(1, Math.round(intervalSec / 60))} min.`);
+  brain(`Signal refresh loop started: market pulse every ${Math.max(1, Math.round(intervalSec / 60))} min.`);
 }

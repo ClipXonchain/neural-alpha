@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useEffect, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Radar,
@@ -15,17 +15,14 @@ import {
   Ban,
   Undo2,
 } from "lucide-react";
-import { cn, formatTokenPrice, formatPct } from "@/lib/utils";
+import { cn, formatTokenPrice, formatPct, normalizeTokenIconUrl } from "@/lib/utils";
 import type { Signal } from "@/lib/mock-data";
-import { isAlphaToken } from "@/lib/alpha-tokens";
+import { isAlphaToken, loadLiveAlphaTokens, getLiveAlphaIcons, SAFE_LIST_SIZE } from "@/lib/alpha-tokens";
 
 const STABLE_SYMBOLS = new Set([
   "USDT", "USDC", "DAI", "USD1", "USDE", "USDD", "TUSD", "FDUSD", "USDF",
   "FRAX", "FRXUSD", "DUSD", "LISUSD", "EURI", "XUSD", "STABLE", "BUSD",
 ]);
-
-/** Total competition-eligible universe (149 BEP-20), for context labelling. */
-const ELIGIBLE_UNIVERSE = 149;
 
 function SignalBadge({ strength }: { strength: Signal["strength"] }) {
   const config = {
@@ -139,16 +136,39 @@ function formatAgeMs(ts: number | null | undefined): string {
   return `${Math.floor(sec / 3600)}h ago`;
 }
 
-function TokenLogo({ symbol, icon }: { symbol: string; icon?: string }) {
-  const [failed, setFailed] = useState(false);
-  if (icon && !failed) {
+function TokenLogo({
+  symbol,
+  icon,
+  fallbackIcons,
+}: {
+  symbol: string;
+  icon?: string;
+  fallbackIcons?: Record<string, string>;
+}) {
+  const candidates = useMemo(() => {
+    const urls: string[] = [];
+    const primary = normalizeTokenIconUrl(icon);
+    if (primary) urls.push(primary);
+    const fb = normalizeTokenIconUrl(fallbackIcons?.[symbol.toUpperCase()]);
+    if (fb && !urls.includes(fb)) urls.push(fb);
+    return urls;
+  }, [symbol, icon, fallbackIcons]);
+
+  const [candidateIdx, setCandidateIdx] = useState(0);
+  const src = candidates[candidateIdx];
+
+  useEffect(() => {
+    setCandidateIdx(0);
+  }, [symbol, icon, fallbackIcons]);
+
+  if (src && candidateIdx < candidates.length) {
     return (
       <img
-        src={icon}
+        src={src}
         alt=""
         referrerPolicy="no-referrer"
         className="size-6 rounded-full shrink-0 bg-surface-overlay object-cover ring-1 ring-border-dim/60"
-        onError={() => setFailed(true)}
+        onError={() => setCandidateIdx((i) => i + 1)}
       />
     );
   }
@@ -169,6 +189,7 @@ function SignalRow({
   busySymbol,
   onBlacklist,
   onUnblacklist,
+  fallbackIcons,
 }: {
   signal: Signal;
   index: number;
@@ -176,6 +197,7 @@ function SignalRow({
   busySymbol?: string | null;
   onBlacklist?: (symbol: string) => void;
   onUnblacklist?: (symbol: string) => void;
+  fallbackIcons?: Record<string, string>;
 }) {
   const [expanded, setExpanded] = useState(false);
   const isBlocked = !!signal.blacklisted;
@@ -190,8 +212,9 @@ function SignalRow({
   const bbNearLower = bbPos != null && bbPos <= 25;
   const vwapDev = signal.vwapDev;
   const aboveVwap = vwapDev != null && vwapDev > 0;
-  const newsScore = signal.newsScore;
-  const hasNews = signal.newsArticles != null && signal.newsArticles > 0 && newsScore != null;
+  const trendingRank = signal.trendingRank;
+  const trendingChange5m = signal.trendingChange5m;
+  const hasTrending = trendingRank != null && trendingRank > 0;
   const hasLive =
     signal.livePrice != null &&
     signal.livePrice > 0 &&
@@ -230,7 +253,7 @@ function SignalRow({
           {/* Left: score + symbol + price */}
           <div className="flex items-center gap-3 min-w-0 sm:w-[220px] shrink-0">
             <ScoreRing score={signal.score} />
-            <TokenLogo symbol={signal.symbol} icon={signal.icon} />
+            <TokenLogo symbol={signal.symbol} icon={signal.icon} fallbackIcons={fallbackIcons} />
             <div className="min-w-0">
               <div className="flex items-center gap-1.5">
                 <span
@@ -330,7 +353,7 @@ function SignalRow({
               <span
                 className="hidden xl:inline text-[8px] uppercase text-amber-400/70 self-center"
                 style={{ fontFamily: "var(--font-mono)" }}
-                title="Using estimated candles — Binance OHLCV pending"
+                title="Using estimated candles: Binance OHLCV pending"
               >
                 ~est
               </span>
@@ -363,14 +386,14 @@ function SignalRow({
               highlight={isVolumeSpike}
             />
             <IndicatorCell
-              label="News"
+              label="5m"
               value={
-                hasNews
-                  ? `${(newsScore ?? 0) > 0 ? "+" : ""}${Math.round(newsScore ?? 0)}`
+                hasTrending
+                  ? `#${trendingRank}${trendingChange5m != null ? ` ${trendingChange5m >= 0 ? "+" : ""}${trendingChange5m.toFixed(1)}%` : ""}`
                   : "—"
               }
-              highlight={(newsScore ?? 0) > 15}
-              danger={(newsScore ?? 0) < -15}
+              highlight={(trendingChange5m ?? 0) > 5}
+              danger={(trendingChange5m ?? 0) < -5}
             />
           </div>
 
@@ -496,6 +519,17 @@ export function SignalMonitor({
   const [tab, setTab] = useState<SignalTab>("eligible");
   const [query, setQuery] = useState("");
   const [busySymbol, setBusySymbol] = useState<string | null>(null);
+  const [alphaSet, setAlphaSet] = useState<Set<string> | null>(null);
+  const [alphaIcons, setAlphaIcons] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    loadLiveAlphaTokens()
+      .then((set) => {
+        setAlphaSet(set);
+        setAlphaIcons(getLiveAlphaIcons());
+      })
+      .catch(() => undefined);
+  }, []);
 
   const handleBlacklist = async (symbol: string) => {
     if (!onBlacklist) return;
@@ -522,12 +556,12 @@ export function SignalMonitor({
   );
 
   const blockedSignals = sorted.filter((s) => s.blacklisted);
-  // Section 1: full eligible universe (149) minus stablecoins and user-blocked.
+  // Section 1: Binance Spot ∪ Alpha (excl. stables / user-blocked).
   const eligibleSignals = sorted.filter(
     (s) => !STABLE_SYMBOLS.has(s.symbol.toUpperCase()) && !s.blacklisted
   );
-  // Section 2: tokens also listed on Binance Alpha (intersection with the 149).
-  const alphaSignals = eligibleSignals.filter((s) => isAlphaToken(s.symbol));
+  // Section 2: Binance Alpha subset.
+  const alphaSignals = eligibleSignals.filter((s) => isAlphaToken(s.symbol, alphaSet ?? undefined));
 
   const active =
     tab === "alpha" ? alphaSignals : tab === "blocked" ? blockedSignals : eligibleSignals;
@@ -539,15 +573,15 @@ export function SignalMonitor({
   const tabs: { id: SignalTab; label: string; count: number; hint: string }[] = [
     {
       id: "eligible",
-      label: "Eligible (149)",
+      label: `Safe list (${SAFE_LIST_SIZE})`,
       count: eligibleSignals.length,
-      hint: `of ${ELIGIBLE_UNIVERSE}`,
+      hint: `of ${SAFE_LIST_SIZE}`,
     },
     {
       id: "alpha",
-      label: "Binance Alpha",
+      label: alphaSet ? `Binance Alpha (${alphaSet.size})` : "Binance Alpha",
       count: alphaSignals.length,
-      hint: "common w/ 149",
+      hint: "live BSC sync",
     },
     {
       id: "blocked",
@@ -668,7 +702,7 @@ export function SignalMonitor({
         )}
       </div>
 
-      {/* List header — desktop only */}
+      {/* List header: desktop only */}
       <div
         className="hidden sm:grid grid-cols-[220px_72px_1fr_auto] gap-3 px-3 py-1.5 text-[9px] uppercase tracking-wider text-text-muted font-medium border-b border-border-dim/60 mb-0"
         style={{ fontFamily: "var(--font-mono)" }}
@@ -685,7 +719,7 @@ export function SignalMonitor({
             {tab === "alpha"
               ? "No Binance Alpha tokens in the current scan window."
               : tab === "blocked"
-                ? "No blocked tokens — use Block on any signal row to skip entries."
+                ? "No blocked tokens: use Block on any signal row to skip entries."
                 : "Waiting for market data…"}
           </div>
         ) : filtered.length === 0 ? (
@@ -702,6 +736,7 @@ export function SignalMonitor({
               busySymbol={busySymbol}
               onBlacklist={handleBlacklist}
               onUnblacklist={handleUnblacklist}
+              fallbackIcons={alphaIcons}
             />
           ))
         )}

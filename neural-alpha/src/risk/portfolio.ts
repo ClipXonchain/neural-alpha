@@ -44,23 +44,40 @@ export class PortfolioTracker {
   private pendingNavRestore: { peakNavUsd: number; initialNavUsd: number } | null = null;
   /** Cost basis restored from Neon when trade replay is incomplete. */
   private persistedEntries = new Map<string, { avgEntryPrice: number; peakPnlPct?: number }>();
+  private minGasReserveUsd: number;
 
-  constructor(initialCashUsd: number, deferBaseline = false) {
-    this.initialValueUsd = initialCashUsd;
-    this.cashUsd = initialCashUsd;
-    this.peakValueUsd = initialCashUsd;
-    // Live mode defers the baseline until the real on-chain NAV is known,
-    // so a placeholder config value can't cause a false 100% drawdown.
-    this.baselineInitialized = !deferBaseline;
+  constructor(
+    initialCashUsd: number,
+    deferBaseline = false,
+    minGasReserveUsd = MIN_GAS_RESERVE_USD
+  ) {
+    this.minGasReserveUsd = Math.max(0, minGasReserveUsd);
+    // Live mode: start empty until on-chain sync — never invent paper cash that
+    // makes an unfunded wallet look like −100% PnL.
+    if (deferBaseline) {
+      this.initialValueUsd = 0;
+      this.cashUsd = 0;
+      this.peakValueUsd = 0;
+      this.baselineInitialized = false;
+    } else {
+      this.initialValueUsd = initialCashUsd;
+      this.cashUsd = initialCashUsd;
+      this.peakValueUsd = initialCashUsd;
+      this.baselineInitialized = true;
+    }
   }
 
   get cash(): number {
     return this.cashUsd;
   }
 
+  setMinGasReserveUsd(usd: number) {
+    this.minGasReserveUsd = Math.max(0, usd);
+  }
+
   /** BNB above the minimum gas reserve (gas only — not used for buys). */
   getSpendableBnbUsd(): number {
-    return Math.max(0, this.gasReserveUsd - MIN_GAS_RESERVE_USD);
+    return Math.max(0, this.gasReserveUsd - this.minGasReserveUsd);
   }
 
   /** Total USD available to fund new buys (USDT only). */
@@ -119,9 +136,21 @@ export class PortfolioTracker {
    * Discards stale DB values when peak or initial diverges sharply from wallet.
    */
   applyPendingNavRestore(navUsd: number) {
-    if (!this.pendingNavRestore || !Number.isFinite(navUsd) || navUsd <= 0) return;
+    if (!this.pendingNavRestore || !Number.isFinite(navUsd) || navUsd < 0) return;
     const { peakNavUsd, initialNavUsd } = this.pendingNavRestore;
     this.pendingNavRestore = null;
+
+    // Empty / near-empty wallet: never keep a phantom DB baseline ($50 / $1000).
+    if (navUsd < 1) {
+      this.initialValueUsd = navUsd;
+      this.peakValueUsd = navUsd;
+      this.baselineInitialized = true;
+      logger.info("Empty wallet — cleared deferred NAV restore", {
+        navUsd: Math.round(navUsd * 100) / 100,
+        discardedInitial: Math.round(initialNavUsd * 100) / 100,
+      });
+      return;
+    }
 
     const peakRatio = peakNavUsd / navUsd;
     const initialRatio = initialNavUsd / navUsd;
@@ -158,7 +187,23 @@ export class PortfolioTracker {
    * (e.g. after selling all positions or purging phantom trades).
    */
   realignNavBaselineIfStale(navUsd: number) {
-    if (!this.baselineInitialized || !Number.isFinite(navUsd) || navUsd <= 0) return;
+    if (!this.baselineInitialized || !Number.isFinite(navUsd) || navUsd < 0) return;
+
+    // Unfunded wallet with a phantom baseline (e.g. INITIAL_CASH_USD leftover)
+    if (navUsd < 1 && this.initialValueUsd >= 1) {
+      const oldPeak = this.peakValueUsd;
+      const oldInitial = this.initialValueUsd;
+      this.initialValueUsd = navUsd;
+      this.peakValueUsd = navUsd;
+      logger.info("Portfolio NAV baseline cleared for empty wallet", {
+        navUsd: Math.round(navUsd * 100) / 100,
+        oldPeak: Math.round(oldPeak * 100) / 100,
+        oldInitial: Math.round(oldInitial * 100) / 100,
+      });
+      return;
+    }
+
+    if (navUsd <= 0) return;
 
     const peakRatio = this.peakValueUsd / navUsd;
     const initialRatio = this.initialValueUsd / navUsd;
@@ -248,12 +293,12 @@ export class PortfolioTracker {
   /**
    * Anchor the NAV baseline (initial value + peak) to the real portfolio
    * value. Call once in live mode after the first on-chain wallet sync.
-   * No-op if NAV is non-positive (avoids locking in a bad baseline) or if
-   * already initialized.
+   * Allows zero NAV (unfunded wallet) so PnL stays flat until a deposit.
+   * No-op if already initialized or NAV is non-finite / negative.
    */
   setBaselineNav(navUsd: number) {
     if (this.baselineInitialized) return;
-    if (!Number.isFinite(navUsd) || navUsd <= 0) return;
+    if (!Number.isFinite(navUsd) || navUsd < 0) return;
     this.initialValueUsd = navUsd;
     this.peakValueUsd = navUsd;
     this.baselineInitialized = true;
@@ -861,20 +906,28 @@ export class PortfolioTracker {
 
     const drawdownPct = this.computeDrawdown(totalValueUsd);
 
+    // Until the live baseline is anchored, never report fake PnL against a
+    // placeholder INITIAL_CASH_USD (e.g. −$50 / −100% on an empty wallet).
+    const totalPnl = this.baselineInitialized
+      ? totalValueUsd - this.initialValueUsd
+      : 0;
+    const totalPnlPct =
+      this.baselineInitialized && this.initialValueUsd > 0
+        ? ((totalValueUsd - this.initialValueUsd) / this.initialValueUsd) * 100
+        : 0;
+
     const snap: PortfolioSnapshot = {
       timestamp: Date.now(),
       totalValueUsd,
       cashUsd: this.cashUsd,
       positions: positionSnapshots,
       dailyPnl: 0,
-      totalPnl: totalValueUsd - this.initialValueUsd,
-      totalPnlPct: this.initialValueUsd > 0
-        ? ((totalValueUsd - this.initialValueUsd) / this.initialValueUsd) * 100
-        : 0,
+      totalPnl,
+      totalPnlPct,
       realizedPnl: this.realizedPnlUsd,
       ...(this.baselineInitialized
         ? { initialNavUsd: this.initialValueUsd }
-        : {}),
+        : { initialNavUsd: 0 }),
       gasReserveUsd: this.gasReserveUsd,
       maxDrawdownPct: drawdownPct,
       tradeCount: this.tradeHistory.length,

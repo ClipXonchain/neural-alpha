@@ -1,236 +1,127 @@
 "use client";
 
-import { useState, useEffect, useRef } from "react";
-import dynamic from "next/dynamic";
-import { motion, AnimatePresence } from "framer-motion";
-import { Header } from "@/components/dashboard/Header";
-import { AutonomousPanel } from "@/components/dashboard/AutonomousPanel";
-import { MetricCards } from "@/components/dashboard/MetricCards";
-import { PositionsTable } from "@/components/dashboard/PositionsTable";
-import { TradeHistory } from "@/components/dashboard/TradeHistory";
-import { SignalMonitor } from "@/components/dashboard/SignalMonitor";
-import { RiskPanel } from "@/components/dashboard/RiskPanel";
-import { ActivityFeed } from "@/components/dashboard/ActivityFeed";
-import { WalletPanel } from "@/components/dashboard/WalletPanel";
-import { AgentControls } from "@/components/dashboard/AgentControls";
-import { CommandPanel } from "@/components/dashboard/CommandPanel";
-import { useAgentConnection } from "@/hooks/useAgentConnection";
-import { useReadOnly } from "@/hooks/useReadOnly";
-import { blacklistToken, unblacklistToken } from "@/lib/agent-api";
+import { useEffect } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { useAuthWallet } from "@/hooks/useReadOnly";
+import { Bot, Wallet, Rocket, Compass, ArrowRight, Loader2 } from "lucide-react";
 
-const EquityChart = dynamic(
-  () => import("@/components/dashboard/EquityChart").then((m) => m.EquityChart),
-  { ssr: false }
-);
-const AllocationChart = dynamic(
-  () => import("@/components/dashboard/AllocationChart").then((m) => m.AllocationChart),
-  { ssr: false }
-);
-
-const BOOT_LINES = [
-  "> Initializing Neural Alpha v1.0...",
-  "> Loading eligible BEP-20 token list (149 tokens)...",
-  "> Connecting to CMC Agent Hub...",
-  "> TWAK local signing — self-custody active",
-  "> Strategy engine: RSI + MACD + EMA + BB + F&G + news",
-  "> Risk guardrails: 25% max drawdown, 10 daily trades",
-  "> BSC chain — competition contract verified",
-  "> ██████████████████████████████ ONLINE",
-];
-
-function BootSequence({ onComplete }: { onComplete: () => void }) {
-  const [lines, setLines] = useState<string[]>([]);
-  const onCompleteRef = useRef(onComplete);
-  onCompleteRef.current = onComplete;
+export default function HomePage() {
+  const { wallet, loading } = useAuthWallet();
+  const router = useRouter();
 
   useEffect(() => {
-    let idx = 0;
-    const interval = setInterval(() => {
-      if (idx >= BOOT_LINES.length) {
-        clearInterval(interval);
-        setTimeout(() => onCompleteRef.current(), 600);
-        return;
-      }
-      setLines((prev) => [...prev, BOOT_LINES[idx++]]);
-    }, 180);
-    return () => clearInterval(interval);
-  }, []);
+    if (!loading && wallet) {
+      router.replace("/profile");
+    }
+  }, [wallet, loading, router]);
 
-  return (
-    <motion.div
-      className="fixed inset-0 z-[100] bg-void flex items-center justify-center"
-      exit={{ opacity: 0 }}
-      transition={{ duration: 0.5 }}
-    >
-      <div className="max-w-xl w-full px-8 font-mono text-xs leading-6">
-        <h1
-          className="text-3xl font-bold text-neon text-glow-neon mb-8"
-          style={{ fontFamily: "var(--font-display)" }}
-        >
-          NEURAL ALPHA
-        </h1>
-        {lines.map((line, i) => (
-          <motion.div
-            key={i}
-            initial={{ opacity: 0, x: -10 }}
-            animate={{ opacity: 1, x: 0 }}
-            className={
-              line?.includes("ONLINE")
-                ? "text-neon font-bold text-glow-neon mt-2"
-                : "text-text-secondary"
-            }
-          >
-            {line}
-          </motion.div>
-        ))}
-      </div>
-    </motion.div>
-  );
-}
-
-export default function DashboardPage() {
-  const [booting, setBooting] = useState(true);
-  const readOnly = useReadOnly();
-  const {
-    connected,
-    loading,
-    state,
-    wallet,
-    agentConfig,
-    error,
-    handleStart,
-    handleStop,
-    handleSyncWallet,
-    handleResync,
-    handleRegister,
-    handleSwitchWallet,
-    handleSaveConfig,
-    handleSellPosition,
-  } = useAgentConnection();
-
-  if (loading || !state) {
+  if (loading) {
     return (
       <div className="min-h-screen bg-void flex items-center justify-center">
-        <p className="text-sm font-mono text-text-muted animate-pulse">
-          Connecting to agent...
-        </p>
+        <Loader2 className="size-6 text-neon animate-spin" />
       </div>
     );
   }
 
   return (
-    <>
-      <AnimatePresence>
-        {booting && <BootSequence onComplete={() => setBooting(false)} />}
-      </AnimatePresence>
-
-      {!booting && (
-        <div className="min-h-screen grid-bg scanlines relative">
-          <div className="pointer-events-none fixed inset-0 z-0">
-            <div className="absolute top-1/4 left-1/4 w-[500px] h-[500px] rounded-full bg-neon/[0.02] blur-[120px]" />
-            <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] rounded-full bg-cyan/[0.02] blur-[120px]" />
-          </div>
-
-          <div className="relative z-10">
-            <Header
-              state={state}
-              onStart={handleStart}
-              onStop={handleStop}
-              connected={connected}
-              error={error}
-              readOnly={readOnly}
-            />
-
-            <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
-              {!connected && error && (
-                <div className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-2 text-xs font-mono text-warning">
-                  {error}
-                </div>
-              )}
-
-              <AutonomousPanel state={state} />
-
-              <MetricCards state={state} />
-
-              {/* Charts row */}
-              <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-                <EquityChart state={state} />
-                <AllocationChart state={state} onRefresh={readOnly ? undefined : handleResync} />
-              </div>
-
-              {/* Trades + Agent Brain — main monitoring area */}
-              <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-                <TradeHistory trades={state.trades} />
-                <ActivityFeed activity={state.activity} />
-              </div>
-
-              {/* Open Positions — grouped with trade monitoring */}
-              <PositionsTable
-                positions={state.positions}
-                readOnly={readOnly}
-                connected={connected}
-                onSell={readOnly ? undefined : handleSellPosition}
-              />
-
-              {/* Wallet + Risk */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <WalletPanel
-                  wallet={wallet}
-                  mode={state.mode}
-                  connected={connected}
-                  onSync={handleSyncWallet}
-                  onRegister={handleRegister}
-                  onSwitchMode={handleSwitchWallet}
-                  readOnly={readOnly}
-                />
-                <RiskPanel state={state} />
-              </div>
-
-              {/* Signals */}
-              <SignalMonitor
-                signals={state.signals}
-                lastSignalRefreshAt={state.lastSignalRefreshAt}
-                signalRefreshSec={state.signalRefreshSec}
-                readOnly={readOnly}
-                onBlacklist={readOnly ? undefined : async (sym) => { await blacklistToken(sym); }}
-                onUnblacklist={readOnly ? undefined : async (sym) => { await unblacklistToken(sym); }}
-              />
-
-              {/* Agent Controls — hidden on public/read-only deployments */}
-              {!readOnly && (
-                <AgentControls
-                  connected={connected}
-                  config={agentConfig ? {
-                    mode: agentConfig.mode || state.mode,
-                    strategy: agentConfig.strategy,
-                    maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 100,
-                    tradeIntervalMs: agentConfig.tradeIntervalMs ?? 3600000,
-                    maxDrawdownPct: agentConfig.maxDrawdownPct,
-                    slippageTolerance: agentConfig.slippageTolerance ?? 1,
-                    maxDailyTrades: agentConfig.maxDailyTrades,
-                    maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 3,
-                    baseCurrency: agentConfig.baseCurrency,
-                    swapCurrencies: agentConfig.swapCurrencies,
-                  } : null}
-                  onSave={handleSaveConfig}
-                />
-              )}
-
-              <footer className="flex flex-wrap items-center justify-between gap-2 py-4 border-t border-border-dim text-[10px] font-mono text-text-muted">
-                <span>Neural Alpha</span>
-                <div className="flex items-center gap-4">
-                  <span>{connected ? "Live agent" : "Demo"}</span>
-                  <span>TWAK self-custody</span>
-                  <span>CMC data</span>
-                </div>
-              </footer>
-            </main>
-          </div>
-
-          {/* Floating Command Assistant — hidden on public/read-only deployments */}
-          {!readOnly && <CommandPanel connected={connected} />}
+    <div className="min-h-screen bg-void grid-bg flex flex-col">
+      <header className="px-6 py-5 flex items-center justify-between max-w-5xl mx-auto w-full">
+        <div className="flex items-center gap-2">
+          <Bot className="size-5 text-neon" />
+          <span
+            className="font-bold tracking-tight text-text-primary"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            Neural Alpha
+          </span>
         </div>
-      )}
-    </>
+        <Link
+          href="/explore"
+          className="text-xs text-cyan hover:underline font-mono"
+        >
+          Explore agents
+        </Link>
+      </header>
+
+      <main className="flex-1 flex items-center justify-center px-4 pb-16">
+        <div className="max-w-xl w-full text-center">
+          <h1
+            className="text-4xl md:text-5xl font-bold text-text-primary mb-4"
+            style={{ fontFamily: "var(--font-display)" }}
+          >
+            Deploy your autonomous
+            <span className="text-neon text-glow-neon"> BSC agent</span>
+          </h1>
+          <p className="text-text-secondary text-sm md:text-base mb-10 leading-relaxed">
+            Connect your wallet, deploy an isolated self-custodial trading agent,
+            fund it with USDT, and control it from your dashboard. Live execution
+            on BNB Smart Chain only: no paper trading.
+          </p>
+
+          <div className="flex flex-col sm:flex-row gap-3 justify-center mb-12">
+            <Link
+              href="/login"
+              className="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl bg-neon/15 text-neon border border-neon/30 font-semibold hover:bg-neon/25 transition-colors"
+            >
+              <Wallet className="size-4" />
+              Connect wallet
+              <ArrowRight className="size-4" />
+            </Link>
+            <Link
+              href="/login?next=/deploy"
+              className="inline-flex items-center justify-center gap-2 px-6 py-3.5 rounded-xl glass-raised text-text-primary border border-border-dim font-semibold hover:border-cyan/30 transition-colors"
+            >
+              <Rocket className="size-4 text-cyan" />
+              Deploy agent
+            </Link>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 text-left">
+            {[
+              {
+                step: "1",
+                title: "Connect",
+                desc: "Sign in with your BSC wallet (SIWE). You stay in control of ownership.",
+              },
+              {
+                step: "2",
+                title: "Deploy",
+                desc: "Pay a small BNB fee and get a dedicated agent + trading wallet.",
+              },
+              {
+                step: "3",
+                title: "Trade live",
+                desc: "Fund the agent wallet with USDT + BNB gas. Monitor and configure from your dashboard.",
+              },
+            ].map((item) => (
+              <div
+                key={item.step}
+                className="glass-raised rounded-xl p-4 border border-border-dim/60"
+              >
+                <span className="text-[10px] font-mono text-cyan font-bold">
+                  STEP {item.step}
+                </span>
+                <h3 className="text-sm font-semibold text-text-primary mt-1 mb-1">
+                  {item.title}
+                </h3>
+                <p className="text-[11px] text-text-muted leading-relaxed">
+                  {item.desc}
+                </p>
+              </div>
+            ))}
+          </div>
+
+          <Link
+            href="/explore"
+            className="inline-flex items-center gap-1.5 mt-8 text-xs text-text-muted hover:text-cyan transition-colors"
+          >
+            <Compass className="size-3.5" />
+            Browse public agents
+          </Link>
+        </div>
+      </main>
+    </div>
   );
+
 }

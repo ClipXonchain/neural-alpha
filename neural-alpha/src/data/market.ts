@@ -1,6 +1,7 @@
 import { logger } from "../utils/logger.js";
 import type { MarketData, PricePoint } from "../utils/types.js";
 import { BSC_CHAIN } from "../config.js";
+import { recordMarketCap } from "./market-cap-cache.js";
 
 /**
  * Market data provider that uses CMC Agent Hub via x402 pay-per-request
@@ -19,7 +20,15 @@ const priceHistory: Map<string, PricePoint[]> = new Map();
 const realOhlcvSymbols = new Set<string>();
 const MAX_HISTORY_LENGTH = 200;
 
-export function recordPrice(symbol: string, price: number, volume?: number) {
+export function recordPrice(
+  symbol: string,
+  price: number,
+  volume?: number,
+  marketCap?: number
+) {
+  if (marketCap != null && marketCap > 0) {
+    recordMarketCap(symbol, marketCap);
+  }
   const now = Date.now();
   if (!priceHistory.has(symbol)) {
     priceHistory.set(symbol, []);
@@ -108,7 +117,7 @@ export function buildMarketData(
   price: number,
   extras?: Partial<MarketData>
 ): MarketData {
-  recordPrice(symbol, price, extras?.volume24h);
+  recordPrice(symbol, price, extras?.volume24h, extras?.marketCap);
   return {
     symbol,
     price,

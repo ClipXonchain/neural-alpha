@@ -16,16 +16,21 @@ out/
 
 # Environment & secrets — NEVER commit
 .env
+.env.example
 .env.local
 .env.*.local
 .env.development.local
 .env.test.local
 .env.production.local
 
-# TWAK wallet/credentials (if copied into repo by mistake)
+# TWAK wallet/credentials (legacy — if copied into repo by mistake)
 .twak/
 credentials.json
 wallet.json
+
+# Self-custodial agent keystores (never commit)
+data/agents/
+**/keystore.json
 
 # Logs
 logs/

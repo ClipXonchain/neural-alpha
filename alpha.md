@@ -1,5 +1,9 @@
 # BNB Alpha — Common Tickers (BSC)
 
+> **Live source:** The agent syncs the full active Binance Alpha BSC list from  
+> `GET /bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list`  
+> (~300+ tokens, refreshed every 6h). This file is a historical snapshot.
+
 Filtered list of **BNB Alpha** tokens on **BNB Smart Chain (BSC)**. Each row maps a ticker to its contract address (CA).
 
 

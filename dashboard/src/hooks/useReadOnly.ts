@@ -1,26 +1,61 @@
 "use client";
 
-import { useState } from "react";
-
-/** Hostnames that always render as monitoring-only (no agent controls). */
-const PUBLIC_DASHBOARD_HOSTS = new Set(["agents.clipx.app"]);
-
-export function isPublicDashboardHost(hostname: string): boolean {
-  return PUBLIC_DASHBOARD_HOSTS.has(hostname.toLowerCase());
-}
+import { useState, useEffect } from "react";
 
 /**
- * True on public deployments (agents.clipx.app) or when NEXT_PUBLIC_READONLY=true.
- * Hostname is checked on first client render so production builds work even if the
- * env var was missing at `next build` time.
+ * Read-only when:
+ * - Explicit forcePublic (public viewer)
+ * - Logged-in user is NOT the agent owner (isOwner === false)
+ * - Global NEXT_PUBLIC_READONLY=true AND ownership is unknown/not owner
+ *
+ * Owners always get full controls, even if a public-monitor env flag is set.
  */
-export function useReadOnly(): boolean {
-  const [readOnly] = useState(() => {
-    if (process.env.NEXT_PUBLIC_READONLY === "true") return true;
-    if (typeof window !== "undefined") {
-      return isPublicDashboardHost(window.location.hostname);
-    }
-    return false;
+export function useReadOnly(opts?: {
+  isOwner?: boolean | null;
+  forcePublic?: boolean;
+}): boolean {
+  const [envReadonly] = useState(() => {
+    return process.env.NEXT_PUBLIC_READONLY === "true";
   });
-  return readOnly;
+
+  if (opts?.forcePublic) return true;
+  // Confirmed owner → always full control
+  if (opts?.isOwner === true) return false;
+  // Confirmed non-owner → monitoring only
+  if (opts?.isOwner === false) return true;
+  // Ownership unknown — fall back to global public-monitor flag
+  return envReadonly;
+}
+
+export function useAuthWallet() {
+  const [wallet, setWallet] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/auth/siwe")
+      .then((r) => r.json())
+      .then((d: { loggedIn?: boolean; wallet?: string }) => {
+        if (!cancelled) {
+          setWallet(d.loggedIn && d.wallet ? d.wallet : null);
+          setLoading(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setWallet(null);
+          setLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const logout = async () => {
+    await fetch("/api/auth/siwe", { method: "DELETE" });
+    setWallet(null);
+  };
+
+  return { wallet, loading, logout, setWallet };
 }

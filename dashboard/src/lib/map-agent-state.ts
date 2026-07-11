@@ -47,19 +47,15 @@ function fallbackAutonomous(snap: Track1Snapshot): AutonomousStatus {
     autoExitEnabled: false,
     strategy: snap.config.strategy ?? "medium",
     failedSwapCooldowns: [],
-    competitionNudge: tradesToday === 0,
   };
 }
 
 function isConfirmedTrade(
   t: Track1Snapshot["trades"][number],
-  mode: string
+  _mode: string
 ): boolean {
   if (!t.success || !t.txHash) return false;
   if (t.txHash.startsWith("binance-web3-")) return true;
-  if (mode === "paper") {
-    return t.txHash.startsWith("paper-") || ON_CHAIN_TX_PATTERN.test(t.txHash);
-  }
   return ON_CHAIN_TX_PATTERN.test(t.txHash);
 }
 
@@ -288,8 +284,8 @@ function mapSignals(snap: Track1Snapshot): Signal[] {
       price: roundTokenPrice(agentPrice),
       change24h: roundNum(momentum, 2),
       volumeRatio: metrics?.volumeRatio ?? null,
-      newsScore: metrics?.newsScore ?? null,
-      newsArticles: metrics?.newsArticles ?? 0,
+      trendingRank: metrics?.trendingRank ?? null,
+      trendingChange5m: metrics?.trendingChange5m ?? null,
       icon: normalizeTokenIconUrl(snap.tokenIcons?.[symbol]),
       livePrice: liveOk ? roundTokenPrice(liveRaw!) : undefined,
       liveChange24h: liveOk && live?.change24hPct != null ? roundNum(live.change24hPct, 2) : undefined,
@@ -441,7 +437,7 @@ export function enrichStateWithWallet(
       continue;
     }
     if (value < MIN_POSITION_USD) continue; // skip dust / airdrop spam
-    // Competition-style tickers only (hides Chinese spam/airdrop rows in Open Positions)
+    // Allowlisted tickers only (hides spam/airdrop rows in Open Positions)
     if (!/^[A-Z0-9]{1,12}$/.test(symbol) && !prevBySymbol.has(symbol)) continue;
     tokens.push({ symbol, value, qty: p.remainQty, price: p.price });
     value24hAgo += priorValue(value, p.percentChange24h ?? 0);
@@ -498,10 +494,15 @@ export function enrichStateWithWallet(
   // snapshots track its own bookkeeping value, but the headline Portfolio Value
   // is the on-chain scan (nav). Shift the whole curve by the delta so the latest
   // point equals Portfolio Value while preserving the curve's shape and PnL.
-  const initialNav =
-    state.initialNavUsd > 0
+  //
+  // Unfunded / never-deposited wallets: do not invent a baseline from
+  // portfolioValue − totalPnl (that recreates phantom −$50 / −100% PnL).
+  const hasRealBaseline = state.initialNavUsd > 0 || state.portfolioValue >= 1;
+  const initialNav = hasRealBaseline
+    ? state.initialNavUsd > 0
       ? state.initialNavUsd
-      : Math.max(0, state.portfolioValue - state.totalPnl);
+      : Math.max(0, state.portfolioValue - state.totalPnl)
+    : 0;
   const lastVal = state.equityCurve[state.equityCurve.length - 1]?.value;
   const offset = lastVal !== undefined ? nav - lastVal : 0;
   const equityCurve =
@@ -520,7 +521,8 @@ export function enrichStateWithWallet(
     (sum, p) => sum + (p.entryUnknown ? 0 : p.pnl),
     0
   );
-  const totalPnl = roundNum(nav - initialNav, 2);
+  const totalPnl =
+    initialNav > 0 ? roundNum(nav - initialNav, 2) : 0;
   const totalPnlPct =
     initialNav > 0 ? roundNum((totalPnl / initialNav) * 100, 2) : 0;
 
@@ -557,20 +559,30 @@ export function mapTrack1ToDashboard(
   const confirmedTrades = snap.trades.filter((t) => isConfirmedTrade(t, snap.mode));
   const closedStats = computeClosedTradeStats(snap.trades, snap.mode);
 
+  const nav = snap.portfolio.totalValueUsd;
+  const reportedInitial = snap.portfolio.initialNavUsd;
+  // Prefer explicit baseline; never invent one that implies −100% on $0 NAV.
+  const initialNavUsd =
+    reportedInitial !== undefined && reportedInitial !== null
+      ? roundNum(reportedInitial, 2)
+      : nav >= 1
+        ? roundNum(Math.max(0, nav - snap.portfolio.totalPnl), 2)
+        : 0;
+  const totalPnl =
+    initialNavUsd > 0 ? roundNum(snap.portfolio.totalPnl, 2) : 0;
+  const totalPnlPct =
+    initialNavUsd > 0 ? roundNum(snap.portfolio.totalPnlPct, 2) : 0;
+
   const base: AgentState = {
     status: snap.running ? "running" : "paused",
-    mode: snap.mode as "live" | "paper",
+    mode: "live",
     uptime,
     cycleCount: snap.cycleCount,
-    portfolioValue: roundNum(snap.portfolio.totalValueUsd, 2),
+    portfolioValue: roundNum(nav, 2),
     cashBalance: roundNum(snap.portfolio.cashUsd, 2),
-    initialNavUsd: roundNum(
-      snap.portfolio.initialNavUsd
-        ?? Math.max(0, snap.portfolio.totalValueUsd - snap.portfolio.totalPnl),
-      2
-    ),
-    totalPnl: roundNum(snap.portfolio.totalPnl, 2),
-    totalPnlPct: roundNum(snap.portfolio.totalPnlPct, 2),
+    initialNavUsd,
+    totalPnl,
+    totalPnlPct,
     realizedPnl: roundNum(
       closedStats.realizedPnl || snap.portfolio.realizedPnl || 0,
       2

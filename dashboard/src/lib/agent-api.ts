@@ -1,7 +1,24 @@
-/** Neural Alpha agent HTTP API — proxied via Next.js rewrites at /api/agent/* */
+/** Neural Alpha agent HTTP API — proxied via Next.js at /api/agent/* */
 
 const AGENT_BASE =
   process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
+
+/** When set, all requests route to /api/agent/{agentId}/... */
+let activeAgentId: string | null = null;
+
+export function setActiveAgentId(id: string | null) {
+  activeAgentId = id;
+}
+
+export function getActiveAgentId(): string | null {
+  return activeAgentId;
+}
+
+function agentUrl(path: string): string {
+  const p = path.startsWith("/") ? path : `/${path}`;
+  if (activeAgentId) return `${AGENT_BASE}/${activeAgentId}${p}`;
+  return `${AGENT_BASE}${p}`;
+}
 
 export interface AutonomousStatus {
   phase: "stopped" | "warming" | "scanning" | "idle" | "blocked";
@@ -26,7 +43,6 @@ export interface AutonomousStatus {
   autoExitEnabled: boolean;
   strategy: string;
   failedSwapCooldowns: Array<{ symbol: string; remainingMin: number }>;
-  competitionNudge: boolean;
 }
 
 export interface Track1Snapshot {
@@ -40,7 +56,8 @@ export interface Track1Snapshot {
   prices: Record<string, number>;
   config: {
     mode?: string;
-    strategy?: "safe" | "medium" | "momentum";
+    strategy?: "safe" | "medium" | "momentum" | "bstocks";
+    agentUniverse?: "spot" | "alpha" | "both" | "bstocks";
     maxDrawdownPct: number;
     maxDailyTrades: number;
     baseCurrency: string;
@@ -48,6 +65,9 @@ export interface Track1Snapshot {
     maxPositionSizeUsd?: number;
     tradeIntervalMs?: number;
     slippageTolerance?: number;
+    minGasReserveUsd?: number;
+    bscGasPriceGwei?: number;
+    bscSwapGasLimit?: number;
     maxPortfolioTokens?: number;
     startupCooldownMs?: number;
     signalRefreshMs?: number;
@@ -110,8 +130,8 @@ export interface Track1Snapshot {
       momentum: number | null;
       atrPct: number | null;
       score: number | null;
-      newsScore?: number | null;
-      newsArticles?: number;
+      trendingRank?: number | null;
+      trendingChange5m?: number | null;
       confidence?: number | null;
       rsi?: number | null;
       macd?: number | null;
@@ -124,7 +144,7 @@ export interface Track1Snapshot {
       aiAgrees?: boolean;
     }
   >;
-  newsCount?: number;
+  trendingCount?: number;
   autonomous?: AutonomousStatus;
   startupCooldownRemainingMs?: number;
   lastSignalRefreshAt?: number | null;
@@ -152,8 +172,6 @@ export interface WalletSnapshot {
   usdtBalance: number;
   walletMode: string;
   walletState: string;
-  registered: boolean;
-  registrationOpen: boolean;
   binancePositions?: Array<{
     symbol: string;
     name: string;
@@ -176,7 +194,7 @@ export interface LogEntry {
 }
 
 async function agentFetch<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${AGENT_BASE}${path}`, {
+  const res = await fetch(agentUrl(path), {
     ...init,
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
@@ -247,19 +265,6 @@ export async function sendCommand(command: string): Promise<CommandResult> {
   });
 }
 
-export async function registerCompetition(): Promise<Record<string, unknown>> {
-  return agentFetch("/competition/register", { method: "POST" });
-}
-
-export async function switchWalletMode(
-  mode: "local" | "walletconnect"
-): Promise<Record<string, unknown>> {
-  return agentFetch("/wallet/mode", {
-    method: "POST",
-    body: JSON.stringify({ mode }),
-  });
-}
-
 export async function saveAgentConfig(
   updates: Record<string, unknown>
 ): Promise<{ ok: boolean; error?: string }> {
@@ -283,13 +288,14 @@ export async function unblacklistToken(symbol: string): Promise<{ ok: boolean; r
   });
 }
 
-const SSE_BASE = process.env.NEXT_PUBLIC_AGENT_SSE_URL || "/api/agent";
-
 export function subscribeAgentEvents(
   onState: (state: Track1Snapshot) => void,
   onLog?: (log: LogEntry) => void
 ): () => void {
-  const es = new EventSource(`${SSE_BASE}/events`);
+  const url =
+    process.env.NEXT_PUBLIC_AGENT_SSE_URL ||
+    agentUrl("/events");
+  const es = new EventSource(url);
 
   es.addEventListener("state", (e) => {
     try {
@@ -310,13 +316,37 @@ export function subscribeAgentEvents(
   return () => es.close();
 }
 
+export async function checkAgentHealth(): Promise<boolean> {
+  try {
+    const res = await fetch(agentUrl("/health"), {
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return false;
+    const data = (await res.json()) as { status?: string; initialized?: boolean };
+    return data.status === "ok" && data.initialized !== false;
+  } catch {
+    return false;
+  }
+}
+
 export async function checkAgentConnection(): Promise<boolean> {
+  if (await checkAgentHealth()) return true;
   try {
     await fetchAgentState();
     return true;
   } catch {
     return false;
   }
+}
+
+/** Start the OS agent process (multi-tenant platform). */
+export async function startAgentProcess(
+  agentId: string
+): Promise<{ ok: boolean; error?: string }> {
+  const res = await fetch(`/api/agents/${agentId}/start`, { method: "POST" });
+  const data = (await res.json().catch(() => ({}))) as { error?: string };
+  if (!res.ok) return { ok: false, error: data.error || "Start failed" };
+  return { ok: true };
 }
 
 export { AGENT_BASE };

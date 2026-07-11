@@ -335,7 +335,7 @@ All guardrails are enforced in code (`neural-alpha/src/risk/manager.ts`), not pr
 | Min trade size | $5 | Dust prevention |
 | Max position size | $100 | Per-trade cap |
 | Confidence gate | 55% | Weak signals filtered |
-| Token allowlist | 149 BEP-20 | Ineligible tokens rejected |
+| Token allowlist | Binance Spot ∪ Alpha | Unknown coins rejected |
 | Honeypot check | TWAK `check_token_risk` | Blocked before every live swap |
 | Startup cooldown | 120s | Autonomous trades paused after restart |
 | Failed swap cooldown | 30 min | Same token not retried immediately |
@@ -588,14 +588,15 @@ neural-alpha/
 
 | Command | Description |
 |---|---|
-| `npm run dev` | Start agent + dashboard together (development) |
+| `npm run dev` | Dashboard only |
+| `npm run dev:all` | Market feed + agent + dashboard |
+| `npm run market-feed` | Shared market snapshot (CMC once → all agents) |
 | `npm run agent` | Agent only |
 | `npm run agent:dev` | Agent with hot reload |
 | `npm run dashboard` | Dashboard dev server |
 | `npm run build` | Build all workspaces |
-| `npm run register` | Competition registration helper |
 | `npm run prod:build` | Production build (agent + dashboard) |
-| `npm run prod:start` | Start via PM2 |
+| `npm run prod:start` | Start via PM2 (feed + agent + dashboard) |
 | `npm run prod:stop` | Stop via PM2 |
 | `npm run prod:restart` | Restart via PM2 |
 | `npm run prod:logs` | PM2 log viewer |

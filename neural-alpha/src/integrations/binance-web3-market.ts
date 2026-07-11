@@ -301,6 +301,52 @@ export async function enrichSymbolsFromBinance(
   return { liveQuotes, icons, ohlcvLoaded };
 }
 
+/**
+ * Resolve token logos for a symbol list.
+ * Alpha API icons first, then Binance Web3 meta (cached), skipping broken Trust Wallet CDN.
+ */
+export async function buildTokenIconMap(
+  symbols: string[],
+  opts: { alphaIcon?: (symbol: string) => string | undefined } = {}
+): Promise<Record<string, string>> {
+  const icons: Record<string, string> = {};
+  const needMeta: { symbol: string; address: string }[] = [];
+
+  for (const raw of symbols) {
+    const symbol = raw.toUpperCase();
+    const alphaRaw = opts.alphaIcon?.(symbol);
+    if (alphaRaw) {
+      const normalized = normalizeBinanceIcon(alphaRaw);
+      if (normalized) {
+        icons[symbol] = normalized;
+        iconCache.set(symbol, normalized);
+        continue;
+      }
+    }
+    const cached = getCachedIcon(symbol);
+    if (cached) {
+      icons[symbol] = cached;
+      continue;
+    }
+    const address = resolveAddress(symbol);
+    if (address) needMeta.push({ symbol, address });
+  }
+
+  if (needMeta.length > 0) {
+    await mapPool(
+      needMeta,
+      async ({ symbol, address }) => {
+        const meta = await fetchTokenMeta(address);
+        if (meta?.icon) icons[symbol] = meta.icon;
+        return null;
+      },
+      MARKET_CONCURRENCY
+    );
+  }
+
+  return icons;
+}
+
 /** All symbols with a static BEP-20 contract in our map. */
 export function listKnownBscTokenSymbols(): string[] {
   return Object.keys(BSC_TOKEN_ADDRESSES);
