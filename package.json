@@ -2,7 +2,7 @@
   "name": "neural-alpha",
   "version": "1.0.0",
   "private": true,
-  "description": "Neural Alpha — autonomous BSC trading agent for BNB Hack Track 1",
+  "description": "Neural Alpha — public multi-tenant platform for autonomous BSC trading agents",
   "workspaces": [
     "neural-alpha",
     "dashboard"

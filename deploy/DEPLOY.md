@@ -2,7 +2,9 @@
 
 **Stack:** Node.js 20+ · PM2 · Nginx · Let's Encrypt · Neon Postgres · Self-custodial EVM wallet (viem + Binance Web3 aggregator)
 
-Neural Alpha is a **multi-tenant platform**: users SIWE-login, deploy agents, fund encrypted trading wallets, and control them from the dashboard. A shared **market feed** polls CMC/Binance once for all agents.
+Neural Alpha is a **public multi-tenant agents platform**: users SIWE-login, deploy agents, fund encrypted trading wallets, and control them from the dashboard. A shared **market feed** polls CMC/Binance once for all agents.
+
+Platform overview: [`README.md`](../README.md) · AI agent notes: [`AGENTS.md`](../AGENTS.md)
 
 ---
 

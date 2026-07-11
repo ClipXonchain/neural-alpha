@@ -1,11 +1,14 @@
-# BNB Alpha — Common Tickers (BSC)
+# Binance Alpha — Reference Ticker Snapshot (BSC)
 
-> **Live source:** The agent syncs the full active Binance Alpha BSC list from  
+> **This file is a static reference only.** The platform does not read it at runtime.
+>
+> **Live source:** Agents sync the full active Binance Alpha BSC list from  
 > `GET /bapi/defi/v1/public/wallet-direct/buw/wallet/cex/alpha/all/token/list`  
-> (~300+ tokens, refreshed every 6h). This file is a historical snapshot.
+> (~300+ tokens, refreshed every 6 hours via `BINANCE_ALPHA_CACHE_MS`).
+>
+> See `neural-alpha/src/integrations/binance-alpha-tokens.ts` and [`AGENTS.md`](./AGENTS.md).
 
-Filtered list of **BNB Alpha** tokens on **BNB Smart Chain (BSC)**. Each row maps a ticker to its contract address (CA).
-
+Filtered snapshot of **Binance Alpha** tokens on **BNB Smart Chain (BSC)**. Each row maps a ticker to its contract address (CA).
 
 | #   | Ticker    | Contract Address (CA)                        |
 | --- | --------- | -------------------------------------------- |
@@ -66,5 +69,4 @@ Filtered list of **BNB Alpha** tokens on **BNB Smart Chain (BSC)**. Each row map
 | 55  | ZAMA      | `0x6907a5986c4950bdaf2f81828ec0737ce787519f` |
 | 56  | 币安人生      | `0x924fa68a0fc644485b8df8abfa0a41c2e7744444` |
 
-
-**Total:** 56 entries (55 unique tickers; SLX has two contract addresses)
+**Total:** 56 entries in this snapshot (55 unique tickers; SLX has two contract addresses). The live Alpha universe is larger and updated automatically.
