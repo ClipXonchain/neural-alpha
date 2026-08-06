@@ -119,6 +119,7 @@ export async function llmParseCommand(
         raw,
         action: parsed.action,
         symbol: parsed.symbol,
+        amount: parsed.amount,
         model: llmModel,
       });
       return parsed;

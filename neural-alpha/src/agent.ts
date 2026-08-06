@@ -1271,35 +1271,51 @@ export class TradingAgent {
       // only when the operator specifies an explicit USD amount.
       if (order.side === "sell") {
         const onChainBalance = await this.getOnChainTokenBalance(order.fromToken);
-        if (onChainBalance !== null && onChainBalance > 0) {
-          const partialUsd =
-            opts.amountUsd !== undefined && opts.amountUsd > 0;
-          const sellAll = !partialUsd || opts.sellAll === true;
-          const tracked = order.fromTokenAmount ?? onChainBalance;
-          const sellable = sellAll
-            ? onChainBalance
-            : Math.min(tracked, onChainBalance);
-          // Full exits: floor to 8 decimals (no 0.1% haircut — that left ~$0.05
-          // dust on every ~$50 sell). Partial sells keep a tiny margin.
-          const safeAmount = sellAll
-            ? floorTokenAmount(sellable, 8)
-            : floorTokenAmount(sellable * 0.999, 8);
-          if (safeAmount > 0) {
-            logger.info("Reconciled sell amount to on-chain balance", {
-              symbol: order.symbol,
-              sellAll,
-              trackedAmount: tracked,
-              onChainBalance,
-              sellAmount: safeAmount,
-            });
-            order.fromTokenAmount = safeAmount;
-          }
-        } else {
-          logger.warn("Could not resolve on-chain balance for sell — using tracked amount", {
+        const tracked = order.fromTokenAmount ?? 0;
+
+        if (onChainBalance === null || onChainBalance <= 0) {
+          return this.sellBlockedResult(
+            order,
+            `Wallet balance for ${order.symbol} not confirmed on-chain` +
+              (tracked > 0 ? ` (bookkeeping shows ${tracked.toFixed(4)})` : "") +
+              " — run dashboard resync or verify on Binance Web3"
+          );
+        }
+
+        const partialUsd =
+          opts.amountUsd !== undefined && opts.amountUsd > 0;
+        const sellAll = !partialUsd || opts.sellAll === true;
+        const sellable = sellAll
+          ? onChainBalance
+          : Math.min(tracked > 0 ? tracked : onChainBalance, onChainBalance);
+        const safeAmount = sellAll
+          ? floorTokenAmount(sellable, 8)
+          : floorTokenAmount(sellable * 0.999, 8);
+
+        if (safeAmount <= 0) {
+          return this.sellBlockedResult(
+            order,
+            `Verified ${order.symbol} balance is too small to sell (${onChainBalance})`
+          );
+        }
+
+        if (tracked > 0 && Math.abs(tracked - onChainBalance) / onChainBalance > 0.05) {
+          logger.warn("Sell amount adjusted — bookkeeping differs from wallet", {
             symbol: order.symbol,
-            trackedAmount: order.fromTokenAmount,
+            trackedAmount: tracked,
+            onChainBalance,
+            sellAmount: safeAmount,
           });
         }
+
+        logger.info("Reconciled sell amount to verified wallet balance", {
+          symbol: order.symbol,
+          sellAll,
+          trackedAmount: tracked,
+          onChainBalance,
+          sellAmount: safeAmount,
+        });
+        order.fromTokenAmount = safeAmount;
       }
 
       const quoteParams = buildQuoteParams(order);
@@ -2076,8 +2092,7 @@ export class TradingAgent {
    */
   /**
    * Best-effort lookup of the wallet's actual transferable balance for a single
-   * token symbol. Prefers the direct per-token balance call, then falls back to
-   * scanning the full on-chain portfolio. Returns null when neither is available.
+   * token. TWAK per-token → TWAK portfolio → Binance Web3 cache → live fetch.
    */
   private async getOnChainTokenBalance(symbol: string): Promise<number | null> {
     const sym = symbol.toUpperCase();
@@ -2086,6 +2101,10 @@ export class TradingAgent {
       try {
         const bal = await this.mcp.getTokenBalance(BSC_CHAIN, sym);
         if (bal && typeof bal.amount === "number" && bal.amount > 0) {
+          logger.info("Sell balance resolved via TWAK getTokenBalance", {
+            symbol: sym,
+            amount: bal.amount,
+          });
           return bal.amount;
         }
       } catch (err) {
@@ -2101,6 +2120,10 @@ export class TradingAgent {
         const holdings = await this.mcp.getPortfolio(BSC_CHAIN);
         const match = holdings?.find((h) => h.symbol.toUpperCase() === sym);
         if (match && typeof match.amount === "number" && match.amount > 0) {
+          logger.info("Sell balance resolved via TWAK getPortfolio", {
+            symbol: sym,
+            amount: match.amount,
+          });
           return match.amount;
         }
       } catch (err) {
@@ -2111,7 +2134,63 @@ export class TradingAgent {
       }
     }
 
+    const cached = this._cachedWalletInfo?.binancePositions?.find(
+      (p) => p.symbol.toUpperCase() === sym
+    );
+    if (cached && cached.remainQty > 0) {
+      logger.info("Sell balance resolved via Binance Web3 cache", {
+        symbol: sym,
+        amount: cached.remainQty,
+      });
+      return cached.remainQty;
+    }
+
+    const address = this.currentWalletAddress();
+    if (address) {
+      try {
+        const positions = await fetchWalletPositions(address);
+        if (positions.length > 0) {
+          this.primeWalletCache(address, positions);
+          const live = positions.find((p) => p.symbol.toUpperCase() === sym);
+          if (live && live.remainQty > 0) {
+            logger.info("Sell balance resolved via Binance Web3 live fetch", {
+              symbol: sym,
+              amount: live.remainQty,
+            });
+            return live.remainQty;
+          }
+        }
+      } catch (err) {
+        logger.warn("Binance Web3 balance lookup failed during sell", {
+          symbol: sym,
+          error: String(err),
+        });
+      }
+    }
+
     return null;
+  }
+
+  private sellBlockedResult(
+    order: import("./utils/types.js").TradeOrder,
+    error: string
+  ): import("./utils/types.js").TradeResult {
+    logger.warn("Sell blocked — wallet balance not verified", {
+      symbol: order.symbol,
+      error,
+      trackedAmount: order.fromTokenAmount,
+    });
+    brainTradeSkipped(order.symbol, "sell", error);
+    return {
+      orderId: order.id,
+      success: false,
+      fromToken: order.fromToken,
+      toToken: order.toToken,
+      fromAmount: "0",
+      priceAtExecution: getLatestPrice(order.symbol) ?? 0,
+      timestamp: Date.now(),
+      error,
+    };
   }
 
   private async syncOnChainPositions(): Promise<{

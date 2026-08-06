@@ -1,5 +1,6 @@
 import type { AgentConfig, RiskCheck, TradeSignal, PortfolioSnapshot } from "../utils/types.js";
 import { isEligibleToken, isStablecoin, isTradableToken, MIN_POSITION_VALUE_USD } from "../config.js";
+import { hasBscSwapAddress } from "../integrations/bsc-token-addresses.js";
 import { isUserBlacklisted } from "./token-blacklist.js";
 import { getLatestPrice } from "../data/market.js";
 import { PortfolioTracker } from "./portfolio.js";
@@ -37,8 +38,13 @@ export class RiskManager {
       ? (tradeAmountUsd / this.portfolio.getSpendableCash()) * 100
       : 100;
 
-    // 1. Eligible + tradable (not blocklisted / sub-min-price)
-    if (!isEligibleToken(signal.symbol)) {
+    // 1. Eligible + tradable (not blocklisted / sub-min-price).
+    // Manual trades only need a routable BEP-20 contract — not the competition allowlist.
+    if (
+      !opts.manual &&
+      !isEligibleToken(signal.symbol) &&
+      !hasBscSwapAddress(signal.symbol)
+    ) {
       violations.push(`Token ${signal.symbol} is NOT on the eligible BEP-20 list`);
     }
     if (
@@ -50,6 +56,7 @@ export class RiskManager {
       );
     } else if (
       signal.action === "buy" &&
+      !opts.manual &&
       !isTradableToken(signal.symbol, getLatestPrice(signal.symbol))
     ) {
       violations.push(`Token ${signal.symbol} is excluded or below min tradable price`);
@@ -60,15 +67,19 @@ export class RiskManager {
       violations.push(`Cannot buy stablecoin ${signal.symbol} as a position`);
     }
 
-    // 2b. No duplicate entries — skip if we already hold a material position (dust excluded).
-    if (signal.action === "buy" && this.portfolio.isMaterialPosition(signal.symbol)) {
+    // 2b. No duplicate entries — autonomous only. Assistant/manual may add to positions.
+    if (
+      signal.action === "buy" &&
+      !opts.manual &&
+      this.portfolio.isMaterialPosition(signal.symbol)
+    ) {
       violations.push(
         `Already holding ${signal.symbol} — no duplicate buy (dust below $${MIN_POSITION_VALUE_USD} ignored)`
       );
     }
 
-    // 3–4. Drawdown gates (optional — disabled when DISABLE_DRAWDOWN_LIMIT=true).
-    if (this.config.drawdownLimitEnabled) {
+    // 3–4. Drawdown gates — autonomous only (optional when DISABLE_DRAWDOWN_LIMIT=true).
+    if (this.config.drawdownLimitEnabled && !opts.manual) {
       if (signal.action === "buy" && drawdownPct >= this.config.maxDrawdownPct) {
         violations.push(
           `Drawdown ${drawdownPct.toFixed(1)}% exceeds max ${this.config.maxDrawdownPct}% — no new buys`
@@ -91,8 +102,9 @@ export class RiskManager {
       );
     }
 
-    // 6. Position size limit — skipped when operator specifies an explicit USD amount
+    // 6. Position size limit — autonomous only (assistant may size freely up to cash).
     if (
+      !opts.manual &&
       !opts.explicitAmount &&
       tradeAmountUsd > this.config.maxPositionSizeUsd
     ) {
@@ -102,10 +114,10 @@ export class RiskManager {
     }
 
     // 7. Minimum trade amount (buys only — allow full position exits).
-    //    Operator explicit-amount commands bypass the floor: a deliberate
-    //    "buy $20 X" should execute even when the autonomous floor is higher.
+    //    Manual / explicit-amount commands bypass the autonomous floor.
     if (
       signal.action === "buy" &&
+      !opts.manual &&
       !opts.explicitAmount &&
       tradeAmountUsd < this.config.minTradeAmountUsd
     ) {
@@ -121,20 +133,25 @@ export class RiskManager {
       );
     }
 
-    // 9. Max portfolio tokens — dust below MIN_POSITION_VALUE_USD does not consume slots.
+    // 9. Max portfolio tokens — autonomous only; assistant may open or add freely.
     const needsNewSlot =
       signal.action === "buy" &&
       !this.portfolio.isMaterialPosition(signal.symbol);
     const currentPositionCount = this.portfolio.countMaterialPositions();
-    if (needsNewSlot && currentPositionCount >= this.config.maxPortfolioTokens) {
+    if (
+      !opts.manual &&
+      needsNewSlot &&
+      currentPositionCount >= this.config.maxPortfolioTokens
+    ) {
       violations.push(
         `Max ${this.config.maxPortfolioTokens} positions reached (have ${currentPositionCount})`
       );
     }
 
-    // 10. Signal confidence threshold (only gates new buys; manual explicit trades skip)
+    // 10. Signal confidence threshold — autonomous only.
     if (
       signal.action === "buy" &&
+      !opts.manual &&
       !opts.explicitAmount &&
       signal.confidence < this.config.minBuyConfidence
     ) {

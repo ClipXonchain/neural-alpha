@@ -188,7 +188,13 @@ export function CommandPanel({ connected }: { connected: boolean }) {
           },
         ]);
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
+        let msg = err instanceof Error ? err.message : String(err);
+        if (/^unauthorized$/i.test(msg.trim())) {
+          msg =
+            "Unauthorized — the dashboard could not authenticate with the agent. " +
+            "On localhost: restart the dashboard after pulling latest (it now reads API_SECRET from the repo .env). " +
+            "On agents.clipx.app: trading is disabled (monitoring-only).";
+        }
         setMessages((prev) => [
           ...prev,
           {

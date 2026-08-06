@@ -1,14 +1,16 @@
 import { NextRequest } from "next/server";
 import { getAgentApiUrl } from "@/lib/agent-url";
+import { getServerEnv } from "@/lib/server-env";
 
 export const dynamic = "force-dynamic";
 /** Trades / wallet sync can take 1–2 min (TWAK approval + on-chain swap). */
 export const maxDuration = 300;
 
-const API_SECRET = process.env.API_SECRET?.trim();
-const PUBLIC_DASHBOARD_HOSTS = new Set(["agents.clipx.app"]);
+function apiSecret(): string | undefined {
+  return getServerEnv("API_SECRET");
+}
 
-/** POST routes that wait on TWAK / chain — need a long upstream timeout. */
+const PUBLIC_DASHBOARD_HOSTS = new Set(["agents.clipx.app"]);
 const LONG_RUNNING_PATHS = new Set([
   "command",
   "wallet/sync",
@@ -21,10 +23,9 @@ const LONG_RUNNING_PATHS = new Set([
 const UPSTREAM_TIMEOUT_MS = 180_000;
 
 function isReadonlyDeploy(req: NextRequest): boolean {
-  if (process.env.READONLY === "true" || process.env.NEXT_PUBLIC_READONLY === "true") {
-    return true;
-  }
   const host = (req.headers.get("host") ?? "").split(":")[0].toLowerCase();
+  // Only the public dashboard hostname is read-only. Localhost operator UI
+  // may still trade even if READONLY=true in repo .env (used for PM2 public build).
   return PUBLIC_DASHBOARD_HOSTS.has(host);
 }
 const ALLOWED_ORIGINS = new Set(
@@ -70,8 +71,8 @@ async function proxyToAgent(req: NextRequest, ctx: RouteContext) {
   const clientAuth = req.headers.get("authorization") ?? req.headers.get("x-api-key");
   if (clientAuth) {
     headers.set("Authorization", clientAuth.startsWith("Bearer ") ? clientAuth : `Bearer ${clientAuth}`);
-  } else if (API_SECRET && !isReadonlyDeploy(req)) {
-    headers.set("Authorization", `Bearer ${API_SECRET}`);
+  } else if (apiSecret() && !isReadonlyDeploy(req)) {
+    headers.set("Authorization", `Bearer ${apiSecret()}`);
   }
 
   const init: RequestInit = {

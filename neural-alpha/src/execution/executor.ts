@@ -341,6 +341,7 @@ export function validateAndCreateOrder(
 
   if (
     signal.action === "buy" &&
+    !opts.manual &&
     !isTradableToken(signal.symbol, getLatestPrice(signal.symbol) ?? undefined)
   ) {
     return {
