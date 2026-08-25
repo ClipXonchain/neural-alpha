@@ -1,0 +1,15 @@
+{
+  "week": "campaign-window",
+  "source": "type=3 bStock universe (confirm against weekly Eligible bStock List docs)",
+  "docs": "https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-eligible-tokens",
+  "symbols": [
+    "AAOIB", "AAPLB", "ALABB", "AMATB", "AMDB", "AMZNB", "ARMB", "ASMLB", "ASTSB",
+    "AVGOB", "AXTIB", "BABAB", "BEB", "BMNRB", "CBRSB", "COHRB", "COINB", "CRCLB",
+    "CRDOB", "CRWVB", "DELLB", "DRAMB", "EWYB", "FLNCB", "GLWB", "GMEB", "GOOGLB",
+    "GSB", "HOODB", "IBMB", "INTCB", "INTWB", "IRENB", "KORUB", "LITEB", "METAB",
+    "MRVLB", "MSFTB", "MSTRB", "MUB", "MUUB", "MVLLB", "NBISB", "NFLXB", "NOKB",
+    "NVDAB", "ORCLB", "PLTRB", "PYPLB", "QCOMB", "QNTB", "QQQB", "RKLBB", "SKHYB",
+    "SMCIB", "SMHB", "SNDKB", "SNXXB", "SOXLB", "SOXSB", "SPCXB", "SPYB", "TQQQB",
+    "TSLAB", "TSMB", "USARB", "WDCB"
+  ]
+}

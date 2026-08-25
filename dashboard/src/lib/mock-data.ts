@@ -39,6 +39,12 @@ export interface Signal {
   macd: number | null;
   bbPosition?: number | null;
   vwapDev?: number | null;
+  stochRsi?: number | null;
+  gapPct?: number | null;
+  orbBreakoutPct?: number | null;
+  atrPct?: number | null;
+  session?: string;
+  regime?: string;
   confidence: number;
   price: number;
   change24h: number;
@@ -92,14 +98,15 @@ export interface AgentState {
   winCount: number;
   lossCount: number;
   winRate: number;
-  fearGreedIndex: number | null;
   autonomous: AutonomousStatus;
   maxDrawdownLimit: number;
-  maxDailyTradesLimit: number;
   maxPositionsLimit: number;
   emergencyMode: boolean;
   startedAt: number | null;
-  startupCooldownMs: number;
+  sessionPolicy?: string;
+  sessionActive?: string;
+  sessionLabel?: string;
+  nyTimeLabel?: string;
   positions: Position[];
   trades: Trade[];
   signals: Signal[];
@@ -110,6 +117,9 @@ export interface AgentState {
   signalRefreshSec?: number;
   stopLossPct?: number;
   takeProfitPct?: number;
+  trailingActivatePct?: number;
+  trailingGivebackPct?: number;
+  autoExitEnabled?: boolean;
   minTradablePriceUsd?: number;
   excludedTokens?: string[];
 }
@@ -149,26 +159,22 @@ function generateDrawdownCurve(): Array<{ time: string; drawdown: number }> {
 const DEMO_AUTONOMOUS: AutonomousStatus = {
   phase: "idle",
   ready: true,
-  headline: "Autonomous — next scan in 28m 14s",
+  headline: "LIVE · RTH",
   tradesToday: 4,
-  maxTradesToday: 10,
   tradesLast24h: 6,
-  txsToday: 8,
-  maxTxsToday: 10,
-  swapsRemainingToday: 1,
   emergencyMode: false,
-  startupCooldownSec: 0,
-  nextCycleInSec: 1694,
+  nextCycleInSec: 240,
   lastCycleAt: Date.now() - 120_000,
-  lastCycleDurationSec: 94,
+  lastCycleDurationSec: 18,
   lastCycleTrades: 1,
   lastCycleQueued: 2,
-  tradeIntervalSec: 1800,
-  maxPerCycle: 1,
-  autoExitEnabled: false,
-  strategy: "medium",
+  tradeIntervalSec: 300,
+  autoExitEnabled: true,
+  sessionPolicy: "auto",
+  session: "rth",
+  sessionLabel: "RTH",
+  nyTimeLabel: "10:14 ET",
   failedSwapCooldowns: [],
-  competitionNudge: false,
 };
 
 export function generateMockState(): AgentState {
@@ -198,51 +204,43 @@ export function generateMockState(): AgentState {
     winCount: 21,
     lossCount: 13,
     winRate: 61.2,
-    fearGreedIndex: 42,
     autonomous: DEMO_AUTONOMOUS,
     maxDrawdownLimit: 20,
-    maxDailyTradesLimit: 10,
     maxPositionsLimit: 4,
     emergencyMode: false,
     startedAt: Date.now() - 3 * 3600000,
-    startupCooldownMs: 120_000,
+    sessionPolicy: "auto",
+    sessionActive: "rth",
+    sessionLabel: "RTH",
+    nyTimeLabel: "10:14 ET",
     positions: [
-      { symbol: "ETH", amount: 0.0421, entryPrice: 3720, currentPrice: 3847, pnl: 5.35, pnlPct: 3.41, weight: 34.2 },
-      { symbol: "LINK", amount: 8.5, entryPrice: 14.8, currentPrice: 15.62, pnl: 6.97, pnlPct: 5.54, weight: 28.1 },
-      { symbol: "AVAX", amount: 3.2, entryPrice: 33.5, currentPrice: 35.1, pnl: 5.12, pnlPct: 4.78, weight: 23.7 },
-      { symbol: "AAVE", amount: 0.85, entryPrice: 97, currentPrice: 93.2, pnl: -3.23, pnlPct: -3.92, weight: 16.8 },
+      { symbol: "NVDAB", amount: 0.42, entryPrice: 178, currentPrice: 184, pnl: 2.52, pnlPct: 3.37, weight: 34.2 },
+      { symbol: "AAPLB", amount: 1.1, entryPrice: 228, currentPrice: 232, pnl: 4.4, pnlPct: 1.75, weight: 28.1 },
+      { symbol: "TSLAB", amount: 0.8, entryPrice: 348, currentPrice: 355, pnl: 5.6, pnlPct: 2.01, weight: 23.7 },
     ],
     trades: [
-      { id: "t1", timestamp: Date.now() - 1200000, symbol: "ETH", side: "buy", amount: 0.0421, price: 3720, total: 156.61, txHash: "0x8a3f...d91e" },
-      { id: "t2", timestamp: Date.now() - 3600000, symbol: "DOGE", side: "sell", amount: 520, price: 0.158, total: 82.16, txHash: "0x1b7c...4f2a", pnl: 4.12 },
-      { id: "t3", timestamp: Date.now() - 7200000, symbol: "LINK", side: "buy", amount: 8.5, price: 14.8, total: 125.8, txHash: "0x9e2d...7b3f" },
-      { id: "t4", timestamp: Date.now() - 14400000, symbol: "AVAX", side: "buy", amount: 3.2, price: 33.5, total: 107.2, txHash: "0x4c5a...e8d1" },
-      { id: "t5", timestamp: Date.now() - 28800000, symbol: "ADA", side: "sell", amount: 180, price: 0.47, total: 84.6, txHash: "0x6f1b...2c9a", pnl: -2.85 },
-      { id: "t6", timestamp: Date.now() - 43200000, symbol: "AAVE", side: "buy", amount: 0.85, price: 97, total: 82.45, txHash: "0x3d8e...f5b7" },
-      { id: "t7", timestamp: Date.now() - 57600000, symbol: "DOT", side: "sell", amount: 12, price: 7.45, total: 89.4, txHash: "0xa2c9...1d4e", pnl: 7.2 },
+      { id: "t1", timestamp: Date.now() - 1200000, symbol: "NVDAB", side: "buy", amount: 0.42, price: 178, total: 74.76, txHash: "0x8a3f...d91e" },
+      { id: "t2", timestamp: Date.now() - 3600000, symbol: "TSLAB", side: "sell", amount: 0.2, price: 350, total: 70, txHash: "0x1b7c...4f2a", pnl: 4.12 },
     ],
     signals: [
-      { symbol: "ETH", action: "hold", strength: "neutral", score: 12, rsi: 52, macd: 0.08, bbPosition: 52, vwapDev: 0.12, confidence: 0.65, price: 3847, change24h: 1.24, volumeRatio: 0.9 },
-      { symbol: "DOGE", action: "buy", strength: "buy", score: 38, rsi: 28, macd: -0.15, bbPosition: 18, vwapDev: -0.42, confidence: 0.72, price: 0.156, change24h: -3.2, volumeRatio: 2.4 },
-      { symbol: "LINK", action: "hold", strength: "neutral", score: 8, rsi: 55, macd: 0.05, bbPosition: 48, vwapDev: 0.08, confidence: 0.58, price: 15.62, change24h: 2.1, volumeRatio: 1.1 },
-      { symbol: "AVAX", action: "buy", strength: "strong_buy", score: 62, rsi: 24, macd: -0.22, bbPosition: 12, vwapDev: -1.1, confidence: 0.85, price: 35.1, change24h: -5.4, volumeRatio: 3.2 },
-      { symbol: "ADA", action: "sell", strength: "sell", score: -34, rsi: 71, macd: 0.31, bbPosition: 88, vwapDev: 1.4, confidence: 0.68, price: 0.47, change24h: 4.8, volumeRatio: 0.4 },
-      { symbol: "DOT", action: "hold", strength: "neutral", score: -5, rsi: 48, macd: -0.04, bbPosition: 44, vwapDev: -0.05, confidence: 0.45, price: 7.35, change24h: 0.3, volumeRatio: 0.8 },
-      { symbol: "UNI", action: "buy", strength: "buy", score: 29, rsi: 32, macd: -0.11, bbPosition: 22, vwapDev: -0.35, confidence: 0.61, price: 11.2, change24h: -2.8, volumeRatio: 1.8 },
-      { symbol: "AAVE", action: "sell", strength: "sell", score: -42, rsi: 73, macd: 0.18, bbPosition: 91, vwapDev: 0.9, confidence: 0.77, price: 93.2, change24h: 5.6, volumeRatio: 1.3 },
+      { symbol: "NVDAB", action: "buy", strength: "buy", score: 28, rsi: 48, macd: 0.12, bbPosition: 62, vwapDev: 0.4, stochRsi: 58, gapPct: 0.35, orbBreakoutPct: 0.6, atrPct: 2.1, confidence: 0.72, price: 184, change24h: 1.4, volumeRatio: 1.6, session: "rth", regime: "risk_on", newsScore: 12, newsArticles: 2 },
+      { symbol: "AAPLB", action: "hold", strength: "neutral", score: 8, rsi: 52, macd: 0.04, bbPosition: 50, vwapDev: 0.1, stochRsi: 44, gapPct: 0.1, orbBreakoutPct: 0, atrPct: 1.2, confidence: 0.55, price: 232, change24h: 0.4, volumeRatio: 0.9, session: "rth", regime: "neutral" },
+      { symbol: "TSLAB", action: "sell", strength: "sell", score: -22, rsi: 71, macd: -0.08, bbPosition: 82, vwapDev: 1.1, stochRsi: 81, gapPct: 1.8, orbBreakoutPct: 1.2, atrPct: 3.4, confidence: 0.64, price: 355, change24h: 2.8, volumeRatio: 1.3, session: "rth", regime: "risk_on", newsScore: -8, newsArticles: 1 },
     ],
     activity: [
-      { id: "a1", timestamp: Date.now() - 60000, type: "brain", message: "Bought ETH (~$156.50)." },
-      { id: "a2", timestamp: Date.now() - 180000, type: "brain", message: "Scan complete — 6 signals found. Best pick: AVAX (strong buy, score 62)." },
-      { id: "a3", timestamp: Date.now() - 300000, type: "brain", message: "Plan for this cycle: buy AVAX." },
-      { id: "a4", timestamp: Date.now() - 420000, type: "brain", message: "Cycle done — watching the market, no trades needed. Status: idle." },
-      { id: "a5", timestamp: Date.now() - 600000, type: "trade", message: "Sold DOGE (~$82.16).", detail: "PnL: +$4.12 (+5.28%)" },
-      { id: "a6", timestamp: Date.now() - 900000, type: "risk", message: "Passed on ADA — already holding ADA — no duplicate buy." },
-      { id: "a7", timestamp: Date.now() - 1200000, type: "signal", message: "Found 3 buy candidates. Top signal: UNI buy (29)." },
-      { id: "a8", timestamp: Date.now() - 1800000, type: "error", message: "Trade failed on SHIB: No verified BEP-20 contract." },
+      { id: "a1", timestamp: Date.now() - 60000, type: "brain", message: "Bought NVDAB (~$74.76)." },
+      { id: "a2", timestamp: Date.now() - 180000, type: "brain", message: "RTH scan — 6 signals. Best: NVDAB (buy, +28)." },
+      { id: "a3", timestamp: Date.now() - 300000, type: "brain", message: "Close session: hold names still above VWAP." },
+      { id: "a4", timestamp: Date.now() - 420000, type: "brain", message: "Cycle done — watching overnight gap. Status: idle." },
+      { id: "a5", timestamp: Date.now() - 600000, type: "trade", message: "Sold TSLAB (~$70.00).", detail: "PnL: +$4.12 (+5.28%)" },
+      { id: "a6", timestamp: Date.now() - 900000, type: "risk", message: "Passed on AAPLB — already holding — no duplicate buy." },
+      { id: "a7", timestamp: Date.now() - 1200000, type: "signal", message: "Found 3 buy candidates. Top: NVDAB buy (28)." },
+      { id: "a8", timestamp: Date.now() - 1800000, type: "error", message: "Trade failed on GMEB: swap quote timeout." },
     ],
     equityCurve,
     drawdownCurve: generateDrawdownCurve(),
+    lastSignalRefreshAt: Date.now() - 4000,
+    signalRefreshSec: 10,
   };
 }
 
@@ -271,38 +269,35 @@ export function generateOfflineState(): AgentState {
     winCount: 0,
     lossCount: 0,
     winRate: 0,
-    fearGreedIndex: null,
     autonomous: {
       phase: "stopped",
       ready: false,
       headline: "Agent offline",
       blockReason: "Cannot reach agent API",
       tradesToday: 0,
-      maxTradesToday: 0,
       tradesLast24h: 0,
-      txsToday: 0,
-      maxTxsToday: 0,
-      swapsRemainingToday: 0,
       emergencyMode: false,
-      startupCooldownSec: 0,
       nextCycleInSec: null,
       lastCycleAt: null,
       lastCycleDurationSec: null,
       lastCycleTrades: 0,
       lastCycleQueued: 0,
       tradeIntervalSec: 0,
-      maxPerCycle: 0,
       autoExitEnabled: false,
-      strategy: "medium",
+      sessionPolicy: "auto",
+      session: "overnight",
+      sessionLabel: "Overnight",
+      nyTimeLabel: "—",
       failedSwapCooldowns: [],
-      competitionNudge: false,
     },
     maxDrawdownLimit: 20,
-    maxDailyTradesLimit: 10,
     maxPositionsLimit: 4,
     emergencyMode: false,
     startedAt: null,
-    startupCooldownMs: 120_000,
+    sessionPolicy: "auto",
+    sessionActive: "overnight",
+    sessionLabel: "Overnight",
+    nyTimeLabel: "—",
     positions: [],
     trades: [],
     signals: [],

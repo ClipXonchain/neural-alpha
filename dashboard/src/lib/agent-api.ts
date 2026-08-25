@@ -4,29 +4,25 @@ const AGENT_BASE =
   process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
 
 export interface AutonomousStatus {
-  phase: "stopped" | "warming" | "scanning" | "idle" | "blocked";
+  phase: "stopped" | "scanning" | "idle" | "blocked";
   ready: boolean;
   headline: string;
   blockReason?: string;
   tradesToday: number;
-  maxTradesToday: number;
   tradesLast24h: number;
-  txsToday: number;
-  maxTxsToday: number;
-  swapsRemainingToday: number;
   emergencyMode: boolean;
-  startupCooldownSec: number;
   nextCycleInSec: number | null;
   lastCycleAt: number | null;
   lastCycleDurationSec: number | null;
   lastCycleTrades: number;
   lastCycleQueued: number;
   tradeIntervalSec: number;
-  maxPerCycle: number;
   autoExitEnabled: boolean;
-  strategy: string;
+  sessionPolicy: string;
+  session: string;
+  sessionLabel: string;
+  nyTimeLabel: string;
   failedSwapCooldowns: Array<{ symbol: string; remainingMin: number }>;
-  competitionNudge: boolean;
 }
 
 export interface Track1Snapshot {
@@ -35,26 +31,34 @@ export interface Track1Snapshot {
   cycleCount: number;
   bridgeSource?: string;
   startedAt?: number;
-  fearGreedIndex: number | null;
+  session?: {
+    policy: string;
+    clock: string;
+    active: string;
+    nyTimeLabel: string;
+    label: string;
+  };
   watchlist: string[];
   prices: Record<string, number>;
   config: {
     mode?: string;
-    strategy?: "safe" | "medium" | "momentum";
+    sessionPolicy?: "auto" | "rth" | "close" | "overnight";
     maxDrawdownPct: number;
-    maxDailyTrades: number;
     baseCurrency: string;
     swapCurrencies?: string[];
     maxPositionSizeUsd?: number;
     tradeIntervalMs?: number;
     slippageTolerance?: number;
+    minGasReserveUsd?: number;
     maxPortfolioTokens?: number;
-    startupCooldownMs?: number;
     signalRefreshMs?: number;
     protectiveExitCheckMs?: number;
     stopLossPct?: number;
     takeProfitPct?: number;
     trailingActivatePct?: number;
+    trailingGivebackPct?: number;
+    autoExitEnabled?: boolean;
+    minBuyConfidence?: number;
     minTradablePriceUsd?: number;
     excludedTokens?: string[];
   };
@@ -118,6 +122,11 @@ export interface Track1Snapshot {
       bbPosition?: number | null;
       vwapDev?: number | null;
       volumeRatio?: number | null;
+      stochRsi?: number | null;
+      gapPct?: number | null;
+      orbBreakoutPct?: number | null;
+      session?: string;
+      regime?: string;
       ohlcvReal?: boolean;
       aiSummary?: string;
       aiVerdict?: string;
@@ -126,7 +135,6 @@ export interface Track1Snapshot {
   >;
   newsCount?: number;
   autonomous?: AutonomousStatus;
-  startupCooldownRemainingMs?: number;
   lastSignalRefreshAt?: number | null;
   tokenIcons?: Record<string, string>;
   livePrices?: Record<
@@ -154,6 +162,19 @@ export interface WalletSnapshot {
   walletState: string;
   registered: boolean;
   registrationOpen: boolean;
+  campaign?: {
+    registered: boolean;
+    registrationOpen: boolean;
+    cmcCalls: number;
+    studioCalls: number;
+    minCmcCalls: number;
+    minStudioCalls: number;
+    cmcComplete: boolean;
+    studioComplete: boolean;
+    joinUrl: string;
+    docsUrl: string;
+    active: boolean;
+  };
   binancePositions?: Array<{
     symbol: string;
     name: string;
@@ -231,19 +252,14 @@ export async function resyncAgent(): Promise<ResyncResult> {
   return agentFetch("/control/resync", { method: "POST" });
 }
 
-export interface CommandResult {
+export async function sellPosition(symbol: string): Promise<{
   ok: boolean;
-  intent: string;
   message: string;
-  data?: Record<string, unknown>;
-  suggestions?: string[];
-}
-
-export async function sendCommand(command: string): Promise<CommandResult> {
-  return agentFetchLong("/command", {
+  txHash?: string;
+}> {
+  return agentFetchLong("/control/sell", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ command }),
+    body: JSON.stringify({ symbol }),
   });
 }
 
@@ -251,18 +267,34 @@ export async function registerCompetition(): Promise<Record<string, unknown>> {
   return agentFetch("/competition/register", { method: "POST" });
 }
 
-export async function switchWalletMode(
-  mode: "local" | "walletconnect"
-): Promise<Record<string, unknown>> {
-  return agentFetch("/wallet/mode", {
+export async function startWalletSignin(): Promise<{
+  urlForWeb?: string;
+  qrCodeId?: string;
+  pairingCode?: string;
+  status?: string;
+}> {
+  return agentFetch("/wallet/signin", { method: "POST" });
+}
+
+export async function verifyWalletSignin(qrCodeId: string): Promise<Record<string, unknown>> {
+  return agentFetchLong("/wallet/verify", {
     method: "POST",
-    body: JSON.stringify({ mode }),
+    body: JSON.stringify({ qrCodeId }),
+  });
+}
+
+export async function runCampaignAiTasks(
+  opts: { cmc?: boolean; studio?: boolean; tickers?: string[] } = {}
+): Promise<Record<string, unknown>> {
+  return agentFetchLong("/campaign/ai-tasks", {
+    method: "POST",
+    body: JSON.stringify(opts),
   });
 }
 
 export async function saveAgentConfig(
   updates: Record<string, unknown>
-): Promise<{ ok: boolean; error?: string }> {
+): Promise<{ ok: boolean; error?: string; config?: Track1Snapshot["config"] }> {
   return agentFetch("/control/config", {
     method: "POST",
     body: JSON.stringify(updates),

@@ -1,15 +1,33 @@
 /**
- * PM2 Ecosystem Configuration — Neural Alpha
- * Deploy: pm2 start ecosystem.config.cjs
- * Docs:   https://pm2.keymetrics.io/docs/usage/application-declaration/
+ * PM2 Ecosystem — Neural Alpha (public read-only dashboard)
+ *
+ * Manages ONLY:
+ *   neural-agent       — trading loop + localhost API :3847
+ *   neural-dashboard   — Next.js :3000 (READONLY)
+ *
+ * Never start this file with `pm2 restart all` on a shared VPS.
  */
+const fs = require("fs");
+const path = require("path");
+
+const ROOT = __dirname;
+
+function bin(name) {
+  const candidates = [
+    path.join(ROOT, "node_modules", ".bin", name),
+    path.join(ROOT, "dashboard", "node_modules", ".bin", name),
+    path.join(ROOT, "neural-alpha", "node_modules", ".bin", name),
+  ];
+  return candidates.find((p) => fs.existsSync(p)) || name;
+}
+
 module.exports = {
   apps: [
     {
       name: "neural-agent",
-      cwd: "./neural-alpha",
-      script: "node",
-      args: "--import ./src/load-env.ts --import tsx src/index.ts",
+      cwd: path.join(ROOT, "neural-alpha"),
+      script: bin("tsx"),
+      args: "--import ./src/load-env.ts src/index.ts",
       interpreter: "none",
       env: {
         NODE_ENV: "production",
@@ -23,15 +41,15 @@ module.exports = {
       max_memory_restart: "512M",
       watch: false,
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
-      error_file: "./logs/agent-error.log",
-      out_file: "./logs/agent-out.log",
+      error_file: path.join(ROOT, "logs/agent-error.log"),
+      out_file: path.join(ROOT, "logs/agent-out.log"),
       merge_logs: true,
       kill_timeout: 10000,
     },
     {
       name: "neural-dashboard",
-      cwd: "./dashboard",
-      script: "node_modules/.bin/next",
+      cwd: path.join(ROOT, "dashboard"),
+      script: bin("next"),
       args: "start -p 3000",
       interpreter: "none",
       env: {
@@ -49,8 +67,8 @@ module.exports = {
       max_memory_restart: "384M",
       watch: false,
       log_date_format: "YYYY-MM-DD HH:mm:ss Z",
-      error_file: "./logs/dashboard-error.log",
-      out_file: "./logs/dashboard-out.log",
+      error_file: path.join(ROOT, "logs/dashboard-error.log"),
+      out_file: path.join(ROOT, "logs/dashboard-out.log"),
       merge_logs: true,
       kill_timeout: 5000,
     },

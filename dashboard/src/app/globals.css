@@ -40,7 +40,6 @@ body {
   display: none;
 }
 
-/* Solid card backgrounds */
 .glass {
   background: var(--color-surface);
   border: 1px solid var(--color-border-dim);
@@ -52,33 +51,21 @@ body {
   border-radius: 12px;
 }
 
-/* Subtle hover glow */
-.glow-neon {
-  box-shadow: none;
-}
-
-.glow-cyan {
-  box-shadow: none;
-}
-
+.glow-neon,
+.glow-cyan,
 .glow-danger {
   box-shadow: none;
 }
 
-.text-glow-neon {
-  text-shadow: none;
-}
-
+.text-glow-neon,
 .text-glow-cyan {
   text-shadow: none;
 }
 
-/* No grid background — clean */
 .grid-bg {
   background-image: none;
 }
 
-/* Pulse ring for live indicators */
 @keyframes pulse-ring {
   0% { transform: scale(0.8); opacity: 1; }
   100% { transform: scale(2.2); opacity: 0; }
@@ -93,7 +80,6 @@ body {
   animation: pulse-ring 2s ease-out infinite;
 }
 
-/* Scrollbar */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb {
@@ -101,7 +87,6 @@ body {
   border-radius: 3px;
 }
 
-/* Recharts overrides */
 .recharts-cartesian-grid-horizontal line,
 .recharts-cartesian-grid-vertical line {
   stroke: rgba(255, 255, 255, 0.04) !important;
@@ -111,7 +96,6 @@ body {
   outline: none !important;
 }
 
-/* Number tabular figures */
 .tabular-nums {
   font-variant-numeric: tabular-nums;
 }

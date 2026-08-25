@@ -6,7 +6,7 @@ const HIDDEN_EVENTS = new Set([
   "Risk status",
   "Market data fetched",
   "Binance Web3 enrichment applied",
-  "TWAK swap raw response",
+  "Agentic Wallet swap raw response",
   "Signal refresh loop started",
   "Protective exit loop started",
   "Wallet capital synced from chain",

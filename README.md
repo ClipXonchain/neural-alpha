@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  Autonomous BSC trading agent with real-time dashboard, multi-factor signal engine, and AI-powered analysis.
+  Autonomous bStock trading agent for Binance Agentic Wallet — signals, risk, FIFO PnL.
 </p>
 
 <p align="center">
@@ -18,17 +18,17 @@
   <img src="https://img.shields.io/badge/chain-BNB_Smart_Chain-F0B90B?style=flat-square" alt="BSC" />
   <img src="https://img.shields.io/badge/runtime-Node.js_20+-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js" />
   <img src="https://img.shields.io/badge/dashboard-Next.js_15-000000?style=flat-square&logo=nextdotjs" alt="Next.js" />
-  <img src="https://img.shields.io/badge/execution-TWAK_Self--Custody-blue?style=flat-square" alt="TWAK" />
-  <img src="https://img.shields.io/badge/data-CoinMarketCap_Pro-17181b?style=flat-square" alt="CMC" />
+  <img src="https://img.shields.io/badge/execution-Binance_Agentic_Wallet-F0B90B?style=flat-square" alt="Agentic Wallet" />
+  <img src="https://img.shields.io/badge/assets-bStock-17181b?style=flat-square" alt="bStock" />
 </p>
 
 ---
 
 ## Overview
 
-Neural Alpha is a fully autonomous trading agent for BNB Smart Chain (BSC). It reads market data from CoinMarketCap, processes news sentiment from ClipX, generates multi-factor trading signals, enforces risk guardrails in code, and executes self-custody swaps through the Trust Wallet Agent Kit (TWAK) — all without human intervention.
+Neural Alpha is an autonomous trading agent for **tokenized US stocks (bStock)** on BNB Smart Chain. It scores markets, enforces risk in code, and executes swaps through **Binance Agentic Wallet** (`baw` CLI) — MPC keyless, no local private keys.
 
-Built for the **[BNB Hack: AI Trading Agent Edition](https://dorahacks.io/hackathon/bnbhack-twt-cmc/)** (CoinMarketCap x Trust Wallet x BNB Chain), Track 1.
+Built for the **[bStock AI-Powered PnL Contest](https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest)** (Binance Wallet × bStocks × BNB Chain Agent Studio × CoinMarketCap), 17 Aug – 1 Sep 2026 UTC.
 
 **Production deployment:** [agents.clipx.app](https://agents.clipx.app)
 
@@ -72,10 +72,10 @@ Built for the **[BNB Hack: AI Trading Agent Edition](https://dorahacks.io/hackat
 - Per-trade position limits, daily trade caps, on-chain tx budget
 - Stop-loss, take-profit, and trailing stop exits
 - Honeypot detection before every live swap
-- 149-token allowlist with contract verification
+- Weekly eligible **bStock** allowlist (type=3 contracts + campaign list)
 
 **Execution**
-- Self-custody local signing via TWAK — private keys never leave the device
+- Self-custody via Binance Agentic Wallet — MPC keyless, keys never held by the agent
 - Paper mode (simulated) and live mode (real BSC swaps)
 - On-chain portfolio reconciliation with Binance Web3 Wallet API
 - Startup cooldown, failed-swap cooldown, and autonomous trade pacing
@@ -116,7 +116,7 @@ flowchart TB
         S2["② Analyze<br/>9-factor signals · optional AI review"]
         S3["③ Decide<br/>Rank buys/sells · stop-loss · take-profit"]
         S4{"④ Risk gate<br/>Drawdown · limits · allowlist"}
-        S5["⑤ Execute<br/>Honeypot check → TWAK swap"]
+        S5["⑤ Execute<br/>Eligible bStock → baw market-order swap"]
         S6["⑥ Reconcile<br/>Sync on-chain · NAV snapshot · persist"]
 
         S1 --> S2 --> S3 --> S4
@@ -152,7 +152,7 @@ flowchart TB
 | **Analyze** | Blend RSI, MACD, EMA, Bollinger, momentum, volume, news, and Fear & Greed into a score per token |
 | **Decide** | Pick the best trades; optional protective exits (stop-loss / take-profit / trailing) run first |
 | **Risk gate** | Block trades that breach drawdown, daily caps, position size, token allowlist, or tx budget |
-| **Execute** | Live mode: TWAK signs and submits the swap on BSC. Paper mode: simulated fill |
+| **Execute** | Live mode: `baw market-order swap` on BSC, poll until FINISHED/FAILED. Paper mode: simulated fill |
 | **Reconcile** | Match portfolio to chain, update NAV, stream to dashboard, save to Postgres, sleep, repeat |
 
 **Operator path:** Browser → [agents.clipx.app](https://agents.clipx.app) → Next.js dashboard → authenticated proxy → agent API (`127.0.0.1:3847`). Manual commands (`buy`, `sell`, `portfolio`) use the same risk and execution path as autonomous trades.
@@ -165,20 +165,19 @@ flowchart TB
 |---|---|
 | **Node.js >= 20** | Runtime (ESM, `import.meta`) |
 | **npm >= 9** | Package manager (workspaces) |
-| **[TWAK CLI](https://portal.trustwallet.com)** | Wallet + MCP server for self-custody swaps |
-| **CMC Pro API key** | Real-time market data |
-| **BNB on BSC** | Gas for live transactions |
-| **USDT on BSC** | Trading capital (live mode) |
+| **[baw CLI](https://www.binance.com/en/skills/detail/binance-web3/binance-agentic-wallet)** | Binance Agentic Wallet — sign-in, balances, market-order swaps, x402 |
 
 ```bash
-# Install TWAK CLI
-npm install -g @trustwallet/cli
-twak --version
+# Install Binance Agentic Wallet CLI
+npm i -g @binance/agentic-wallet
+baw --version
 
-# Create a wallet (first time)
-twak wallet create
-twak wallet address --chain bsc
+# Sign in (QR in Binance App)
+baw auth signin
+baw wallet status --json
+baw wallet address --json
 ```
+| **USDT / USDC / U / USD1 on BSC** | Campaign payment capital (live mode) |
 
 ---
 
@@ -203,12 +202,11 @@ Minimum configuration:
 ```bash
 # Required
 CMC_PRO_API_KEY=<your-key>
-TW_ACCESS_ID=<your-twak-access-id>
-TW_HMAC_SECRET=<your-twak-hmac-secret>
+PAYMENT_TOKEN=USDT
+BRIDGE_MODE=auto          # auto-detects baw + CMC Pro
 
 # Mode
 AGENT_MODE=paper          # "paper" for simulation, "live" for real BSC trading
-BRIDGE_MODE=auto          # auto-detects TWAK + CMC Pro
 
 # Optional: AI assistant
 OPENAI_API_KEY=sk-...     # enables NL commands + AI signal analysis
@@ -244,7 +242,7 @@ See [Deployment](#deployment) for full VPS setup.
 
 | | Paper (`AGENT_MODE=paper`) | Live (`AGENT_MODE=live`) |
 |---|---|---|
-| Swaps | Simulated (`paper-*` tx hash) | Real BSC transactions via TWAK |
+| Swaps | Simulated (`paper-*` tx hash) | Real BSC transactions via Agentic Wallet |
 | Capital | Uses `INITIAL_CASH_USD` | Syncs from on-chain USDT balance |
 | Cycle interval | 30s default | 60 min default |
 | Portfolio | In-memory only | Reconciled with on-chain state each cycle |
@@ -256,11 +254,11 @@ All variables are documented in `.env.example`. Key ones:
 | Variable | Default | Description |
 |---|---|---|
 | `AGENT_MODE` | `paper` | `paper` or `live` |
-| `BRIDGE_MODE` | `auto` | `auto` / `twak` / `cmc-pro` / `mock` |
+| `BRIDGE_MODE` | `auto` | `auto` / `baw` / `cmc-pro` / `mock` |
 | `CMC_PRO_API_KEY` | — | CoinMarketCap Pro API key |
-| `TW_ACCESS_ID` | — | TWAK access credentials |
-| `TW_HMAC_SECRET` | — | TWAK HMAC secret |
-| `AGENT_WALLET_ADDRESS` | — | BSC wallet address (auto-detected from TWAK) |
+| `PAYMENT_TOKEN` | `USDT` | Campaign payment token: BNB / USDT / USDC / U / USD1 |
+| `BAW_CLI` | `baw` | Binance Agentic Wallet CLI |
+| `AGENT_WALLET_ADDRESS` | — | BSC wallet address (auto-detected from `baw`) |
 | `API_SECRET` | — | **Required in production** — Bearer token for API auth |
 | `NODE_ENV` | — | Set to `production` on VPS |
 | `STRATEGY` | `medium` | `safe` / `medium` / `momentum` |
@@ -336,7 +334,7 @@ All guardrails are enforced in code (`neural-alpha/src/risk/manager.ts`), not pr
 | Max position size | $100 | Per-trade cap |
 | Confidence gate | 55% | Weak signals filtered |
 | Token allowlist | 149 BEP-20 | Ineligible tokens rejected |
-| Honeypot check | TWAK `check_token_risk` | Blocked before every live swap |
+| Eligible-list check | Skip audit for current-week bStocks; otherwise fail-closed |
 | Startup cooldown | 120s | Autonomous trades paused after restart |
 | Failed swap cooldown | 30 min | Same token not retried immediately |
 
@@ -369,27 +367,36 @@ The dashboard connects via SSE for real-time streaming — no polling.
 ### Production Architecture
 
 ```
-Internet → Nginx (SSL) → Next.js :3000 → Agent API :3847 (localhost only) → TWAK → BSC
+Internet → Nginx (SSL) → Next.js :3000 → Agent API :3847 (localhost only) → baw → BSC
 ```
 
 - **Agent API** binds to `127.0.0.1` only — never directly exposed to the internet
 - **Dashboard** proxy authenticates with the agent using `API_SECRET`
 - **Nginx** terminates SSL, routes traffic, adds security headers
 
-### Quick Deploy (VPS)
+### Existing VPS (`~/neural-alpha`)
+
+Public site is **read-only**. Other PM2 apps (e.g. `clipx-news-brain`) are not restarted.
 
 ```bash
-# 1. Clone on VPS
-git clone <repo-url> ~/neural-alpha && cd ~/neural-alpha
-
-# 2. Configure
-cp .env.example .env && nano .env    # fill in all required values
-
-# 3. Deploy (handles deps, build, nginx, ssl, pm2)
+cd ~/neural-alpha
+cp -a .env /tmp/neural-alpha.env
+git fetch origin
+git checkout -B agentic-wallet origin/agentic-wallet
+git reset --hard origin/agentic-wallet
+cp /tmp/neural-alpha.env .env
 bash deploy/setup.sh
 ```
 
-The deploy script auto-generates an `API_SECRET` if not set, installs the Nginx config for `agents.clipx.app`, requests an SSL certificate, and starts both services via PM2.
+### Fresh VPS
+
+```bash
+git clone -b agentic-wallet <repo-url> ~/neural-alpha && cd ~/neural-alpha
+cp .env.example .env && nano .env
+bash deploy/setup.sh
+```
+
+The script forces `READONLY=true` / `NEXT_PUBLIC_READONLY=true`, keeps `API_SECRET`, and starts only `neural-agent` + `neural-dashboard`.
 
 ### Manual Deploy
 
@@ -408,11 +415,10 @@ pm2 save && pm2 startup
 ### PM2 Operations
 
 ```bash
-pm2 status                         # check processes
-pm2 logs neural-agent --lines 100  # agent logs
-pm2 logs neural-dashboard          # dashboard logs
-pm2 restart all                    # restart everything
-pm2 stop all                       # stop everything
+pm2 status                                      # all processes
+pm2 logs neural-agent --lines 100
+pm2 logs neural-dashboard
+pm2 restart neural-agent neural-dashboard       # do not use restart all
 ```
 
 ### Health Check
@@ -426,10 +432,7 @@ curl https://agents.clipx.app/api/health
 
 ```bash
 cd ~/neural-alpha
-git pull
-npm ci
-npm run prod:build
-pm2 restart all
+bash deploy/setup.sh --branch agentic-wallet --reset
 ```
 
 Full deployment documentation: [`deploy/DEPLOY.md`](./deploy/DEPLOY.md)
@@ -466,12 +469,12 @@ Authorization: Bearer <API_SECRET>
 | Security headers | `X-Frame-Options`, `X-Content-Type-Options`, `HSTS`, `Referrer-Policy` |
 | Error sanitization | No stack traces in production responses |
 | Input validation | Whitelist of allowed config keys, command length limits |
-| TWAK self-custody | Private keys never leave the device |
+| Agentic Wallet | MPC keyless — agent never holds private keys |
 | Graceful shutdown | SIGTERM/SIGINT handlers with timeout |
 
 ### Best Practices
 
-- **Never commit** `.env`, private keys, seed phrases, or `~/.twak/`
+- **Never commit** `.env`, session tokens, or `~/.baw/`
 - Use a **dedicated hot wallet** with limited funds
 - Token allowlist enforced in code — ineligible tokens rejected
 - Honeypot screening before every live swap
@@ -528,7 +531,12 @@ neural-alpha/
 │   └── src/
 │       ├── index.ts               # Entry point + graceful shutdown
 │       ├── agent.ts               # Core trading loop + state management
-│       ├── config.ts              # 149-token allowlist, configuration
+│       ├── config.ts              # bStock watchlist, configuration
+│       ├── execution/
+│       │   └── executor.ts        # baw market-order builder + result processor
+│       ├── integrations/
+│       │   ├── create-bridge.ts   # Bridge factory (baw / CMC Pro / mock)
+│       │   ├── agentic-wallet-bridge.ts # Binance Agentic Wallet CLI
 │       ├── commands/
 │       │   ├── handler.ts         # NL command router + trade execution
 │       │   └── llm.ts             # OpenAI-compatible assistant
@@ -538,15 +546,6 @@ neural-alpha/
 │       ├── db/
 │       │   ├── schema.sql         # Neon Postgres schema
 │       │   └── store.ts           # Persistence layer (trades, NAV, sync)
-│       ├── execution/
-│       │   └── executor.ts        # TWAK swap builder + result processor
-│       ├── integrations/
-│       │   ├── create-bridge.ts   # Bridge factory (TWAK / CMC Pro / mock)
-│       │   ├── twak-mcp-bridge.ts # TWAK MCP client
-│       │   ├── cmc-pro-bridge.ts  # CMC Pro REST bridge
-│       │   ├── bsc-token-addresses.ts  # BEP-20 contract resolution
-│       │   ├── binance-web3-wallet.ts  # Binance Web3 position sync
-│       │   └── bscscan.ts         # CLI wallet scanner
 │       ├── risk/
 │       │   ├── manager.ts         # Risk validation + emergency mode
 │       │   └── portfolio.ts       # PnL tracking, snapshots, reconciliation
@@ -635,61 +634,55 @@ pm2 stop neural-agent
 lsof -i :3847
 ```
 
-### TWAK wallet issues
+### Agentic Wallet issues
 
 ```bash
-twak wallet status          # check wallet state
-twak wallet balance --chain bsc  # verify funds
+baw wallet status --json
+baw wallet address --json
+baw wallet balance --binanceChainId 56 --json
 ```
 
-The `could not register testnet node for smartchain-testnet` warning is harmless on mainnet.
+If status is `UNCONNECTED`, run `baw auth signin` and confirm in the Binance App.
 
 ---
 
 ## Competition
 
-### BNB Hack: AI Trading Agent Edition
+### bStock AI-Powered PnL Contest
 
 | Field | Value |
 |---|---|
-| Track | Track 1 — Autonomous Trading Agents |
-| Prize Pool | $24,000 (5 winners) + $2,000 special prizes |
-| Live Trading | June 22 - 28, 2026 |
-| Contract (BSC) | [`0x212c61b9b72c95d95bf29cf032f5e5635629aed5`](https://bsctrace.com/address/0x212c61b9b72c95d95bf29cf032f5e5635629aed5) |
+| Window | 2026-08-17 09:00 UTC – 2026-09-01 00:00 UTC |
+| Ranking | Realized PnL (FIFO), Top 100 |
+| Prize | Up to 100,000 USDC |
+| Docs | [bstock-pnl-contest](https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest) |
 
 ### Competition Rules Enforcement
 
 | Rule | Implementation |
 |---|---|
-| >= 1 trade/day, >= 7 total | Daily trade floor in live mode (auto-triggers at UTC 20:00) |
-| 149 eligible BEP-20 only | Hard-coded allowlist in `config.ts` |
-| Max drawdown ~30% (DQ) | 25% cap in `risk/manager.ts` |
-| Self-custody execution | All swaps via TWAK MCP (local signing) |
-| On-chain proof | Every live trade logged with BSC tx hash |
+| Register before trading | Join Now on campaign page + `CAMPAIGN_REGISTERED=true` |
+| Eligible bStock only | type=3 API + `data/eligible-bstocks.json` |
+| Payment BNB/USDT/USDC/U/USD1 | `PAYMENT_TOKEN` + executor |
+| Agentic Wallet execution | `baw market-order swap` |
+| FIFO realized PnL | `risk/portfolio.ts` lots |
+| ≥3 CMC + ≥3 Studio x402 | `campaign-x402.ts` / dashboard |
 
 ### Registration
 
 ```bash
-# On-chain registration (required before live window)
 npm run register
-twak compete register
-twak compete status    # registered: true
+# Then tap Join Now and bind this Agentic Wallet.
 ```
 
-### TWAK MCP Tools Used
+### baw CLI commands used
 
-| Tool | Purpose |
+| Command | Purpose |
 |---|---|
-| `get_token_price` | BSC spot prices |
-| `get_swap_quote` | Pre-trade quote |
-| `swap` | Execute BEP-20 swap |
-| `wallet_balance` | BNB balance |
-| `get_balance` | USDT balance |
-| `check_token_risk` | Honeypot screening |
-| `get_trending_tokens` | Watchlist discovery |
-| `x402_request` | CMC Agent Hub micropayments |
-| `competition_register` | On-chain registration |
-| `competition_status` | Registration check |
+| `wallet status/address/balance` | Connection + holdings |
+| `market-order quote/swap/list` | Price + execute + confirm |
+| `x402-payment preview/sign` | Campaign CMC / Agent Studio payments |
+| `auth signin/verify` | Binance App QR session |
 
 ---
 
@@ -698,9 +691,9 @@ twak compete status    # registered: true
 | Resource | URL |
 |---|---|
 | Live Dashboard | https://agents.clipx.app |
+| Campaign docs | https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest |
+| Agentic Wallet skill | https://github.com/binance/binance-skills-hub/tree/main/skills/binance-web3/binance-agentic-wallet |
 | CMC Agent Hub | https://coinmarketcap.com/api/agent |
-| Trust Wallet Agent Kit | https://portal.trustwallet.com |
-| BNB AI Agent SDK | https://github.com/bnb-chain/bnbagent-sdk |
 | Deployment Guide | [deploy/DEPLOY.md](./deploy/DEPLOY.md) |
 
 ---

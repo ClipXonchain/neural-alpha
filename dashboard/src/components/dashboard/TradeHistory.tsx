@@ -117,7 +117,7 @@ function TradeRow({ trade, index }: { trade: Trade; index: number }) {
     <motion.div
       initial={{ opacity: 0, x: -8 }}
       animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: index * 0.03 }}
+      transition={{ duration: 0.15 }}
       className={cn(
         "flex items-center gap-3 py-3 px-3 rounded-lg group",
         "hover:bg-surface-overlay/50 transition-colors",

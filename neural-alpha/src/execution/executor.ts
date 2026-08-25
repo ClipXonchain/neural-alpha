@@ -1,19 +1,18 @@
 import type { TradeOrder, TradeResult, TradeSignal, AgentConfig } from "../utils/types.js";
-import { BSC_CHAIN, BSC_USDT_ADDRESS, isEligibleToken, isTradableToken } from "../config.js";
-import { hasBscSwapAddress, knownBscAddress } from "../integrations/bsc-token-addresses.js";
+import { BSC_CHAIN_ID, isEligibleToken, isTradableToken } from "../config.js";
+import { hasBscSwapAddress } from "../integrations/bsc-token-addresses.js";
+import { getBstockAddress, paymentTokenAddress, BSC_NATIVE_BNB } from "../integrations/bstock.js";
 import { RiskManager } from "../risk/manager.js";
 import { PortfolioTracker } from "../risk/portfolio.js";
 import { getLatestPrice } from "../data/market.js";
 import { logger } from "../utils/logger.js";
 /**
- * Trade executor that routes all swaps through TWAK MCP.
+ * Trade executor that routes all swaps through Binance Agentic Wallet (`baw`).
  * This module constructs trade orders and processes results.
- * Actual MCP calls (swap, get_swap_quote) are invoked by the
- * agent orchestrator and results are fed back here.
+ * Live execution is `baw market-order swap` + poll `market-order list`.
  *
- * Design: TWAK is the SOLE execution layer — no direct RPC calls,
- * no custodial intermediaries. Keys stay with the user's local
- * wallet (self-custody integrity for the TWAK special prize).
+ * Design: Agentic Wallet is the SOLE execution layer — MPC keyless signing,
+ * no local private keys, campaign PnL only counts AW trades of eligible bStocks.
  */
 
 let orderCounter = 0;
@@ -63,65 +62,48 @@ export function floorTokenAmount(amount: number, decimals = 8): number {
   return Math.floor(amount * factor + 1e-12) / factor;
 }
 
-/** TWAK swap amount: USD for buys (USDT in), token units for sells (token out). */
+/** Human-readable qty for baw: USD for stable-funded buys, token units for sells. */
 export function resolveSwapAmount(order: TradeOrder): string {
   if (order.side === "sell" && order.fromTokenAmount !== undefined && order.fromTokenAmount > 0) {
     return String(order.fromTokenAmount);
   }
   return String(order.amountUsd);
 }
+
 /**
- * Build the TWAK MCP swap parameters from a TradeOrder.
- * Returns the argument object to pass to CallMcpTool("swap").
- */
-/**
- * Resolve token identifier for TWAK swap.
- * USDT uses the BEP-20 contract; BNB uses the native symbol.
+ * Resolve a token to the contract address baw expects.
+ * Native BNB uses the Binance sentinel address. Payment stables and bStocks
+ * use the type=3 / common-token tables — never fabricate an address.
  */
 export function resolveSwapToken(token: string): string {
   const upper = token.toUpperCase();
-  if (upper === "USDT") return BSC_USDT_ADDRESS;
-  if (upper === "BNB") return "BNB";
-  // Static map first, then any contract resolved at runtime via CMC.
-  const mapped = knownBscAddress(token);
-  if (mapped) return mapped;
+  if (upper === "BNB") return BSC_NATIVE_BNB;
+  const payment = paymentTokenAddress(upper);
+  if (payment) return payment;
+  const bstock = getBstockAddress(upper);
+  if (bstock) return bstock;
   return token;
 }
 
 export function buildSwapParams(order: TradeOrder): {
-  fromChain: string;
+  fromTokenQty: string;
   fromToken: string;
-  toChain: string;
   toToken: string;
-  amount: string;
+  binanceChainId: string;
   slippage: string;
 } {
   return {
-    fromChain: BSC_CHAIN,
+    fromTokenQty: resolveSwapAmount(order),
     fromToken: resolveSwapToken(order.fromToken),
-    toChain: BSC_CHAIN,
     toToken: resolveSwapToken(order.toToken),
-    amount: resolveSwapAmount(order),
+    binanceChainId: BSC_CHAIN_ID,
     slippage: String(order.slippage),
   };
 }
-/**
- * Build TWAK MCP quote parameters for pre-trade price check.
- */
-export function buildQuoteParams(order: TradeOrder): {
-  fromChain: string;
-  fromToken: string;
-  toChain: string;
-  toToken: string;
-  amount: string;
-} {
-  return {
-    fromChain: BSC_CHAIN,
-    fromToken: resolveSwapToken(order.fromToken),
-    toChain: BSC_CHAIN,
-    toToken: resolveSwapToken(order.toToken),
-    amount: resolveSwapAmount(order),
-  };
+
+/** Quote params match swap params so the same route is priced. */
+export function buildQuoteParams(order: TradeOrder): ReturnType<typeof buildSwapParams> {
+  return buildSwapParams(order);
 }
 const ON_CHAIN_TX_PATTERN = /^0x[a-fA-F0-9]{40,}$/;
 
@@ -144,7 +126,7 @@ export function isConfirmedTxHash(
   return isOnChainTxHash(txHash);
 }
 
-/** TWAK swap failures use `success: false` plus a `code` / `message` (not always `error`). */
+/** Agentic Wallet / baw failures use `success: false` plus a `code` / `message`. */
 export function isSwapFailure(mcpResult: Record<string, unknown>): boolean {
   if (mcpResult.success === false) return true;
   if (mcpResult.isError === true) return true;
@@ -170,7 +152,7 @@ function swapFailureMessage(mcpResult: Record<string, unknown>): string | undefi
   return typeof code === "string" ? code : undefined;
 }
 
-/** Pull swap tx hash from TWAK MCP payloads (structured fields only — never from error text). */
+/** Pull swap tx hash from baw market-order payloads (structured fields only). */
 export function extractTxHash(mcpResult: Record<string, unknown>, depth = 0): string | undefined {
   if (depth > 4) return undefined;
 
@@ -193,7 +175,7 @@ export function extractTxHash(mcpResult: Record<string, unknown>, depth = 0): st
   return undefined;
 }
 
-/** Parse TWAK summary like "4.9 TWT -> 1.84 USDT" or output "113.3 USDT". */
+/** Parse swap summaries like "4.9 AAPLB -> 1.84 USDT" or output "113.3 USDT". */
 function parseSwapSummary(summary: string): { fromAmount?: string; toAmount?: string } {
   const arrow = summary.match(/^([\d.]+)\s+\S+\s*->\s*([\d.]+)/);
   if (arrow) return { fromAmount: arrow[1], toAmount: arrow[2] };
@@ -203,7 +185,7 @@ function parseSwapSummary(summary: string): { fromAmount?: string; toAmount?: st
 }
 
 /**
- * Process the swap result from TWAK MCP into our TradeResult format.
+ * Process the swap result from Agentic Wallet into our TradeResult format.
  * Live trades require a confirmed on-chain tx hash before counting as success.
  */
 export function processSwapResult(
@@ -335,7 +317,7 @@ export function validateAndCreateOrder(
   if (!isEligibleToken(signal.symbol) && !hasBscSwapAddress(signal.symbol)) {
     return {
       approved: false,
-      violations: [`No verified BEP-20 contract for ${signal.symbol} on BSC — cannot route swap`],
+      violations: [`No verified bStock / BEP-20 contract for ${signal.symbol} on BSC — cannot route swap`],
     };
   }
 

@@ -1,22 +1,21 @@
 /**
- * Strategy presets — three risk-tiered day-trading profiles.
+ * Session-aware strategy profiles for 24/7 on-chain bStock trading.
  *
- *   SafeTrade  <  Medium  <  Momentum
- *   (lowest DD / lowest ROI)        (highest ROI / highest DD chance)
+ *   RTH        — NYSE cash hours: trend, ORB, volume; larger size
+ *   Close      — 16:00–20:00 ET: harvest overnight premium, hold strength
+ *   Overnight  — thin books + news/gaps: mean-reversion, smaller size
  *
- * Each profile bundles two things:
- *   1. `signalWeights` — how much each indicator contributes to the blended
- *      score. This is the "priority weighting" the strategy trades on
- *      (volume spike, mcap:volume turnover, 24h momentum, RSI, MACD, etc.).
- *   2. Risk parameters — drawdown cap, stop/take-profit, position sizing,
- *      and how many trades/positions are allowed.
- *
- * Designed for top-150 CMC day trading at ~1–5 trades/day. SafeTrade favours
- * confirmed mean-reversion with tight stops; Momentum chases breakouts/volume
- * with wider stops and lets winners run.
+ * `auto` policy (default) swaps the active profile as the NY clock moves.
  */
 
-export type StrategyName = "safe" | "medium" | "momentum";
+import {
+  isSessionPolicy,
+  resolveSessionPolicy,
+  type SessionName,
+  type SessionPolicy,
+} from "./session.js";
+
+export type { SessionName, SessionPolicy };
 
 export interface SignalWeights {
   rsi: number;
@@ -24,42 +23,33 @@ export interface SignalWeights {
   ema: number;
   bollinger: number;
   momentum: number;
-  /** Relative volume vs its own 20-bar average (volume spike). */
   volume: number;
-  /** 24h volume / market cap — turnover / liquidity-adjusted interest. */
   mcapVolRatio: number;
-  sentiment: number;
   news: number;
+  stochRsi: number;
+  vwap: number;
+  gap: number;
+  orb: number;
+  regime: number;
 }
 
-export interface StrategyProfile {
-  name: StrategyName;
+export interface SessionProfile {
+  name: SessionName;
   label: string;
   description: string;
-
   signalWeights: SignalWeights;
-
-  /** Blended-score thresholds that map to buy/sell strength. */
   thresholds: {
     strongBuy: number;
     buy: number;
     sell: number;
     strongSell: number;
   };
-
-  /** Target portfolio allocation (%) per new position. */
   alloc: { strongBuy: number; buy: number };
-
-  /** Multiplier applied to the computed position size (sizing aggressiveness). */
   positionSizeMultiplier: number;
-
-  /** Require an oversold + bullish-MACD reversal before buying a downtrend. */
+  /** Veto buys into a confirmed downtrend unless RSI+MACD reverse. */
   requireReversalConfirmation: boolean;
-
-  /** Risk guardrails fed into AgentConfig. */
   risk: {
     maxDrawdownPct: number;
-    maxDailyTrades: number;
     maxPortfolioTokens: number;
     minBuyConfidence: number;
     stopLossPct: number;
@@ -69,136 +59,138 @@ export interface StrategyProfile {
   };
 }
 
-export const STRATEGY_PRESETS: Record<StrategyName, StrategyProfile> = {
-  /**
-   * SafeTrade — capital-preservation first. Leans on mean-reversion (RSI,
-   * Bollinger) + trend/sentiment confirmation, doesn't chase volume spikes,
-   * needs high conviction to act, and cuts losers fast with tight stops.
-   * Fewer trades, smaller size, lowest expected drawdown.
-   */
-  safe: {
-    name: "safe",
-    label: "SafeTrade",
+export const SESSION_PROFILES: Record<SessionName, SessionProfile> = {
+  rth: {
+    name: "rth",
+    label: "RTH",
     description:
-      "Capital-preservation. Confirmed mean-reversion, tight stops, smallest size — lowest drawdown, steadier but smaller ROI.",
+      "Cash-session price discovery. Trend + opening-range breakouts + volume; larger size, tighter stops.",
     signalWeights: {
-      rsi: 22,
-      macd: 14,
+      rsi: 8,
+      macd: 12,
       ema: 14,
-      bollinger: 12,
-      momentum: 8,
-      volume: 8,
-      mcapVolRatio: 4,
-      sentiment: 10,
-      news: 8,
+      bollinger: 4,
+      momentum: 16,
+      volume: 16,
+      mcapVolRatio: 6,
+      news: 6,
+      stochRsi: 6,
+      vwap: 10,
+      gap: 6,
+      orb: 18,
+      regime: 12,
     },
-    thresholds: { strongBuy: 45, buy: 24, sell: -15, strongSell: -42 },
-    alloc: { strongBuy: 14, buy: 7 },
-    positionSizeMultiplier: 0.6,
-    requireReversalConfirmation: true,
-    risk: {
-      maxDrawdownPct: 12,
-      maxDailyTrades: 3,
-      maxPortfolioTokens: 3,
-      minBuyConfidence: 0.65,
-      stopLossPct: 5,
-      takeProfitPct: 10,
-      trailingActivatePct: 4,
-      trailingGivebackPct: 2,
-    },
-  },
-
-  /**
-   * Medium — balanced day-trading profile. Equal respect for trend, momentum
-   * and volume, with moderate stops and sizing. The sensible default.
-   */
-  medium: {
-    name: "medium",
-    label: "Medium",
-    description:
-      "Balanced. Trend + momentum + volume weighted evenly, moderate stops and sizing — middle ground on risk and return.",
-    signalWeights: {
-      rsi: 15,
-      macd: 13,
-      ema: 11,
-      bollinger: 6,
-      momentum: 18,
-      volume: 18,
-      mcapVolRatio: 7,
-      sentiment: 6,
-      news: 10,
-    },
-    thresholds: { strongBuy: 40, buy: 15, sell: -12, strongSell: -40 },
-    alloc: { strongBuy: 18, buy: 10 },
-    positionSizeMultiplier: 0.85,
+    thresholds: { strongBuy: 38, buy: 14, sell: -14, strongSell: -40 },
+    alloc: { strongBuy: 20, buy: 11 },
+    positionSizeMultiplier: 1.0,
     requireReversalConfirmation: true,
     risk: {
       maxDrawdownPct: 20,
-      maxDailyTrades: 5,
-      maxPortfolioTokens: 3,
-      minBuyConfidence: 0.55,
+      maxPortfolioTokens: 4,
+      minBuyConfidence: 0.5,
+      stopLossPct: 6,
+      takeProfitPct: 12,
+      trailingActivatePct: 5,
+      trailingGivebackPct: 2.5,
+    },
+  },
+
+  close: {
+    name: "close",
+    label: "Close",
+    description:
+      "Harvest overnight equity premium. Accumulate strength into the cash close; do not dump winners just because NYSE closed.",
+    signalWeights: {
+      rsi: 8,
+      macd: 10,
+      ema: 14,
+      bollinger: 4,
+      momentum: 18,
+      volume: 10,
+      mcapVolRatio: 5,
+      news: 8,
+      stochRsi: 6,
+      vwap: 16,
+      gap: 8,
+      orb: 0,
+      regime: 10,
+    },
+    thresholds: { strongBuy: 34, buy: 12, sell: -18, strongSell: -44 },
+    alloc: { strongBuy: 16, buy: 9 },
+    positionSizeMultiplier: 0.85,
+    requireReversalConfirmation: false,
+    risk: {
+      maxDrawdownPct: 22,
+      maxPortfolioTokens: 4,
+      minBuyConfidence: 0.48,
       stopLossPct: 8,
-      takeProfitPct: 15,
+      takeProfitPct: 16,
       trailingActivatePct: 6,
       trailingGivebackPct: 3,
     },
   },
 
-  /**
-   * Momentum — return-seeking. Heavily weights volume spikes, momentum and
-   * mcap:volume turnover to catch breakouts early; de-emphasises overbought
-   * RSI so it can ride trends. Wider stops, larger size, higher take-profit
-   * and a looser reversal gate. Highest ROI potential and highest DD risk.
-   */
-  momentum: {
-    name: "momentum",
-    label: "Momentum",
+  overnight: {
+    name: "overnight",
+    label: "Overnight",
     description:
-      "Return-seeking. Chases volume spikes, momentum and turnover breakouts; wider stops, larger size, lets winners run — highest ROI, highest drawdown risk.",
+      "24/7 edge vs cash. Mean-reversion on gaps + news; smaller size, ATR-wider stops. Flatten anytime — cash cannot.",
     signalWeights: {
-      rsi: 8,
-      macd: 12,
-      ema: 12,
-      bollinger: 4,
-      momentum: 26,
-      volume: 26,
-      mcapVolRatio: 12,
-      sentiment: 2,
-      news: 8,
+      rsi: 16,
+      macd: 8,
+      ema: 8,
+      bollinger: 12,
+      momentum: 8,
+      volume: 6,
+      mcapVolRatio: 4,
+      news: 14,
+      stochRsi: 14,
+      vwap: 6,
+      gap: 18,
+      orb: 0,
+      regime: 6,
     },
-    thresholds: { strongBuy: 35, buy: 12, sell: -12, strongSell: -42 },
-    alloc: { strongBuy: 24, buy: 13 },
-    positionSizeMultiplier: 1.1,
+    thresholds: { strongBuy: 40, buy: 16, sell: -12, strongSell: -38 },
+    alloc: { strongBuy: 12, buy: 7 },
+    positionSizeMultiplier: 0.55,
     requireReversalConfirmation: false,
     risk: {
-      maxDrawdownPct: 28,
-      maxDailyTrades: 6,
+      maxDrawdownPct: 18,
       maxPortfolioTokens: 3,
-      minBuyConfidence: 0.45,
+      minBuyConfidence: 0.52,
       stopLossPct: 10,
-      takeProfitPct: 28,
-      trailingActivatePct: 8,
-      trailingGivebackPct: 4,
+      takeProfitPct: 14,
+      trailingActivatePct: 7,
+      trailingGivebackPct: 3.5,
     },
   },
 };
 
-export const DEFAULT_STRATEGY: StrategyName = "medium";
+export const DEFAULT_SESSION_POLICY: SessionPolicy = "auto";
 
-export function isStrategyName(value: unknown): value is StrategyName {
-  return value === "safe" || value === "medium" || value === "momentum";
+/** @deprecated Use SessionName / sessionPolicy. Kept for env alias mapping. */
+export type StrategyName = SessionPolicy;
+
+export function getSessionProfile(name: SessionName): SessionProfile {
+  return SESSION_PROFILES[name];
 }
 
-export function resolveStrategyName(raw?: string | null): StrategyName {
+export function resolveStrategyName(raw?: string | null): SessionPolicy {
   const v = (raw || "").trim().toLowerCase();
-  if (isStrategyName(v)) return v;
-  // Friendly aliases.
-  if (v === "safetrade" || v === "conservative" || v === "low") return "safe";
-  if (v === "balanced" || v === "mid") return "medium";
-  if (v === "aggressive" || v === "high" || v === "momentum") return "momentum";
-  return DEFAULT_STRATEGY;
+  if (v === "safe" || v === "safetrade" || v === "conservative") return "overnight";
+  if (v === "medium" || v === "balanced" || v === "mid") return "auto";
+  if (v === "momentum" || v === "aggressive" || v === "high") return "rth";
+  return resolveSessionPolicy(raw);
 }
 
-export function getStrategyProfile(name?: StrategyName | string | null): StrategyProfile {
-  return STRATEGY_PRESETS[resolveStrategyName(typeof name === "string" ? name : name ?? undefined)];
+export function isStrategyName(value: unknown): value is SessionPolicy {
+  return isSessionPolicy(value);
+}
+
+export function getStrategyProfile(
+  name?: SessionPolicy | SessionName | string | null
+): SessionProfile {
+  const policy = resolveStrategyName(typeof name === "string" ? name : name ?? undefined);
+  const active: SessionName = policy === "auto" ? "rth" : policy;
+  return SESSION_PROFILES[active];
 }

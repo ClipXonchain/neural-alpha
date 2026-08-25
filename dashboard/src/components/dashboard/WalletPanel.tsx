@@ -23,7 +23,8 @@ interface WalletPanelProps {
   connected: boolean;
   onSync: () => Promise<{ usdtBalance: number; synced: boolean }>;
   onRegister: () => Promise<Record<string, unknown>>;
-  onSwitchMode: (mode: "local" | "walletconnect") => Promise<Record<string, unknown>>;
+  onSignin: () => Promise<{ urlForWeb?: string; qrCodeId?: string; pairingCode?: string; status?: string }>;
+  onVerify: (qrCodeId: string) => Promise<Record<string, unknown>>;
   readOnly?: boolean;
 }
 
@@ -33,11 +34,20 @@ export function WalletPanel({
   connected,
   onSync,
   onRegister,
+  onSignin,
+  onVerify,
   readOnly,
 }: WalletPanelProps) {
   const [copied, setCopied] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [registering, setRegistering] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [signin, setSignin] = useState<{
+    urlForWeb?: string;
+    qrCodeId?: string;
+    pairingCode?: string;
+  } | null>(null);
   const [actionMsg, setActionMsg] = useState<string | null>(null);
 
   const copyAddress = () => {
@@ -64,12 +74,52 @@ export function WalletPanel({
     setRegistering(true);
     setActionMsg(null);
     try {
-      await onRegister();
-      setActionMsg("Registration submitted on BSC");
+      const r = await onRegister();
+      const join = typeof r.joinUrl === "string" ? r.joinUrl : wallet?.campaign?.joinUrl;
+      if (join) window.open(join, "_blank", "noopener,noreferrer");
+      setActionMsg("Open Join Now on the campaign page and bind this Agentic Wallet. Trades before registration do not count.");
     } catch (e) {
       setActionMsg(String(e));
     } finally {
       setRegistering(false);
+    }
+  };
+
+  const handleSignin = async () => {
+    setSigningIn(true);
+    setActionMsg(null);
+    try {
+      const r = await onSignin();
+      if (r.status === "ALREADY_CONNECTED") {
+        setActionMsg("Agentic Wallet already connected");
+        return;
+      }
+      setSignin({ urlForWeb: r.urlForWeb, qrCodeId: r.qrCodeId, pairingCode: r.pairingCode });
+      if (r.urlForWeb) window.open(r.urlForWeb, "_blank", "noopener,noreferrer");
+      setActionMsg(
+        r.pairingCode
+          ? `Pairing code ${r.pairingCode} — confirm in the Binance App, then click I've confirmed.`
+          : "Confirm sign-in in the Binance App, then click I've confirmed."
+      );
+    } catch (e) {
+      setActionMsg(String(e));
+    } finally {
+      setSigningIn(false);
+    }
+  };
+
+  const handleVerify = async () => {
+    if (!signin?.qrCodeId) return;
+    setVerifying(true);
+    setActionMsg(null);
+    try {
+      await onVerify(signin.qrCodeId);
+      setSignin(null);
+      setActionMsg("Agentic Wallet connected");
+    } catch (e) {
+      setActionMsg(String(e));
+    } finally {
+      setVerifying(false);
     }
   };
 
@@ -89,7 +139,7 @@ export function WalletPanel({
             className="text-sm font-semibold tracking-wide uppercase"
             style={{ fontFamily: "var(--font-display)" }}
           >
-            TWAK Wallet
+            Agentic Wallet
           </h3>
         </div>
         <span
@@ -134,7 +184,7 @@ export function WalletPanel({
           </div>
         ) : (
           <p className="text-xs text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
-            Connect TWAK MCP (`twak serve`) to bind wallet
+            Sign in with `baw auth signin` (Binance App QR) to bind wallet
           </p>
         )}
         {wallet && (
@@ -177,8 +227,38 @@ export function WalletPanel({
             <div>
               <p className="text-xs font-semibold text-text-primary mb-1">Fund your agent</p>
               <p className="text-[11px] text-text-secondary leading-relaxed">
-                Send <strong className="text-neon">USDT</strong> on BSC to the address above, then click
-                Sync Balance. Keep some <strong>BNB</strong> for gas.
+                Send <strong className="text-neon">USDT / USDC / U / USD1</strong> on BSC
+                (campaign payment tokens) to the address above, then Sync. Keep{" "}
+                <strong>BNB</strong> for gas — AI x402 calls are gasless, swaps are not.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Campaign qualification */}
+      {wallet?.campaign && (
+        <div className="rounded-lg bg-surface-overlay/40 p-3 mb-4">
+          <p className="text-[10px] text-text-muted uppercase tracking-wider mb-2">
+            bStock PnL contest
+          </p>
+          <div className="grid grid-cols-3 gap-2 text-center">
+            <div>
+              <p className="text-[9px] text-text-muted">Registered</p>
+              <p className="text-xs font-bold text-text-primary" style={{ fontFamily: "var(--font-mono)" }}>
+                {wallet.campaign.registered ? "yes" : "no"}
+              </p>
+            </div>
+            <div>
+              <p className="text-[9px] text-text-muted">CMC x402</p>
+              <p className="text-xs font-bold text-text-primary" style={{ fontFamily: "var(--font-mono)" }}>
+                {wallet.campaign.cmcCalls}/{wallet.campaign.minCmcCalls}
+              </p>
+            </div>
+            <div>
+              <p className="text-[9px] text-text-muted">Studio x402</p>
+              <p className="text-xs font-bold text-text-primary" style={{ fontFamily: "var(--font-mono)" }}>
+                {wallet.campaign.studioCalls}/{wallet.campaign.minStudioCalls}
               </p>
             </div>
           </div>
@@ -187,6 +267,27 @@ export function WalletPanel({
 
       {/* Actions */}
       <div className="flex flex-wrap gap-2">
+        {!readOnly && (
+          <button
+            onClick={handleSignin}
+            disabled={!connected || signingIn}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-warning/10 text-warning border border-warning/20 hover:bg-warning/20 disabled:opacity-40 transition-colors"
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
+            {signingIn ? "Starting…" : "Sign in (QR)"}
+          </button>
+        )}
+
+        {!readOnly && signin?.qrCodeId && (
+          <button
+            onClick={handleVerify}
+            disabled={verifying}
+            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-neon/10 text-neon border border-neon/20 hover:bg-neon/20 disabled:opacity-40 transition-colors"
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
+            {verifying ? "Waiting for App…" : "I've confirmed"}
+          </button>
+        )}
         {!readOnly && (
           <button
             onClick={handleSync}

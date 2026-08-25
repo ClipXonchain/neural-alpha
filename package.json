@@ -2,7 +2,7 @@
   "name": "neural-alpha",
   "version": "1.0.0",
   "private": true,
-  "description": "Neural Alpha — autonomous BSC trading agent for BNB Hack Track 1",
+  "description": "Neural Alpha — autonomous bStock trading agent for Binance Agentic Wallet",
   "workspaces": [
     "neural-alpha",
     "dashboard"
@@ -18,9 +18,9 @@
     "dashboard:start": "npm run start --workspace=dashboard",
     "prod:build": "npm run build",
     "prod:start": "pm2 start ecosystem.config.cjs",
-    "prod:stop": "pm2 stop ecosystem.config.cjs",
-    "prod:restart": "pm2 restart ecosystem.config.cjs",
-    "prod:logs": "pm2 logs",
+    "prod:stop": "pm2 stop neural-agent neural-dashboard",
+    "prod:restart": "pm2 restart neural-agent neural-dashboard",
+    "prod:logs": "pm2 logs neural-agent neural-dashboard",
     "prod:status": "pm2 status",
     "prod:deploy": "bash deploy/setup.sh"
   },

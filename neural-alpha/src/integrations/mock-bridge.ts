@@ -1,38 +1,36 @@
 import type { McpBridge } from "../agent.js";
 import { buildQuoteParams, buildSwapParams } from "../execution/executor.js";
+import { getEligibleBstockSymbols } from "./bstock.js";
 
 /**
- * Mock bridge for offline paper trading.
- * x402Request simulates CMC Agent Hub response shapes so the same
- * parsing path runs as with real TWAK x402 payments.
+ * Mock bridge for offline paper trading of bStocks.
  */
 export function createMockBridge(): McpBridge {
   const basePrices: Record<string, number> = {
-    ETH: 3800, LINK: 15.2, AVAX: 35,
-    FET: 2.3, FLOKI: 0.00018, PENDLE: 4.5, INJ: 22, BONK: 0.000025,
-    APE: 1.2, CAKE: 2.8, "1INCH": 0.45, SNX: 3.2, DEXE: 8.5,
-    PENGU: 0.012, AXS: 7.5, COMP: 55, LDO: 2.1, SUSHI: 1.1,
-    RAY: 3.5, ZRO: 2.8, STG: 0.35, NXPC: 0.85, CHEEMS: 0.0000012,
-    DOGE: 0.15, SHIB: 0.000025,
+    NVDAB: 180, AAPLB: 230, TSLAB: 350, MSFTB: 420, GOOGLB: 200,
+    AMZNB: 230, METAB: 580, PLTRB: 175, SPYB: 640, QQQB: 560,
+    NFLXB: 980, AMDB: 160, INTCB: 45, AVGOB: 1700, ORCLB: 240,
+    COINB: 280, MSTRB: 380, HOODB: 90, CRCLB: 140, IRENB: 12,
+    GMEB: 25, AMATB: 190, MUUB: 120, TSMB: 180,
   };
 
   const trends: Record<string, number> = {};
-  let fearGreed = 42;
 
   function driftPrice(symbol: string): number | null {
-    const base = basePrices[symbol];
-    if (!base) return null;
-
-    if (!(symbol in trends)) {
-      trends[symbol] = (Math.random() - 0.5) * 0.005;
+    const upper = symbol.toUpperCase();
+    if (!(upper in basePrices)) {
+      if (getEligibleBstockSymbols().includes(upper) || upper.endsWith("B")) {
+        basePrices[upper] = 50 + Math.random() * 200;
+      } else {
+        return null;
+      }
     }
-    if (Math.random() < 0.1) {
-      trends[symbol] = (Math.random() - 0.5) * 0.008;
-    }
-
-    const noise = (Math.random() - 0.5) * 0.03;
-    basePrices[symbol] = base * (1 + trends[symbol] + noise);
-    return basePrices[symbol];
+    const base = basePrices[upper]!;
+    if (!(upper in trends)) trends[upper] = (Math.random() - 0.5) * 0.004;
+    if (Math.random() < 0.1) trends[upper] = (Math.random() - 0.5) * 0.006;
+    const noise = (Math.random() - 0.5) * 0.02;
+    basePrices[upper] = base * (1 + trends[upper]! + noise);
+    return basePrices[upper]!;
   }
 
   function cmcQuotePayload(symbols: string[]) {
@@ -45,7 +43,7 @@ export function createMockBridge(): McpBridge {
         quote: {
           USD: {
             price,
-            percent_change_24h: (Math.random() - 0.45) * 12,
+            percent_change_24h: (Math.random() - 0.45) * 8,
             volume_24h: 500_000 + Math.random() * 5_000_000,
             market_cap: price * (1_000_000 + Math.random() * 50_000_000),
           },
@@ -64,68 +62,53 @@ export function createMockBridge(): McpBridge {
       return { balance: "1.5" };
     },
     async getSwapQuote(params: ReturnType<typeof buildQuoteParams>) {
-      return { estimatedOutput: params.amount, priceImpact: "0.1%" };
+      return { estimatedOutput: params.fromTokenQty, priceImpact: "0.1%" };
     },
     async executeSwap(_params: ReturnType<typeof buildSwapParams>) {
       return {
         txHash: `0x${Date.now().toString(16)}${"0".repeat(40)}`.slice(0, 66),
         toAmount: "100",
+        success: true,
       };
     },
     async getAddress(_chain: string) {
       return { address: "0x" + "a".repeat(40) };
     },
     async x402Request(url: string, _maxPayment: string) {
-      if (url.includes("/fear-and-greed")) {
-        fearGreed = Math.max(5, Math.min(95, fearGreed + (Math.random() - 0.5) * 8));
-        return { data: { value: Math.round(fearGreed), value_classification: "Neutral" } };
-      }
-
       if (url.includes("/trending/latest")) {
-        return {
-          data: [
-            { symbol: "FET" }, { symbol: "FLOKI" }, { symbol: "BONK" },
-            { symbol: "PENDLE" }, { symbol: "INJ" }, { symbol: "PENGU" },
-          ],
-        };
+        return { data: getEligibleBstockSymbols().slice(0, 6).map((symbol) => ({ symbol })) };
       }
-
       if (url.includes("/quotes/latest")) {
         const parsed = new URL(url);
         const symbolParam = parsed.searchParams.get("symbol") || "";
         const symbols = symbolParam.split(",").map((s) => s.trim()).filter(Boolean);
-        return cmcQuotePayload(symbols.length > 0 ? symbols : ["ETH"]);
+        return cmcQuotePayload(symbols.length > 0 ? symbols : ["NVDAB"]);
       }
-
-      // Unknown CMC endpoint — return empty success
       return { data: {} };
     },
-    async getTrendingTokens(_limit: number) {
-      return [
-        { symbol: "FET" }, { symbol: "FLOKI" }, { symbol: "BONK" },
-        { symbol: "PENDLE" }, { symbol: "INJ" }, { symbol: "PENGU" },
-      ];
+    async getTrendingTokens(limit: number) {
+      return getEligibleBstockSymbols().slice(0, limit).map((symbol) => ({ symbol }));
     },
     async checkTokenRisk(_chain: string, _token?: string) {
       return { isHoneypot: false, riskLevel: "low" };
     },
-
     async getStablecoinBalance(_chain: string) {
       return { balance: 1000, symbol: "USDT" };
     },
-
     async switchWalletMode(mode: "local" | "walletconnect") {
-      return { mode, state: mode === "local" ? "local" : "wc-pairing" };
+      return { mode, state: "connected", walletType: "binance-agentic-wallet" };
     },
-
     async getWalletStatus() {
-      return { state: "local", mode: "local", walletType: "local" };
+      return {
+        state: "connected",
+        mode: "agentic-wallet",
+        walletType: "binance-agentic-wallet",
+        status: "CONNECTED",
+      };
     },
-
     async competitionRegister() {
-      return { ok: true, simulated: true, txHash: `0xmock${Date.now()}` };
+      return { ok: true, simulated: true, joinUrl: "https://web3.binance.com/en/campaigns/bstock-pnl-contest" };
     },
-
     async competitionStatus() {
       return { registered: false, registrationOpen: true, simulated: true };
     },

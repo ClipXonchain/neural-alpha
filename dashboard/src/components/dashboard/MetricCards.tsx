@@ -35,25 +35,35 @@ function MetricCard({
   delay = 0,
 }: MetricCardProps) {
   const colors = {
-    neon: { bg: "bg-neon/5", border: "border-neon/15", text: "text-neon", glow: "glow-neon" },
-    cyan: { bg: "bg-cyan/5", border: "border-cyan/15", text: "text-cyan", glow: "glow-cyan" },
-    danger: { bg: "bg-danger/5", border: "border-danger/15", text: "text-danger", glow: "glow-danger" },
-    warning: { bg: "bg-warning/5", border: "border-warning/15", text: "text-warning", glow: "" },
+    neon: { bg: "bg-neon/5", text: "text-neon" },
+    cyan: { bg: "bg-cyan/5", text: "text-cyan" },
+    danger: { bg: "bg-danger/5", text: "text-danger" },
+    warning: { bg: "bg-warning/5", text: "text-warning" },
   }[accentColor];
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay }}
+      transition={{ duration: 0.4, delay }}
       whileHover={{ y: -2, transition: { duration: 0.2 } }}
       className={cn(
         "glass-raised rounded-xl p-4 relative overflow-hidden group",
         "hover:border-neon/20 transition-all duration-300"
       )}
     >
-      <div className="absolute top-0 right-0 w-24 h-24 rounded-full blur-3xl opacity-0 group-hover:opacity-100 transition-opacity duration-500"
-        style={{ background: accentColor === "neon" ? "rgba(0,255,136,0.05)" : accentColor === "cyan" ? "rgba(0,212,255,0.05)" : accentColor === "danger" ? "rgba(255,51,102,0.05)" : "rgba(255,170,0,0.05)" }}
+      <div
+        className="absolute top-0 right-0 w-24 h-24 rounded-full blur-3xl opacity-0 group-hover:opacity-100 transition-opacity duration-500"
+        style={{
+          background:
+            accentColor === "neon"
+              ? "rgba(14,203,129,0.08)"
+              : accentColor === "cyan"
+                ? "rgba(30,159,242,0.08)"
+                : accentColor === "danger"
+                  ? "rgba(246,70,93,0.08)"
+                  : "rgba(240,185,11,0.08)",
+        }}
       />
 
       <div className="flex items-start justify-between mb-3">
@@ -94,11 +104,11 @@ export function MetricCards({ state }: { state: AgentState }) {
   const dailyTrend = state.dailyPnl >= 0 ? "up" : "down";
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
       <MetricCard
         label="Portfolio Value"
         value={formatUsd(state.portfolioValue)}
-        subValue={formatPct(state.totalPnlPct)}
+        subValue={`${formatUsd(state.cashBalance)} cash`}
         icon={<Wallet className="size-4" />}
         trend={pnlTrend}
         accentColor="cyan"
@@ -107,7 +117,7 @@ export function MetricCards({ state }: { state: AgentState }) {
       <MetricCard
         label="Total PnL"
         value={formatUsd(state.totalPnl)}
-        subValue={formatPct(state.totalPnlPct)}
+        subValue={`${formatPct(state.totalPnlPct)} · ${formatUsd(state.realizedPnl)} closed`}
         icon={state.totalPnl >= 0 ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}
         trend={pnlTrend}
         accentColor={state.totalPnl >= 0 ? "neon" : "danger"}
@@ -134,7 +144,7 @@ export function MetricCards({ state }: { state: AgentState }) {
       <MetricCard
         label="Trades 24h"
         value={String(state.autonomous.tradesLast24h)}
-        subValue={`${state.autonomous.tradesToday}/${state.autonomous.maxTradesToday} today`}
+        subValue={`${state.autonomous.tradesToday} today`}
         icon={<Repeat className="size-4" />}
         trend="neutral"
         accentColor="cyan"
@@ -142,11 +152,7 @@ export function MetricCards({ state }: { state: AgentState }) {
       />
       <MetricCard
         label="Win Rate"
-        value={
-          state.closedTrades > 0
-            ? `${state.winRate.toFixed(1)}%`
-            : "—"
-        }
+        value={state.closedTrades > 0 ? `${state.winRate.toFixed(1)}%` : "—"}
         subValue={
           state.closedTrades > 0
             ? `${state.winCount}W / ${state.lossCount}L · ${state.closedTrades} sells`

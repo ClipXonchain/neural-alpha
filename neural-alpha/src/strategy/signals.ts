@@ -2,15 +2,25 @@ import type { TechnicalSignals, MarketData, TradeSignal, SignalStrength } from "
 import { getClosePrices, getVolumes, getPriceHistory } from "../data/market.js";
 import { isStablecoin } from "../config.js";
 import type { NewsSentiment } from "./news-sentiment.js";
+import type { CmcMacroSnapshot } from "./cmc-macro.js";
 import * as ind from "./indicators.js";
 import {
-  getStrategyProfile,
-  DEFAULT_STRATEGY,
-  type StrategyProfile,
+  getSessionProfile,
+  type SessionName,
+  type SessionProfile,
   type SignalWeights,
 } from "./presets.js";
+import {
+  clockSession,
+  getSessionClock,
+  openingRange,
+  overnightGapPct,
+  type SessionPolicy,
+} from "./session.js";
 
-export function computeSignals(symbol: string): TechnicalSignals {
+export type IndexRegime = "risk_on" | "risk_off" | "neutral";
+
+export function computeSignals(symbol: string, price?: number): TechnicalSignals {
   const closes = getClosePrices(symbol);
   const volumes = getVolumes(symbol);
   const history = getPriceHistory(symbol);
@@ -20,23 +30,33 @@ export function computeSignals(symbol: string): TechnicalSignals {
 
   const fastEma = ind.latestEma(closes, 12);
   const slowEma = ind.latestEma(closes, 26);
+  const atrVal = ind.atr(highs, lows, closes, 14);
+  const lastClose = price ?? (closes.length > 0 ? closes[closes.length - 1] : null);
+  const atrPct =
+    atrVal !== null && lastClose !== null && lastClose > 0 ? (atrVal / lastClose) * 100 : null;
+  const gapPct = lastClose != null ? overnightGapPct(lastClose, history) : null;
+  const orb = lastClose != null ? openingRange(history, lastClose) : null;
+  const vwapVal = ind.vwap(history);
 
   return {
     rsi: ind.rsi(closes, 14),
     macd: ind.macd(closes, 12, 26, 9),
     ema: fastEma !== null && slowEma !== null ? { fast: fastEma, slow: slowEma } : null,
     bollingerBands: ind.bollingerBands(closes, 20, 2),
-    atr: ind.atr(highs, lows, closes, 14),
+    atr: atrVal,
     volumeRatio: ind.volumeRatio(volumes, 20),
+    stochRsi: ind.stochRsi(closes, 14, 14),
+    vwap: vwapVal,
+    gapPct,
+    orb,
+    atrPct,
   };
 }
 
 interface ScoreComponent {
   name: string;
-  /** Maps the component to its weight in the active strategy profile. */
   key: keyof SignalWeights;
   score: number;
-  /** Whether this component had enough data to contribute. */
   active: boolean;
   reason: string;
 }
@@ -129,21 +149,6 @@ function scoreMomentum(symbol: string): ScoreComponent {
   return { name: "Momentum", key: "momentum", score, active: true, reason };
 }
 
-function scoreSentiment(fearGreed: number | null): ScoreComponent {
-  if (fearGreed === null) return { name: "Sentiment", key: "sentiment", score: 0, active: false, reason: "no F&G data" };
-
-  let score = 0;
-  let reason = "";
-  // Contrarian: extreme fear = buy, extreme greed = sell
-  if (fearGreed < 20) { score = 50; reason = `Extreme Fear (${fearGreed}) — contrarian buy`; }
-  else if (fearGreed < 35) { score = 25; reason = `Fear (${fearGreed}) — cautious buy`; }
-  else if (fearGreed > 80) { score = -50; reason = `Extreme Greed (${fearGreed}) — contrarian sell`; }
-  else if (fearGreed > 65) { score = -25; reason = `Greed (${fearGreed}) — cautious sell`; }
-  else { score = 0; reason = `Neutral sentiment (${fearGreed})`; }
-
-  return { name: "Sentiment", key: "sentiment", score, active: true, reason };
-}
-
 function clamp(n: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, n));
 }
@@ -162,12 +167,6 @@ function scoreNews(newsSentiment: NewsSentiment | null | undefined): ScoreCompon
   };
 }
 
-/**
- * mcap:volume turnover — 24h volume as a fraction of market cap. High turnover
- * means the market is paying outsized attention to the token (often precedes
- * or accompanies a breakout); near-zero turnover flags illiquid / ignored names
- * we'd rather avoid. Liquidity-aware companion to the raw volume-spike signal.
- */
 function scoreMcapVolRatio(volume24h?: number, marketCap?: number): ScoreComponent {
   if (!volume24h || !marketCap || marketCap <= 0) {
     return { name: "McapVol", key: "mcapVolRatio", score: 0, active: false, reason: "no mcap/volume data" };
@@ -211,9 +210,125 @@ function scoreVolume(volumeRatio: number | null): ScoreComponent {
   return { name: "Volume", key: "volume", score, active: true, reason };
 }
 
+function scoreStochRsi(val: number | null): ScoreComponent {
+  if (val === null) {
+    return { name: "StochRSI", key: "stochRsi", score: 0, active: false, reason: "insufficient data" };
+  }
+  let score = 0;
+  let reason = "";
+  if (val < 15) { score = 70; reason = `StochRSI ${val.toFixed(0)} — extreme oversold`; }
+  else if (val < 25) { score = 45; reason = `StochRSI ${val.toFixed(0)} — oversold`; }
+  else if (val > 85) { score = -70; reason = `StochRSI ${val.toFixed(0)} — extreme overbought`; }
+  else if (val > 75) { score = -45; reason = `StochRSI ${val.toFixed(0)} — overbought`; }
+  else { score = 0; reason = `StochRSI ${val.toFixed(0)} — mid range`; }
+  return { name: "StochRSI", key: "stochRsi", score, active: true, reason };
+}
+
+function scoreVwap(vwap: number | null, price: number, session: SessionName): ScoreComponent {
+  if (vwap === null || !(price > 0) || vwap <= 0) {
+    return { name: "VWAP", key: "vwap", score: 0, active: false, reason: "no VWAP" };
+  }
+  const dev = ((price - vwap) / vwap) * 100;
+  let score = 0;
+  let reason = "";
+  if (session === "close") {
+    // Hold/add strength above VWAP into the cash close (overnight premium).
+    if (dev > 0.4) { score = 45; reason = `+${dev.toFixed(2)}% vs VWAP — strength into close`; }
+    else if (dev < -0.8) { score = -35; reason = `${dev.toFixed(2)}% vs VWAP — weak into close`; }
+    else { reason = `${dev.toFixed(2)}% vs VWAP — close tape`; }
+  } else if (session === "overnight") {
+    // Fade extended VWAP prints overnight when books are thin.
+    if (dev > 1.5) { score = -40; reason = `${dev.toFixed(2)}% above VWAP — fade overnight extension`; }
+    else if (dev < -1.5) { score = 40; reason = `${dev.toFixed(2)}% below VWAP — overnight mean-revert`; }
+    else { reason = `${dev.toFixed(2)}% vs VWAP`; }
+  } else {
+    if (dev > 0.3) { score = 30; reason = `+${dev.toFixed(2)}% vs VWAP — RTH bid`; }
+    else if (dev < -0.3) { score = -25; reason = `${dev.toFixed(2)}% vs VWAP — RTH offer`; }
+    else { reason = `${dev.toFixed(2)}% vs VWAP`; }
+  }
+  return { name: "VWAP", key: "vwap", score, active: true, reason };
+}
+
+function scoreGap(gapPct: number | null, session: SessionName): ScoreComponent {
+  if (gapPct === null) {
+    return { name: "Gap", key: "gap", score: 0, active: false, reason: "no RTH close ref" };
+  }
+  const mag = Math.abs(gapPct);
+  let score = 0;
+  let reason = "";
+  if (session === "overnight" || session === "close") {
+    // Fade extreme gaps; follow modest overnight drift.
+    if (gapPct <= -2.5) { score = 55; reason = `Gap ${gapPct.toFixed(2)}% vs RTH close — fade the dump`; }
+    else if (gapPct <= -1) { score = 30; reason = `Gap ${gapPct.toFixed(2)}% vs RTH close — overnight dip`; }
+    else if (gapPct >= 2.5) { score = -50; reason = `Gap +${gapPct.toFixed(2)}% vs RTH close — fade the spike`; }
+    else if (gapPct >= 0.6) { score = 20; reason = `Gap +${gapPct.toFixed(2)}% — overnight premium`; }
+    else { reason = `Gap ${gapPct.toFixed(2)}% vs RTH close`; }
+  } else {
+    if (mag < 0.3) { reason = `Gap ${gapPct.toFixed(2)}% — filled / flat`; }
+    else if (gapPct > 0) { score = Math.min(40, 12 + mag * 6); reason = `Gap +${gapPct.toFixed(2)}% — follow RTH continuation`; }
+    else { score = Math.max(-40, -12 - mag * 6); reason = `Gap ${gapPct.toFixed(2)}% — RTH gap-down pressure`; }
+  }
+  return { name: "Gap", key: "gap", score, active: true, reason };
+}
+
+function scoreOrb(
+  orb: TechnicalSignals["orb"],
+  session: SessionName
+): ScoreComponent {
+  if (session !== "rth") {
+    return { name: "ORB", key: "orb", score: 0, active: false, reason: "ORB only in RTH" };
+  }
+  if (!orb) {
+    return { name: "ORB", key: "orb", score: 0, active: false, reason: "opening range not ready" };
+  }
+  const b = orb.breakoutPct;
+  let score = 0;
+  let reason = "";
+  if (b > 0.35) { score = 65; reason = `ORB breakout +${b.toFixed(2)}% above 09:30–10:00 ET`; }
+  else if (b > 0.08) { score = 30; reason = `ORB probe +${b.toFixed(2)}%`; }
+  else if (b < -0.35) { score = -65; reason = `ORB breakdown ${b.toFixed(2)}% below opening range`; }
+  else if (b < -0.08) { score = -30; reason = `ORB weak ${b.toFixed(2)}%`; }
+  else { reason = `Inside opening range`; }
+  return { name: "ORB", key: "orb", score, active: true, reason };
+}
+
+function scoreRegime(
+  regime: IndexRegime,
+  session: SessionName,
+  cmc?: CmcMacroSnapshot | null
+): ScoreComponent {
+  const tape = cmc ? "SPY/QQQ+CMC" : "SPYB/QQQB";
+  if (regime === "neutral") {
+    return {
+      name: "Regime",
+      key: "regime",
+      score: 0,
+      active: true,
+      reason: cmc ? `${tape} mixed (${cmc.summary})` : `${tape} regime mixed`,
+    };
+  }
+  const rthBoost = session === "rth" ? 1 : 0.55;
+  if (regime === "risk_on") {
+    return {
+      name: "Regime",
+      key: "regime",
+      score: Math.round(35 * rthBoost),
+      active: true,
+      reason: `${tape} risk-on — follow longs`,
+    };
+  }
+  return {
+    name: "Regime",
+    key: "regime",
+    score: Math.round(-45 * (session === "rth" ? 1 : 0.7)),
+    active: true,
+    reason: `${tape} risk-off — cut new longs`,
+  };
+}
+
 function classifyStrength(
   totalScore: number,
-  t: StrategyProfile["thresholds"]
+  t: SessionProfile["thresholds"]
 ): SignalStrength {
   if (totalScore >= t.strongBuy) return "strong_buy";
   if (totalScore >= t.buy) return "buy";
@@ -222,29 +337,16 @@ function classifyStrength(
   return "neutral";
 }
 
-/**
- * Trend regime gate — protects against "catching a falling knife".
- *
- * A buy is only safe in a confirmed downtrend if there is a genuine reversal
- * signature (deeply oversold RSI + a fresh bullish MACD crossover). Otherwise
- * we veto the buy, which is one of the biggest drawdown-reducers: it stops the
- * agent from repeatedly buying assets that are still trending down.
- */
-function isFallingKnife(
-  signals: TechnicalSignals,
-  symbol: string
-): boolean {
+function isFallingKnife(signals: TechnicalSignals, symbol: string): boolean {
   const ema = signals.ema;
   const macd = signals.macd;
   const rsiVal = signals.rsi;
   const mom = ind.momentum(getClosePrices(symbol), 10);
 
-  // Confirmed downtrend: fast EMA well below slow EMA + negative momentum.
   const emaDiffPct = ema ? ((ema.fast - ema.slow) / ema.slow) * 100 : 0;
   const strongDowntrend = emaDiffPct < -1.5 && (mom ?? 0) < -3;
   if (!strongDowntrend) return false;
 
-  // Allow the buy only if a real reversal is forming.
   const bullishReversal =
     rsiVal !== null &&
     rsiVal < 30 &&
@@ -255,7 +357,6 @@ function isFallingKnife(
   return !bullishReversal;
 }
 
-/** Momentum %, ATR-as-% of price, and volume ratio for watchlist / sizing */
 export function getTokenMomentumMetrics(symbol: string): {
   momentum: number | null;
   atrPct: number | null;
@@ -275,7 +376,6 @@ export function getTokenMomentumMetrics(symbol: string): {
   return { momentum: mom, atrPct, volumeRatio };
 }
 
-/** Normalized metrics for dashboard display (MACD %, BB position, VWAP deviation). */
 export function getTokenDisplayMetrics(
   symbol: string,
   price?: number | null
@@ -283,10 +383,13 @@ export function getTokenDisplayMetrics(
   macdPct: number | null;
   bbPosition: number | null;
   vwapDev: number | null;
+  stochRsi: number | null;
+  gapPct: number | null;
+  orbBreakoutPct: number | null;
+  atrPct: number | null;
 } {
   const closes = getClosePrices(symbol);
-  const history = getPriceHistory(symbol);
-  const tech = computeSignals(symbol);
+  const tech = computeSignals(symbol, price ?? undefined);
   const p = price ?? closes.at(-1) ?? null;
 
   const macdPct =
@@ -298,24 +401,54 @@ export function getTokenDisplayMetrics(
       ? ((p - bb.lower) / (bb.upper - bb.lower)) * 100
       : null;
 
-  const vwapVal = ind.vwap(history);
   const vwapDev =
-    vwapVal && p && vwapVal > 0 ? ((p - vwapVal) / vwapVal) * 100 : null;
+    tech.vwap && p && tech.vwap > 0 ? ((p - tech.vwap) / tech.vwap) * 100 : null;
 
-  return { macdPct, bbPosition, vwapDev };
+  return {
+    macdPct,
+    bbPosition,
+    vwapDev,
+    stochRsi: tech.stochRsi,
+    gapPct: tech.gapPct,
+    orbBreakoutPct: tech.orb?.breakoutPct ?? null,
+    atrPct: tech.atrPct,
+  };
+}
+
+export function computeIndexRegime(markets: MarketData[]): IndexRegime {
+  const spy = markets.find((m) => m.symbol.toUpperCase() === "SPYB");
+  const qqq = markets.find((m) => m.symbol.toUpperCase() === "QQQB");
+  const spyTech = computeSignals("SPYB", spy?.price);
+  const qqqTech = computeSignals("QQQB", qqq?.price);
+
+  const spyChg = spy?.change24h ?? ind.momentum(getClosePrices("SPYB"), 10) ?? 0;
+  const qqqChg = qqq?.change24h ?? ind.momentum(getClosePrices("QQQB"), 10) ?? 0;
+  const spyUp = spyTech.ema ? spyTech.ema.fast > spyTech.ema.slow : spyChg > 0;
+  const qqqUp = qqqTech.ema ? qqqTech.ema.fast > qqqTech.ema.slow : qqqChg > 0;
+
+  if (spyChg <= -1.2 && qqqChg <= -1.2 && !spyUp && !qqqUp) return "risk_off";
+  if (spyChg >= 0.6 && qqqChg >= 0.6 && spyUp && qqqUp) return "risk_on";
+  return "neutral";
 }
 
 export function generateSignal(
   market: MarketData,
   signals: TechnicalSignals,
-  fearGreed: number | null,
   newsSentiment?: NewsSentiment | null,
-  strategy?: StrategyProfile | string | null
+  session?: SessionName | SessionPolicy | SessionProfile | null,
+  regime: IndexRegime = "neutral",
+  cmc?: CmcMacroSnapshot | null
 ): TradeSignal {
+  const sessionName: SessionName =
+    session && typeof session === "object" && "name" in session
+      ? session.name
+      : session === "auto" || !session
+        ? clockSession()
+        : (session as SessionName);
   const profile =
-    strategy && typeof strategy === "object"
-      ? strategy
-      : getStrategyProfile(strategy ?? DEFAULT_STRATEGY);
+    session && typeof session === "object" && "signalWeights" in session
+      ? session
+      : getSessionProfile(sessionName);
   const weights = profile.signalWeights;
 
   if (isStablecoin(market.symbol)) {
@@ -327,6 +460,16 @@ export function generateSignal(
       reasons: ["Stablecoin — not a trading candidate"],
       targetAllocationPct: 0,
       confidence: 1,
+      session: sessionName,
+      gapPct: signals.gapPct,
+      stochRsi: signals.stochRsi,
+      atrPct: signals.atrPct,
+      vwapDev:
+        signals.vwap && market.price > 0 && signals.vwap > 0
+          ? ((market.price - signals.vwap) / signals.vwap) * 100
+          : null,
+      orbBreakoutPct: signals.orb?.breakoutPct ?? null,
+      regime,
     };
   }
 
@@ -338,11 +481,14 @@ export function generateSignal(
     scoreMomentum(market.symbol),
     scoreVolume(signals.volumeRatio),
     scoreMcapVolRatio(market.volume24h, market.marketCap),
-    scoreSentiment(fearGreed),
     scoreNews(newsSentiment),
+    scoreStochRsi(signals.stochRsi),
+    scoreVwap(signals.vwap, market.price, sessionName),
+    scoreGap(signals.gapPct, sessionName),
+    scoreOrb(signals.orb, sessionName),
+    scoreRegime(regime, sessionName, cmc),
   ];
 
-  // Active components weighted by the chosen strategy profile.
   const activeComponents = components.filter((c) => c.active && weights[c.key] > 0);
   const totalWeight = activeComponents.reduce((s, c) => s + weights[c.key], 0);
 
@@ -364,8 +510,6 @@ export function generateSignal(
 
   const reasons = activeComponents.map((c) => c.reason);
 
-  // Safety gate: never buy into a confirmed downtrend without reversal proof.
-  // SafeTrade/Medium enforce it; Momentum allows earlier breakout entries.
   if (
     action === "buy" &&
     profile.requireReversalConfirmation &&
@@ -377,7 +521,28 @@ export function generateSignal(
     reasons.unshift("Buy vetoed — confirmed downtrend, no reversal confirmation");
   }
 
-  // Confidence scales with how much of the strategy's weight is backed by data.
+  if (action === "buy" && regime === "risk_off" && sessionName === "rth" && strength !== "strong_buy") {
+    action = "hold";
+    strength = "neutral";
+    reasons.unshift("Buy vetoed — SPY/QQQ risk-off in RTH");
+  }
+
+  if (action === "buy" && cmc?.regime === "risk_off" && strength !== "strong_buy") {
+    action = "hold";
+    strength = "neutral";
+    totalScore = Math.min(totalScore, 0);
+    reasons.unshift(`Buy vetoed — CMC crypto tape risk-off (${cmc.summary})`);
+  }
+
+  if (action === "buy" && cmc?.eventRisk === "high" && strength !== "strong_buy") {
+    action = "hold";
+    strength = "neutral";
+    totalScore = Math.min(totalScore, 0);
+    reasons.unshift(
+      `Buy vetoed — CMC macro event in next 48h${cmc.eventHint ? `: ${cmc.eventHint}` : ""}`
+    );
+  }
+
   const totalProfileWeight = components.reduce((s, c) => s + weights[c.key], 0);
   const confidence = totalProfileWeight > 0
     ? Math.min(1, totalWeight / totalProfileWeight + 0.15)
@@ -386,7 +551,16 @@ export function generateSignal(
   let targetAllocation = 0;
   if (action === "buy") {
     targetAllocation = strength === "strong_buy" ? profile.alloc.strongBuy : profile.alloc.buy;
+    if (cmc && cmc.sizeScale > 0 && cmc.sizeScale !== 1) {
+      targetAllocation *= cmc.sizeScale;
+      reasons.push(`CMC size scale ${cmc.sizeScale.toFixed(2)}x`);
+    }
   }
+
+  const vwapDev =
+    signals.vwap && market.price > 0 && signals.vwap > 0
+      ? ((market.price - signals.vwap) / signals.vwap) * 100
+      : null;
 
   return {
     symbol: market.symbol,
@@ -396,5 +570,16 @@ export function generateSignal(
     reasons,
     targetAllocationPct: targetAllocation,
     confidence,
+    session: sessionName,
+    gapPct: signals.gapPct,
+    stochRsi: signals.stochRsi,
+    atrPct: signals.atrPct,
+    vwapDev,
+    orbBreakoutPct: signals.orb?.breakoutPct ?? null,
+    regime,
   };
+}
+
+export function activeSessionFromPolicy(policy: SessionPolicy): SessionName {
+  return getSessionClock(policy).active;
 }

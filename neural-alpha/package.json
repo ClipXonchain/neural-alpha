@@ -1,24 +1,23 @@
 {
   "name": "@neural-alpha/agent",
   "version": "1.0.0",
-  "description": "Neural Alpha — autonomous BSC trading agent (CMC + TWAK)",
+  "description": "Neural Alpha — autonomous bStock agent (CMC + Binance Agentic Wallet)",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node --import ./src/load-env.ts --import tsx src/index.ts",
-    "dev": "node --import ./src/load-env.ts --import tsx watch src/index.ts",
+    "start": "tsx --import ./src/load-env.ts src/index.ts",
+    "dev": "tsx watch --import ./src/load-env.ts src/index.ts",
     "register": "tsx src/register.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
     "@neondatabase/serverless": "^1.0.0",
     "dotenv": "^16.4.7",
-    "openai": "^6.44.0"
+    "openai": "^6.44.0",
+    "tsx": "^4.19.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.19.0",
     "typescript": "^5.7.0"
   }
 }

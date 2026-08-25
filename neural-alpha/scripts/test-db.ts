@@ -14,8 +14,13 @@ async function main() {
   }
   const nav = await store.loadNavState();
   const trades = await store.loadRecentTrades(5);
+  const entries = await store.loadPositionEntries();
+  if (entries && Object.keys(entries).length > 0) {
+    await store.savePositionEntries(entries);
+  }
   console.log("Nav state:", nav ?? "(empty — first run)");
   console.log("Recent trades in DB:", trades.length);
+  console.log("Position entries:", entries && Object.keys(entries).length > 0 ? Object.keys(entries).join(", ") : "(none)");
   console.log("OK — Neon connection working.");
 }
 

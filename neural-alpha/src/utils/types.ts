@@ -20,7 +20,6 @@ export interface MarketData {
   change24h?: number;
   volume24h?: number;
   marketCap?: number;
-  fearGreedIndex?: number;
   socialScore?: number;
   timestamp: number;
 }
@@ -32,6 +31,11 @@ export interface TechnicalSignals {
   bollingerBands: { upper: number; middle: number; lower: number } | null;
   atr: number | null;
   volumeRatio: number | null;
+  stochRsi: number | null;
+  vwap: number | null;
+  gapPct: number | null;
+  orb: { high: number; low: number; breakoutPct: number } | null;
+  atrPct: number | null;
 }
 
 export type SignalStrength = "strong_buy" | "buy" | "neutral" | "sell" | "strong_sell";
@@ -44,6 +48,13 @@ export interface TradeSignal {
   reasons: string[];
   targetAllocationPct: number;
   confidence: number;
+  session?: "rth" | "close" | "overnight";
+  gapPct?: number | null;
+  stochRsi?: number | null;
+  atrPct?: number | null;
+  vwapDev?: number | null;
+  orbBreakoutPct?: number | null;
+  regime?: "risk_on" | "risk_off" | "neutral";
   /** LLM technical analysis overlay (optional). */
   ai?: {
     summary: string;
@@ -60,7 +71,7 @@ export interface TradeOrder {
   symbol: string;
   side: "buy" | "sell";
   amountUsd: number;
-  /** For sells: full token quantity to swap (TWAK expects token units, not USD). */
+  /** For sells: full token quantity to swap (baw expects human-readable token units). */
   fromTokenAmount?: number;
   fromToken: string;
   toToken: string;
@@ -129,13 +140,12 @@ export interface RiskCheck {
 
 export interface AgentConfig {
   mode: "live" | "paper";
-  /** Active risk-tiered strategy preset: safe | medium | momentum. */
-  strategy: "safe" | "medium" | "momentum";
-  /** Multiplier on computed position size (set by the strategy preset). */
+  /** Session policy: follow NY clock, or lock RTH / Close / Overnight. */
+  sessionPolicy: "auto" | "rth" | "close" | "overnight";
+  /** Multiplier on computed position size (from the active session profile). */
   positionSizeMultiplier: number;
   tradeIntervalMs: number;
   maxPositionSizeUsd: number;
-  maxDailyTrades: number;
   maxDrawdownPct: number;
   /** When false, drawdown gates and emergency mode are disabled. */
   drawdownLimitEnabled: boolean;
@@ -144,6 +154,8 @@ export interface AgentConfig {
   /** How often to check stop-loss / take-profit / trailing (independent of trade cycle). */
   protectiveExitCheckMs: number;
   slippageTolerance: number;
+  /** BNB (USD) kept for gas — never used to buy bStock. */
+  minGasReserveUsd: number;
   baseCurrency: string;
   /** Currencies used to fund buys (USDT first, then BNB). Sells settle to baseCurrency. */
   swapCurrencies: string[];
@@ -160,16 +172,12 @@ export interface AgentConfig {
   trailingGivebackPct: number;
   /** Min confidence (0-1) required to open a new position. */
   minBuyConfidence: number;
-  /** Block autonomous trades for this long after start/restart (ms). Manual trades bypass. */
-  startupCooldownMs: number;
   /** When false, skip stop-loss / take-profit / trailing auto-sells each cycle. */
   autoExitEnabled: boolean;
   /** After a failed autonomous swap, block retries for this symbol (ms). */
   failedSwapCooldownMs: number;
-  /** Max autonomous swap executions per trading cycle (manual bypasses). */
-  maxAutonomousTradesPerCycle: number;
-  /** Max estimated on-chain txs per UTC day for autonomous swaps (~2 per swap: approve + swap). */
-  maxOnChainTxPerDay: number;
+  /** Minimum wait after a successful buy before opening another name. */
+  minBuyIntervalMs: number;
   /** Dashboard / API: tokens blocklisted from scans and new buys. */
   excludedTokens?: string[];
   /** Dashboard / API: minimum USD price to consider tradable. */

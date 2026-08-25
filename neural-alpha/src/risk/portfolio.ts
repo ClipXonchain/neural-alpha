@@ -8,8 +8,19 @@ import {
 } from "../utils/trade-dedupe.js";
 
 const FUNDING_TOKENS = new Set([
-  "USDT", "USDC", "BUSD", "DAI", "FDUSD", "TUSD", "USD1", "BNB",
+  "USDT", "USDC", "U", "USD1", "BNB", "BUSD", "DAI", "FDUSD", "TUSD",
 ]);
+
+/** Buy = funding → asset. Sell = asset → funding. Skip USDT↔BNB and asset↔asset. */
+function classifyAssetTrade(fromToken: string, toToken: string): "buy" | "sell" | null {
+  const from = fromToken.toUpperCase();
+  const to = toToken.toUpperCase();
+  const fromFund = FUNDING_TOKENS.has(from);
+  const toFund = FUNDING_TOKENS.has(to);
+  if (fromFund && !toFund) return "buy";
+  if (!fromFund && toFund) return "sell";
+  return null;
+}
 
 function parseTradeAmount(raw?: string): number {
   const n = parseFloat(raw ?? "");
@@ -20,6 +31,8 @@ export class PortfolioTracker {
   private initialValueUsd: number;
   private cashUsd: number;
   private positions: Map<string, { amount: number; avgEntryPrice: number }> = new Map();
+  /** FIFO lots for campaign Realized PnL (qty × lot price). */
+  private lots: Map<string, Array<{ qty: number; price: number }>> = new Map();
   private peakPnlPct: Map<string, number> = new Map();
   private tradeHistory: TradeResult[] = [];
   /** DB / chain / confirmed trades — never purged from Recent Trades display. */
@@ -35,9 +48,7 @@ export class PortfolioTracker {
   private gasReserveUsd = 0;
   private gasReserveAmount = 0;
   private gasReserveSymbol = "BNB";
-  /** Opening NAV for the current calendar day (UTC) — daily PnL baseline. */
-  private dayStartValueUsd = 0;
-  private currentDay = "";
+  private minGasReserveUsd = MIN_GAS_RESERVE_USD;
   /** Latest NAV from the most recent snapshot (live prices). */
   private lastNavUsd = 0;
   /** DB peak/initial restored at startup — applied after wallet sync validates NAV. */
@@ -60,7 +71,11 @@ export class PortfolioTracker {
 
   /** BNB above the minimum gas reserve (gas only — not used for buys). */
   getSpendableBnbUsd(): number {
-    return Math.max(0, this.gasReserveUsd - MIN_GAS_RESERVE_USD);
+    return Math.max(0, this.gasReserveUsd - this.minGasReserveUsd);
+  }
+
+  setMinGasReserveUsd(usd: number) {
+    this.minGasReserveUsd = Math.max(0, usd);
   }
 
   /** Total USD available to fund new buys (USDT only). */
@@ -214,15 +229,13 @@ export class PortfolioTracker {
     return out;
   }
 
-  private resolveEntryPrice(
-    symbol: string,
-    spotPrice: number | undefined
-  ): number {
+  private resolveEntryPrice(symbol: string, fallbackExisting?: number): number {
     const fromTrades = this.inferEntryPriceFromTrades(symbol);
     if (fromTrades && fromTrades > 0) return fromTrades;
     const persisted = this.persistedEntries.get(symbol.toUpperCase())?.avgEntryPrice;
     if (persisted && persisted > 0) return persisted;
-    return spotPrice && spotPrice > 0 ? spotPrice : 0;
+    if (fallbackExisting && fallbackExisting > 0) return fallbackExisting;
+    return 0;
   }
 
   /** Mark a trade as persisted/confirmed so it stays in Recent Trades after reconcile. */
@@ -354,6 +367,20 @@ export class PortfolioTracker {
     ).length;
   }
 
+  /** Timestamp of the most recent successful asset buy, or 0. */
+  lastSuccessfulBuyAt(): number {
+    let latest = 0;
+    for (const t of this.tradeHistory) {
+      if (!t.success) continue;
+      const from = t.fromToken.toUpperCase();
+      const to = t.toToken.toUpperCase();
+      if (FUNDING_TOKENS.has(from) && !FUNDING_TOKENS.has(to)) {
+        latest = Math.max(latest, t.timestamp);
+      }
+    }
+    return latest;
+  }
+
   clearPositions() {
     this.positions.clear();
     this.peakPnlPct.clear();
@@ -386,14 +413,12 @@ export class PortfolioTracker {
       const existing = this.positions.get(symbol);
       if (existing) {
         existing.amount = amount;
-        const entry = this.resolveEntryPrice(symbol, prices.get(symbol));
+        const entry = this.resolveEntryPrice(symbol, existing.avgEntryPrice);
         if (entry > 0) existing.avgEntryPrice = entry;
       } else {
-        const price = this.resolveEntryPrice(symbol, prices.get(symbol));
-        if (price > 0) {
-          this.positions.set(symbol, { amount, avgEntryPrice: price });
-          added.push(symbol);
-        }
+        const entry = this.resolveEntryPrice(symbol);
+        this.positions.set(symbol, { amount, avgEntryPrice: entry });
+        added.push(symbol);
       }
     }
 
@@ -420,8 +445,9 @@ export class PortfolioTracker {
       if (!t.success) continue;
       const from = t.fromToken.toUpperCase();
       const to = t.toToken.toUpperCase();
-      if (FUNDING_TOKENS.has(from) && !FUNDING_TOKENS.has(to)) symbols.add(to);
-      if (!FUNDING_TOKENS.has(from) && FUNDING_TOKENS.has(to)) symbols.add(from);
+      const side = classifyAssetTrade(from, to);
+      if (side === "buy") symbols.add(to);
+      else if (side === "sell") symbols.add(from);
     }
     return symbols;
   }
@@ -441,8 +467,9 @@ export class PortfolioTracker {
       const to = t.toToken.toUpperCase();
       const price = t.priceAtExecution > 0 ? t.priceAtExecution : 0;
 
-      const isBuy = FUNDING_TOKENS.has(from) && to === sym;
-      const isSell = from === sym && FUNDING_TOKENS.has(to);
+      const side = classifyAssetTrade(from, to);
+      const isBuy = side === "buy" && to === sym;
+      const isSell = side === "sell" && from === sym;
       if (!isBuy && !isSell) continue;
 
       if (isBuy) {
@@ -531,8 +558,8 @@ export class PortfolioTracker {
   }
 
   /**
-   * Win rate from confirmed sells — replays cost basis when realizedPnl is missing
-   * (common for chain-backfilled trades).
+   * FIFO realized PnL from matched buy→sell of assets only.
+   * Funding↔funding (USDT/BNB) and orphan sells with no prior buy are ignored.
    */
   getClosedTradeStats(): {
     closedSells: number;
@@ -540,12 +567,17 @@ export class PortfolioTracker {
     losses: number;
     winRate: number;
     realizedPnl: number;
+    costClosed: number;
+    dailyRealizedPnl: number;
   } {
     const ledgers = new Map<string, { qty: number; cost: number }>();
     let wins = 0;
     let losses = 0;
     let closedSells = 0;
     let realizedPnl = 0;
+    let costClosed = 0;
+    let dailyRealizedPnl = 0;
+    const dayStart = Date.now() - 86_400_000;
 
     const trades = [...this.tradeHistory]
       .filter((t) => t.success)
@@ -555,10 +587,9 @@ export class PortfolioTracker {
       const from = t.fromToken.toUpperCase();
       const to = t.toToken.toUpperCase();
       const price = t.priceAtExecution > 0 ? t.priceAtExecution : 0;
-      const isBuy = FUNDING_TOKENS.has(from) && !FUNDING_TOKENS.has(to);
-      const isSell = !FUNDING_TOKENS.has(from) && FUNDING_TOKENS.has(to);
+      const side = classifyAssetTrade(from, to);
 
-      if (isBuy) {
+      if (side === "buy") {
         const sym = to;
         let tokenQty = parseTradeAmount(t.toAmount);
         if (tokenQty <= 0 && price > 0) {
@@ -572,9 +603,11 @@ export class PortfolioTracker {
         continue;
       }
 
-      if (!isSell) continue;
+      if (side !== "sell") continue;
 
-      const sym = from;
+      const ledger = ledgers.get(from);
+      if (!ledger || ledger.qty <= 0) continue;
+
       let soldQty = parseTradeAmount(t.fromAmount);
       if (soldQty <= 0 && price > 0) {
         soldQty = parseTradeAmount(t.toAmount) / price;
@@ -584,32 +617,26 @@ export class PortfolioTracker {
       let proceeds = parseTradeAmount(t.toAmount);
       if (proceeds <= 0 && price > 0) proceeds = soldQty * price;
 
-      let pnl = t.realizedPnl;
-      const ledger = ledgers.get(sym);
-      if (pnl === undefined) {
-        if (!ledger || ledger.qty <= 0) continue;
-        const avgEntry = ledger.cost / ledger.qty;
-        const sold = Math.min(soldQty, ledger.qty);
-        pnl = proceeds - avgEntry * sold;
-      }
+      const avgEntry = ledger.cost / ledger.qty;
+      const sold = Math.min(soldQty, ledger.qty);
+      const cost = avgEntry * sold;
+      const pnl = proceeds - cost;
 
-      if (ledger && ledger.qty > 0) {
-        const avg = ledger.cost / ledger.qty;
-        const sold = Math.min(soldQty, ledger.qty);
-        ledger.qty -= sold;
-        ledger.cost = ledger.qty > 0 ? avg * ledger.qty : 0;
-        if (ledger.qty <= 1e-12) ledgers.delete(sym);
-        else ledgers.set(sym, ledger);
-      }
+      ledger.qty -= sold;
+      ledger.cost = ledger.qty > 0 ? avgEntry * ledger.qty : 0;
+      if (ledger.qty <= 1e-12) ledgers.delete(from);
+      else ledgers.set(from, ledger);
 
       closedSells++;
+      costClosed += cost;
       realizedPnl += pnl;
+      if (t.timestamp >= dayStart) dailyRealizedPnl += pnl;
       if (pnl >= 0) wins++;
       else losses++;
     }
 
     const winRate = closedSells > 0 ? (wins / closedSells) * 100 : 0;
-    return { closedSells, wins, losses, winRate, realizedPnl };
+    return { closedSells, wins, losses, winRate, realizedPnl, costClosed, dailyRealizedPnl };
   }
 
   /** Drop Binance Web3 aggregate rows once real on-chain txs are available. */
@@ -640,7 +667,7 @@ export class PortfolioTracker {
 
   /**
    * Remove "successful" buys that aren't backed by on-chain holdings.
-   * These appear when TWAK reports a hash but the swap never settled.
+   * These appear when a swap reports a hash but never settled.
    */
   purgeTradesNotBackedByChain(heldSymbols: Set<string>, baseCurrency: string): number {
     const stables = new Set([baseCurrency.toUpperCase(), "USDT", "USD", "BNB"]);
@@ -714,16 +741,16 @@ export class PortfolioTracker {
     fundingCurrency = "USDT"
   ) {
     const funding = fundingCurrency.toUpperCase();
-
-    if (funding !== "USDT") {
-      logger.warn("Buy rejected — only USDT funding allowed", { symbol, funding });
+    const allowed = new Set(["USDT", "USDC", "U", "USD1", "BNB"]);
+    if (!allowed.has(funding)) {
+      logger.warn("Buy rejected — payment token is not campaign-eligible", { symbol, funding });
       return;
     }
-    if (amountUsd > this.cashUsd) {
-      logger.warn("Buy exceeds USDT cash", { symbol, amountUsd, cash: this.cashUsd });
+    if (funding !== "BNB" && amountUsd > this.cashUsd) {
+      logger.warn("Buy exceeds cash", { symbol, amountUsd, cash: this.cashUsd, funding });
       return;
     }
-    this.cashUsd -= amountUsd;
+    if (funding !== "BNB") this.cashUsd -= amountUsd;
 
     const existing = this.positions.get(symbol);
     if (existing) {
@@ -733,6 +760,18 @@ export class PortfolioTracker {
       existing.amount = totalAmount;
     } else {
       this.positions.set(symbol, { amount: tokenAmount, avgEntryPrice: price });
+    }
+
+    const lotList = this.lots.get(symbol) ?? [];
+    lotList.push({ qty: tokenAmount, price });
+    this.lots.set(symbol, lotList);
+
+    const pos = this.positions.get(symbol);
+    if (pos && pos.avgEntryPrice > 0) {
+      this.persistedEntries.set(symbol.toUpperCase(), {
+        avgEntryPrice: pos.avgEntryPrice,
+        peakPnlPct: this.peakPnlPct.get(symbol),
+      });
     }
 
     this.incrementDailyTrades();
@@ -750,9 +789,23 @@ export class PortfolioTracker {
       return 0;
     }
 
-    const entryPrice = existing.avgEntryPrice;
-    // Realized PnL = proceeds minus cost basis of the tokens sold.
-    const costBasis = entryPrice * tokenAmount;
+    let remaining = tokenAmount;
+    let costBasis = 0;
+    const lotList = this.lots.get(symbol) ?? [];
+    while (remaining > 1e-12 && lotList.length > 0) {
+      const lot = lotList[0]!;
+      const take = Math.min(lot.qty, remaining);
+      costBasis += take * lot.price;
+      lot.qty -= take;
+      remaining -= take;
+      if (lot.qty <= 1e-12) lotList.shift();
+    }
+    if (lotList.length > 0) this.lots.set(symbol, lotList);
+    else this.lots.delete(symbol);
+
+    if (costBasis <= 0) {
+      costBasis = existing.avgEntryPrice * tokenAmount;
+    }
     const pnl = receivedUsd - costBasis;
 
     existing.amount -= tokenAmount;
@@ -861,17 +914,22 @@ export class PortfolioTracker {
 
     const drawdownPct = this.computeDrawdown(totalValueUsd);
 
+    const closed = this.getClosedTradeStats();
+    this.realizedPnlUsd = closed.realizedPnl;
+    const unrealizedPnl = positionSnapshots.reduce((s, p) => s + p.unrealizedPnl, 0);
+    const costOpen = positionSnapshots.reduce((s, p) => s + p.avgEntryPrice * p.amount, 0);
+    const tradedCost = costOpen + closed.costClosed;
+    const assetPnl = closed.realizedPnl + unrealizedPnl;
+
     const snap: PortfolioSnapshot = {
       timestamp: Date.now(),
       totalValueUsd,
       cashUsd: this.cashUsd,
       positions: positionSnapshots,
-      dailyPnl: 0,
-      totalPnl: totalValueUsd - this.initialValueUsd,
-      totalPnlPct: this.initialValueUsd > 0
-        ? ((totalValueUsd - this.initialValueUsd) / this.initialValueUsd) * 100
-        : 0,
-      realizedPnl: this.realizedPnlUsd,
+      dailyPnl: closed.dailyRealizedPnl,
+      totalPnl: assetPnl,
+      totalPnlPct: tradedCost > 0 ? (assetPnl / tradedCost) * 100 : 0,
+      realizedPnl: closed.realizedPnl,
       ...(this.baselineInitialized
         ? { initialNavUsd: this.initialValueUsd }
         : {}),
@@ -879,14 +937,6 @@ export class PortfolioTracker {
       maxDrawdownPct: drawdownPct,
       tradeCount: this.tradeHistory.length,
     };
-
-    // Daily PnL = NAV now − NAV at the first snapshot of the current UTC day.
-    const today = new Date().toISOString().slice(0, 10);
-    if (this.currentDay !== today || this.dayStartValueUsd === 0) {
-      this.currentDay = today;
-      this.dayStartValueUsd = totalValueUsd;
-    }
-    snap.dailyPnl = totalValueUsd - this.dayStartValueUsd;
 
     this.snapshots.push(snap);
     return snap;
@@ -943,11 +993,26 @@ export class PortfolioTracker {
     const exits: RiskExit[] = [];
 
     for (const [symbol, pos] of this.positions) {
-      const currentPrice = currentPrices.get(symbol) || pos.avgEntryPrice;
-      const pnlPct = ((currentPrice - pos.avgEntryPrice) / pos.avgEntryPrice) * 100;
+      const entry = this.resolveEntryPrice(symbol, pos.avgEntryPrice);
+      if (entry > 0 && (!(pos.avgEntryPrice > 0) || !Number.isFinite(pos.avgEntryPrice))) {
+        pos.avgEntryPrice = entry;
+      }
+      if (!(entry > 0) || !Number.isFinite(entry)) {
+        logger.warn("Protective exit skipped — no valid entry price", { symbol, avgEntry: pos.avgEntryPrice });
+        continue;
+      }
 
-      const prevPeak = this.peakPnlPct.get(symbol) ?? pnlPct;
-      const peak = Math.max(prevPeak, pnlPct);
+      const currentPrice = currentPrices.get(symbol) || entry;
+      if (!(currentPrice > 0) || !Number.isFinite(currentPrice)) continue;
+
+      const pnlPct = ((currentPrice - entry) / entry) * 100;
+      if (!Number.isFinite(pnlPct)) {
+        logger.warn("Protective exit skipped — PnL is not finite", { symbol, entry, currentPrice, pnlPct });
+        continue;
+      }
+
+      const prevPeak = this.peakPnlPct.get(symbol);
+      const peak = Number.isFinite(prevPeak) ? Math.max(prevPeak as number, pnlPct) : pnlPct;
       this.peakPnlPct.set(symbol, peak);
 
       // 1. Hard stop-loss — highest priority, protects against deep losses.
@@ -972,8 +1037,10 @@ export class PortfolioTracker {
         continue;
       }
 
-      // 3. Trailing stop — only once the position has been meaningfully green.
+      // 3. Trailing stop — hidden from the desk UI. Off when activate/giveback are 0.
       if (
+        params.trailingActivatePct > 0 &&
+        params.trailingGivebackPct > 0 &&
         peak >= params.trailingActivatePct &&
         peak - pnlPct >= params.trailingGivebackPct
       ) {

@@ -1,45 +1,75 @@
 "use client";
 
-import { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  Radar,
-  TrendingUp,
-  TrendingDown,
-  Newspaper,
-  Sparkles,
-  ChevronDown,
-  Flame,
-  Search,
-  X,
-  Ban,
-  Undo2,
-} from "lucide-react";
+import { useEffect, useMemo, useState, Fragment } from "react";
+import { Ban, ChevronDown, Radar, Search, Undo2, X } from "lucide-react";
 import { cn, formatTokenPrice, formatPct } from "@/lib/utils";
 import type { Signal } from "@/lib/mock-data";
-import { isAlphaToken } from "@/lib/alpha-tokens";
+import {
+  clockSession,
+  sessionPlaybook,
+  stockEdge,
+  type SessionName,
+} from "@/lib/session";
 
 const STABLE_SYMBOLS = new Set([
   "USDT", "USDC", "DAI", "USD1", "USDE", "USDD", "TUSD", "FDUSD", "USDF",
-  "FRAX", "FRXUSD", "DUSD", "LISUSD", "EURI", "XUSD", "STABLE", "BUSD",
+  "FRAX", "FRXUSD", "DUSD", "LISUSD", "EURI", "XUSD", "STABLE", "BUSD", "BNB", "U",
 ]);
 
-/** Total competition-eligible universe (149 BEP-20), for context labelling. */
-const ELIGIBLE_UNIVERSE = 149;
+type Tab = "all" | "buy" | "sell" | "hold" | "blocked";
+type SortKey =
+  | "score"
+  | "symbol"
+  | "price"
+  | "change24h"
+  | "rsi"
+  | "stochRsi"
+  | "macd"
+  | "bbPosition"
+  | "vwapDev"
+  | "gapPct"
+  | "orbBreakoutPct"
+  | "atrPct"
+  | "volumeRatio"
+  | "newsScore"
+  | "confidence";
 
-function SignalBadge({ strength }: { strength: Signal["strength"] }) {
+function asSession(raw?: string): SessionName {
+  if (raw === "rth" || raw === "close" || raw === "overnight") return raw;
+  return clockSession();
+}
+
+function fmt(value: number | null | undefined, digits = 1, suffix = ""): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  return `${value.toFixed(digits)}${suffix}`;
+}
+
+function signed(value: number | null | undefined, digits = 2, suffix = ""): string {
+  if (value == null || Number.isNaN(value)) return "—";
+  const n = value.toFixed(digits);
+  return `${value > 0 ? "+" : ""}${n}${suffix}`;
+}
+
+function toneClass(tone: string): string {
+  if (tone === "neon") return "text-neon";
+  if (tone === "cyan") return "text-cyan";
+  if (tone === "danger") return "text-danger";
+  if (tone === "warning") return "text-warning";
+  return "text-text-muted";
+}
+
+function ActionBadge({ strength }: { strength: Signal["strength"] }) {
   const config = {
-    strong_buy: { label: "STRONG BUY", color: "text-neon bg-neon/10 border-neon/20" },
+    strong_buy: { label: "STR BUY", color: "text-neon bg-neon/10 border-neon/20" },
     buy: { label: "BUY", color: "text-neon/80 bg-neon/5 border-neon/10" },
     neutral: { label: "HOLD", color: "text-text-secondary bg-surface-overlay border-border-dim" },
     sell: { label: "SELL", color: "text-danger/80 bg-danger/5 border-danger/10" },
-    strong_sell: { label: "STRONG SELL", color: "text-danger bg-danger/10 border-danger/20" },
+    strong_sell: { label: "STR SELL", color: "text-danger bg-danger/10 border-danger/20" },
   }[strength];
-
   return (
     <span
       className={cn(
-        "text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded border whitespace-nowrap",
+        "inline-flex text-[10px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded border whitespace-nowrap",
         config.color
       )}
       style={{ fontFamily: "var(--font-mono)" }}
@@ -47,96 +77,6 @@ function SignalBadge({ strength }: { strength: Signal["strength"] }) {
       {config.label}
     </span>
   );
-}
-
-function ScoreRing({ score, size = 36 }: { score: number; size?: number }) {
-  const rounded = Math.round(score);
-  const absScore = Math.min(Math.abs(rounded), 100);
-  const circumference = 2 * Math.PI * (size / 2 - 3);
-  const offset = circumference - (absScore / 100) * circumference;
-  const isPositive = rounded >= 0;
-
-  return (
-    <div className="relative shrink-0" style={{ width: size, height: size }}>
-      <svg width={size} height={size} className="-rotate-90">
-        <circle
-          cx={size / 2}
-          cy={size / 2}
-          r={size / 2 - 3}
-          fill="none"
-          stroke="rgba(255,255,255,0.04)"
-          strokeWidth={2}
-        />
-        <motion.circle
-          cx={size / 2}
-          cy={size / 2}
-          r={size / 2 - 3}
-          fill="none"
-          stroke={isPositive ? "#0ecb81" : "#f6465d"}
-          strokeWidth={2}
-          strokeLinecap="round"
-          strokeDasharray={circumference}
-          initial={{ strokeDashoffset: circumference }}
-          animate={{ strokeDashoffset: offset }}
-          transition={{ duration: 0.8, ease: "easeOut" }}
-        />
-      </svg>
-      <span
-        className={cn(
-          "absolute inset-0 flex items-center justify-center text-[10px] font-bold tabular-nums",
-          isPositive ? "text-neon" : "text-danger"
-        )}
-        style={{ fontFamily: "var(--font-mono)" }}
-      >
-        {rounded > 0 ? "+" : ""}{rounded}
-      </span>
-    </div>
-  );
-}
-
-function IndicatorCell({
-  label,
-  value,
-  highlight,
-  danger,
-}: {
-  label: string;
-  value: string;
-  highlight?: boolean;
-  danger?: boolean;
-}) {
-  return (
-    <div className="flex flex-col gap-0.5 min-w-[52px]">
-      <span
-        className="text-[9px] uppercase tracking-wider text-text-muted font-medium"
-        style={{ fontFamily: "var(--font-mono)" }}
-      >
-        {label}
-      </span>
-      <span
-        className={cn(
-          "text-[12px] tabular-nums font-semibold",
-          highlight ? "text-amber-400" : danger ? "text-danger" : "text-text-primary"
-        )}
-        style={{ fontFamily: "var(--font-mono)" }}
-      >
-        {value}
-      </span>
-    </div>
-  );
-}
-
-function formatPctIndicator(value: number, decimals = 2): string {
-  if (Math.abs(value) < 0.005) return "0%";
-  return `${value > 0 ? "+" : ""}${value.toFixed(decimals)}%`;
-}
-
-function formatAgeMs(ts: number | null | undefined): string {
-  if (!ts) return "—";
-  const sec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (sec < 60) return `${sec}s ago`;
-  if (sec < 3600) return `${Math.floor(sec / 60)}m ago`;
-  return `${Math.floor(sec / 3600)}h ago`;
 }
 
 function TokenLogo({ symbol, icon }: { symbol: string; icon?: string }) {
@@ -162,550 +102,386 @@ function TokenLogo({ symbol, icon }: { symbol: string; icon?: string }) {
   );
 }
 
-function SignalRow({
-  signal,
-  index,
-  readOnly,
-  busySymbol,
-  onBlacklist,
-  onUnblacklist,
+function Th({
+  label,
+  sortKey,
+  current,
+  dir,
+  onSort,
+  align = "right",
+  title,
 }: {
-  signal: Signal;
-  index: number;
-  readOnly?: boolean;
-  busySymbol?: string | null;
-  onBlacklist?: (symbol: string) => void;
-  onUnblacklist?: (symbol: string) => void;
+  label: string;
+  sortKey?: SortKey;
+  current?: SortKey;
+  dir?: "asc" | "desc";
+  onSort?: (key: SortKey) => void;
+  align?: "left" | "right";
+  title?: string;
 }) {
-  const [expanded, setExpanded] = useState(false);
-  const isBlocked = !!signal.blacklisted;
-  const isBusy = busySymbol === signal.symbol;
-  const isVolumeSpike = (signal.volumeRatio ?? 0) >= 2;
-  const hasAi = !!signal.aiSummary;
-
-  const rsiDanger = signal.rsi > 70 || signal.rsi < 30;
-  const macdPositive = (signal.macd ?? 0) > 0;
-  const bbPos = signal.bbPosition;
-  const bbNearUpper = bbPos != null && bbPos >= 75;
-  const bbNearLower = bbPos != null && bbPos <= 25;
-  const vwapDev = signal.vwapDev;
-  const aboveVwap = vwapDev != null && vwapDev > 0;
-  const newsScore = signal.newsScore;
-  const hasNews = signal.newsArticles != null && signal.newsArticles > 0 && newsScore != null;
-  const hasLive =
-    signal.livePrice != null &&
-    signal.livePrice > 0 &&
-    signal.livePriceUpdatedAt != null;
-  const displayLivePrice = hasLive ? signal.livePrice! : signal.price;
-  const displayLiveChange = hasLive && signal.liveChange24h != null
-    ? signal.liveChange24h
-    : signal.change24h;
-  const priceSource = hasLive ? "binance" : signal.price > 0 ? "cmc" : "none";
-  const liveStale =
-    hasLive &&
-    signal.livePriceUpdatedAt != null &&
-    Date.now() - signal.livePriceUpdatedAt > 120_000;
-
+  const active = sortKey && current === sortKey;
   return (
-    <motion.div
-      initial={{ opacity: 0, x: -8 }}
-      animate={{ opacity: 1, x: 0 }}
-      transition={{ delay: 0.05 + index * 0.03 }}
+    <th
+      title={title}
       className={cn(
-        "border-b border-border-dim/60 last:border-b-0",
-        isBlocked && "bg-danger/[0.04] border-l-2 border-l-danger/40 opacity-90",
-        !isBlocked && isVolumeSpike && "bg-amber-400/[0.03] border-l-2 border-l-amber-400/50"
+        "px-2 py-2 text-[10px] font-semibold uppercase tracking-wider text-text-muted whitespace-nowrap",
+        align === "left" ? "text-left" : "text-right",
+        sortKey && "cursor-pointer select-none hover:text-text-secondary"
       )}
+      onClick={sortKey && onSort ? () => onSort(sortKey) : undefined}
     >
-      <button
-        type="button"
-        onClick={() => hasAi && setExpanded((v) => !v)}
-        className={cn(
-          "w-full text-left px-3 py-2.5 transition-colors",
-          hasAi ? "hover:bg-surface-overlay/40 cursor-pointer" : "cursor-default",
-          index % 2 === 0 && !isVolumeSpike && "bg-surface-overlay/20"
-        )}
-      >
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
-          {/* Left: score + symbol + price */}
-          <div className="flex items-center gap-3 min-w-0 sm:w-[220px] shrink-0">
-            <ScoreRing score={signal.score} />
-            <TokenLogo symbol={signal.symbol} icon={signal.icon} />
-            <div className="min-w-0">
-              <div className="flex items-center gap-1.5">
-                <span
-                  className="text-[13px] font-bold text-text-primary tracking-tight"
-                  style={{ fontFamily: "var(--font-display)" }}
-                >
-                  {signal.symbol}
-                </span>
-                {isVolumeSpike && !isBlocked && (
-                  <Flame className="size-3 text-amber-400 shrink-0" aria-label="Volume spike" />
-                )}
-                {isBlocked && (
-                  <span
-                    className="text-[8px] font-bold uppercase tracking-wider text-danger/90 px-1 py-0.5 rounded border border-danger/25 bg-danger/10"
-                    style={{ fontFamily: "var(--font-mono)" }}
-                  >
-                    Blocked
-                  </span>
-                )}
-              </div>
-              <div className="flex items-center gap-2 mt-0.5">
-                <span
-                  className="text-[12px] text-text-secondary tabular-nums font-medium"
-                  style={{ fontFamily: "var(--font-mono)" }}
-                >
-                  {formatTokenPrice(signal.price)}
-                </span>
-                <span
-                  className={cn(
-                    "flex items-center gap-0.5 text-[11px] tabular-nums font-medium",
-                    signal.change24h >= 0 ? "text-neon" : "text-danger"
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                >
-                  {signal.change24h >= 0 ? (
-                    <TrendingUp className="size-2.5" />
-                  ) : (
-                    <TrendingDown className="size-2.5" />
-                  )}
-                  {formatPct(signal.change24h)}
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* Price (Binance live when available, else CMC scan) */}
-          <div className="flex flex-col gap-0.5 min-w-[72px] shrink-0 sm:ml-1">
-            <span
-              className="text-[9px] uppercase tracking-wider text-text-muted font-medium"
-              style={{ fontFamily: "var(--font-mono)" }}
-            >
-              {priceSource === "binance" ? "Live" : "Price"}
-            </span>
-            {displayLivePrice > 0 ? (
-              <>
-                <span
-                  className={cn(
-                    "text-[12px] tabular-nums font-semibold",
-                    priceSource === "binance"
-                      ? liveStale
-                        ? "text-text-secondary"
-                        : "text-cyan"
-                      : "text-text-primary"
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                  title={
-                    priceSource === "binance"
-                      ? "Binance Web3 on-chain"
-                      : "CMC / agent scan"
-                  }
-                >
-                  {formatTokenPrice(displayLivePrice)}
-                </span>
-                <span
-                  className={cn(
-                    "text-[10px] tabular-nums",
-                    displayLiveChange >= 0 ? "text-neon/80" : "text-danger/80"
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                >
-                  {formatPct(displayLiveChange)}
-                </span>
-              </>
-            ) : (
-              <span className="text-[12px] text-text-muted">—</span>
-            )}
-          </div>
-
-          {/* Middle: indicators */}
-          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 flex-1">
-            <IndicatorCell
-              label="RSI"
-              value={String(Math.round(signal.rsi))}
-              danger={rsiDanger}
-            />
-            {signal.ohlcvReal === false && (
-              <span
-                className="hidden xl:inline text-[8px] uppercase text-amber-400/70 self-center"
-                style={{ fontFamily: "var(--font-mono)" }}
-                title="Using estimated candles — Binance OHLCV pending"
-              >
-                ~est
-              </span>
-            )}
-            <IndicatorCell
-              label="MACD"
-              value={signal.macd != null ? formatPctIndicator(signal.macd) : "—"}
-              highlight={macdPositive}
-              danger={signal.macd != null && signal.macd < 0}
-            />
-            <IndicatorCell
-              label="BB"
-              value={bbPos != null ? `${Math.round(bbPos)}%` : "—"}
-              highlight={bbNearLower}
-              danger={bbNearUpper}
-            />
-            <IndicatorCell
-              label="VWAP"
-              value={vwapDev != null ? formatPctIndicator(vwapDev) : "—"}
-              highlight={aboveVwap}
-              danger={vwapDev != null && vwapDev < 0}
-            />
-            <IndicatorCell
-              label="Vol"
-              value={
-                signal.volumeRatio != null
-                  ? `${signal.volumeRatio.toFixed(1)}x`
-                  : "—"
-              }
-              highlight={isVolumeSpike}
-            />
-            <IndicatorCell
-              label="News"
-              value={
-                hasNews
-                  ? `${(newsScore ?? 0) > 0 ? "+" : ""}${Math.round(newsScore ?? 0)}`
-                  : "—"
-              }
-              highlight={(newsScore ?? 0) > 15}
-              danger={(newsScore ?? 0) < -15}
-            />
-          </div>
-
-          {/* Right: badge + confidence + blacklist */}
-          <div className="flex items-center gap-2 shrink-0 sm:justify-end">
-            {!readOnly && (onBlacklist || onUnblacklist) && (
-              isBlocked ? (
-                <button
-                  type="button"
-                  disabled={isBusy}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onUnblacklist?.(signal.symbol);
-                  }}
-                  className={cn(
-                    "flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold border transition-colors",
-                    "text-neon/90 bg-neon/8 border-neon/20 hover:bg-neon/15",
-                    isBusy && "opacity-50 cursor-wait"
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                  title="Resume trading this token"
-                >
-                  <Undo2 className="size-3" />
-                  Resume
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={isBusy}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onBlacklist?.(signal.symbol);
-                  }}
-                  className={cn(
-                    "flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-semibold border transition-colors",
-                    "text-danger/90 bg-danger/8 border-danger/20 hover:bg-danger/15",
-                    isBusy && "opacity-50 cursor-wait"
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                  title="Block new entries for this token"
-                >
-                  <Ban className="size-3" />
-                  Block
-                </button>
-              )
-            )}
-            <SignalBadge strength={signal.strength} />
-            <span
-              className="text-[11px] text-text-secondary tabular-nums font-medium w-9 text-right"
-              style={{ fontFamily: "var(--font-mono)" }}
-            >
-              {Math.round(signal.confidence * 100)}%
-            </span>
-            {hasAi && (
-              <ChevronDown
-                className={cn(
-                  "size-3.5 text-text-muted transition-transform",
-                  expanded && "rotate-180"
-                )}
-              />
-            )}
-          </div>
-        </div>
-      </button>
-
-      <AnimatePresence>
-        {expanded && signal.aiSummary && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2 }}
-            className="overflow-hidden"
-          >
-            <div className="px-3 pb-3 pt-0 ml-[48px]">
-              <div className="flex items-center gap-1.5 mb-1">
-                <Sparkles className="size-3 text-cyan/80" />
-                <span
-                  className="text-[10px] font-semibold uppercase tracking-wider text-cyan/80"
-                  style={{ fontFamily: "var(--font-mono)" }}
-                >
-                  AI TA
-                </span>
-                {signal.aiVerdict && (
-                  <span className="text-[9px] uppercase text-text-secondary ml-1">
-                    {signal.aiVerdict}
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-text-secondary leading-relaxed">
-                {signal.aiSummary}
-              </p>
-              {signal.aiAgrees === false && (
-                <span className="text-[10px] text-amber-400/90 mt-1 block">
-                  AI disagrees with rule signal
-                </span>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </motion.div>
+      {label}
+      {active && (dir === "asc" ? " ↑" : " ↓")}
+    </th>
   );
 }
 
-type SignalTab = "eligible" | "alpha" | "blocked";
+function Td({
+  children,
+  hot,
+  cold,
+  align = "right",
+  className,
+}: {
+  children: React.ReactNode;
+  hot?: boolean;
+  cold?: boolean;
+  align?: "left" | "right";
+  className?: string;
+}) {
+  return (
+    <td
+      className={cn(
+        "px-2 py-2.5 tabular-nums text-[12px] whitespace-nowrap",
+        align === "left" ? "text-left" : "text-right",
+        hot && "text-neon",
+        cold && "text-danger",
+        !hot && !cold && "text-text-primary",
+        className
+      )}
+      style={{ fontFamily: "var(--font-mono)" }}
+    >
+      {children}
+    </td>
+  );
+}
 
 export function SignalMonitor({
   signals,
   lastSignalRefreshAt,
-  signalRefreshSec = 300,
-  readOnly = false,
+  signalRefreshSec,
+  session: sessionProp,
+  readOnly,
   onBlacklist,
   onUnblacklist,
 }: {
   signals: Signal[];
   lastSignalRefreshAt?: number | null;
-  signalRefreshSec?: number;
+  signalRefreshSec: number;
+  session?: string;
   readOnly?: boolean;
-  onBlacklist?: (symbol: string) => Promise<void> | void;
-  onUnblacklist?: (symbol: string) => Promise<void> | void;
+  onBlacklist?: (symbol: string) => Promise<void>;
+  onUnblacklist?: (symbol: string) => Promise<void>;
 }) {
-  const [tab, setTab] = useState<SignalTab>("eligible");
   const [query, setQuery] = useState("");
+  const [tab, setTab] = useState<Tab>("all");
+  const [sortKey, setSortKey] = useState<SortKey>("score");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [busySymbol, setBusySymbol] = useState<string | null>(null);
+  const [openAi, setOpenAi] = useState<string | null>(null);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
 
-  const handleBlacklist = async (symbol: string) => {
-    if (!onBlacklist) return;
-    setBusySymbol(symbol);
-    try {
-      await onBlacklist(symbol);
-    } finally {
-      setBusySymbol(null);
+  const session = asSession(sessionProp);
+  const playbook = sessionPlaybook(session);
+
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+    else {
+      setSortKey(key);
+      setSortDir(key === "symbol" ? "asc" : "desc");
     }
   };
 
-  const handleUnblacklist = async (symbol: string) => {
-    if (!onUnblacklist) return;
-    setBusySymbol(symbol);
-    try {
-      await onUnblacklist(symbol);
-    } finally {
-      setBusySymbol(null);
-    }
-  };
-
-  const sorted = [...signals].sort(
-    (a, b) => Math.abs(b.score) - Math.abs(a.score)
-  );
-
-  const blockedSignals = sorted.filter((s) => s.blacklisted);
-  // Section 1: full eligible universe (149) minus stablecoins and user-blocked.
-  const eligibleSignals = sorted.filter(
+  const blocked = signals.filter((s) => s.blacklisted);
+  const book = signals.filter(
     (s) => !STABLE_SYMBOLS.has(s.symbol.toUpperCase()) && !s.blacklisted
   );
-  // Section 2: tokens also listed on Binance Alpha (intersection with the 149).
-  const alphaSignals = eligibleSignals.filter((s) => isAlphaToken(s.symbol));
 
-  const active =
-    tab === "alpha" ? alphaSignals : tab === "blocked" ? blockedSignals : eligibleSignals;
-  const q = query.trim().toUpperCase();
-  const filtered = q
-    ? active.filter((s) => s.symbol.toUpperCase().includes(q))
-    : active;
+  const filtered = useMemo(() => {
+    let rows = tab === "blocked" ? blocked : book;
+    if (tab === "buy") rows = book.filter((s) => s.action === "buy");
+    if (tab === "sell") rows = book.filter((s) => s.action === "sell");
+    if (tab === "hold") rows = book.filter((s) => s.action === "hold");
+    const q = query.trim().toUpperCase();
+    if (q) rows = rows.filter((s) => s.symbol.toUpperCase().includes(q));
 
-  const tabs: { id: SignalTab; label: string; count: number; hint: string }[] = [
-    {
-      id: "eligible",
-      label: "Eligible (149)",
-      count: eligibleSignals.length,
-      hint: `of ${ELIGIBLE_UNIVERSE}`,
-    },
-    {
-      id: "alpha",
-      label: "Binance Alpha",
-      count: alphaSignals.length,
-      hint: "common w/ 149",
-    },
-    {
-      id: "blocked",
-      label: "Blocked",
-      count: blockedSignals.length,
-      hint: "no new entries",
-    },
+    const dir = sortDir === "asc" ? 1 : -1;
+    return [...rows].sort((a, b) => {
+      if (sortKey === "symbol") return dir * a.symbol.localeCompare(b.symbol);
+      const av = (a[sortKey] as number | null | undefined) ?? -Infinity;
+      const bv = (b[sortKey] as number | null | undefined) ?? -Infinity;
+      if (av === bv) return Math.abs(b.score) - Math.abs(a.score);
+      return dir * (av - bv);
+    });
+  }, [book, blocked, tab, query, sortKey, sortDir]);
+
+  const ageSec = lastSignalRefreshAt
+    ? Math.max(0, Math.floor((now - lastSignalRefreshAt) / 1000))
+    : null;
+  const age =
+    ageSec == null ? "—" : ageSec < 60 ? `${ageSec}s ago` : `${Math.floor(ageSec / 60)}m ago`;
+  const cadence =
+    signalRefreshSec < 60
+      ? `${Math.max(1, Math.round(signalRefreshSec))}s`
+      : `${Math.max(1, Math.round(signalRefreshSec / 60))}m`;
+
+  const tabs: { id: Tab; label: string; count: number }[] = [
+    { id: "all", label: "All", count: book.length },
+    { id: "buy", label: "Buys", count: book.filter((s) => s.action === "buy").length },
+    { id: "sell", label: "Sells", count: book.filter((s) => s.action === "sell").length },
+    { id: "hold", label: "Hold", count: book.filter((s) => s.action === "hold").length },
+    { id: "blocked", label: "Skipped", count: blocked.length },
   ];
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: 0.35 }}
-      className="glass-raised rounded-xl p-5"
-    >
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mb-3">
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center justify-center size-7 rounded-lg bg-neon/8">
-            <Radar className="size-3.5 text-neon" />
-          </div>
+    <div className="glass-raised overflow-hidden">
+      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-border-dim">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <Radar className="size-4 text-cyan shrink-0" />
           <h3
             className="text-sm font-semibold tracking-wide uppercase"
             style={{ fontFamily: "var(--font-display)" }}
           >
             Signal Monitor
           </h3>
-          <span
-            className="text-[11px] text-text-secondary tabular-nums font-medium"
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {q ? `${filtered.length} / ${active.length}` : active.length} scanned
-            {" · "}
-            signals {formatAgeMs(lastSignalRefreshAt)} · refresh {Math.round(signalRefreshSec / 60)}m
+          <span className="text-[11px] font-mono text-text-muted">
+            {filtered.length} names · live {age} · every {cadence}
           </span>
         </div>
-        <div
-          className="flex flex-wrap items-center gap-3 text-[10px] text-text-secondary font-medium"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          <span className="flex items-center gap-1">
-            <span className="size-1.5 rounded-full bg-neon" /> Buy
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="size-1.5 rounded-full bg-text-muted" /> Hold
-          </span>
-          <span className="flex items-center gap-1">
-            <span className="size-1.5 rounded-full bg-danger" /> Sell
-          </span>
-          <span className="flex items-center gap-1">
-            <Flame className="size-3 text-amber-400" /> Vol spike
-          </span>
-          <span className="flex items-center gap-1">
-            <Newspaper className="size-3 text-cyan" /> News
-          </span>
-          <span className="flex items-center gap-1">
-            <Sparkles className="size-3 text-cyan/80" /> AI
-          </span>
-          <span className="hidden lg:inline text-text-muted">BB = band position · VWAP = vs session avg</span>
-        </div>
-      </div>
-
-      {/* Section tabs */}
-      <div className="flex items-center gap-1.5 mb-3">
-        {tabs.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={cn(
-              "flex items-center gap-2 px-3 py-1.5 rounded-lg text-[11px] font-semibold transition-all border",
-              tab === t.id
-                ? "bg-neon/12 text-neon border-neon/25"
-                : "bg-surface-overlay/40 text-text-secondary border-border-dim hover:border-border-glow hover:text-text-primary"
-            )}
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {t.id === "alpha" && <Sparkles className="size-3" />}
-            {t.id === "blocked" && <Ban className="size-3" />}
-            <span>{t.label}</span>
-            <span
+        <div className="flex flex-wrap items-center gap-2">
+          {tabs.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => setTab(t.id)}
               className={cn(
-                "tabular-nums rounded px-1.5 py-0.5 text-[10px]",
-                tab === t.id ? "bg-neon/15 text-neon" : "bg-surface text-text-muted"
+                "text-[10px] font-mono px-2 py-1 rounded-md border",
+                tab === t.id
+                  ? "border-cyan/40 text-cyan bg-cyan/10"
+                  : "border-border-dim text-text-muted hover:text-text-secondary"
               )}
             >
-              {t.count}
-            </span>
-          </button>
-        ))}
-      </div>
-
-      {/* Search */}
-      <div className="relative mb-3">
-        <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-3.5 text-text-muted pointer-events-none" />
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search token (e.g. SIREN, ETH, LINK)…"
-          className={cn(
-            "w-full rounded-lg border border-border-dim bg-surface-overlay/50",
-            "py-2 pl-9 pr-9 text-[12px] text-text-primary placeholder:text-text-muted",
-            "focus:outline-none focus:border-neon/30 focus:ring-1 focus:ring-neon/15",
-            "transition-colors"
-          )}
-          style={{ fontFamily: "var(--font-mono)" }}
-        />
-        {query && (
-          <button
-            type="button"
-            onClick={() => setQuery("")}
-            className="absolute right-2.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-text-muted hover:text-text-primary transition-colors"
-            aria-label="Clear search"
-          >
-            <X className="size-3.5" />
-          </button>
-        )}
-      </div>
-
-      {/* List header — desktop only */}
-      <div
-        className="hidden sm:grid grid-cols-[220px_72px_1fr_auto] gap-3 px-3 py-1.5 text-[9px] uppercase tracking-wider text-text-muted font-medium border-b border-border-dim/60 mb-0"
-        style={{ fontFamily: "var(--font-mono)" }}
-      >
-        <span>Token</span>
-        <span>Live</span>
-        <span className="pl-1">Indicators</span>
-        <span className="text-right pr-12">Signal</span>
-      </div>
-
-      <div className="rounded-lg overflow-hidden border border-border-dim/40">
-        {active.length === 0 ? (
-          <div className="px-3 py-8 text-center text-[11px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
-            {tab === "alpha"
-              ? "No Binance Alpha tokens in the current scan window."
-              : tab === "blocked"
-                ? "No blocked tokens — use Block on any signal row to skip entries."
-                : "Waiting for market data…"}
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className="px-3 py-8 text-center text-[11px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
-            No tokens match &quot;{query.trim()}&quot;
-          </div>
-        ) : (
-          filtered.map((signal, i) => (
-            <SignalRow
-              key={signal.symbol}
-              signal={signal}
-              index={i}
-              readOnly={readOnly}
-              busySymbol={busySymbol}
-              onBlacklist={handleBlacklist}
-              onUnblacklist={handleUnblacklist}
+              {t.label} {t.count}
+            </button>
+          ))}
+          <div className="relative">
+            <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-text-muted" />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="NVDAB"
+              className="w-28 bg-surface border border-border-dim rounded-md py-1 pl-6 pr-6 text-[11px] font-mono focus:outline-none focus:border-cyan/40"
             />
-          ))
-        )}
+            {query && (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-muted"
+              >
+                <X className="size-3" />
+              </button>
+            )}
+          </div>
+        </div>
       </div>
-    </motion.div>
+
+      <div
+        className={cn(
+          "px-4 py-2.5 border-b border-border-dim flex flex-wrap items-start gap-x-4 gap-y-1",
+          session === "rth" && "bg-neon/[0.04]",
+          session === "close" && "bg-cyan/[0.05]",
+          session === "overnight" && "bg-warning/[0.05]"
+        )}
+      >
+        <div>
+          <div className="text-[10px] font-mono uppercase tracking-wider text-text-muted">
+            Session edge
+          </div>
+          <div className="text-[13px] font-semibold text-text-primary">{playbook.title}</div>
+        </div>
+        <p className="text-[11px] text-text-secondary max-w-3xl leading-relaxed">
+          {playbook.detail}
+        </p>
+      </div>
+
+      <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+        <table className="w-full min-w-[1280px] border-collapse">
+          <thead className="sticky top-0 z-10 bg-surface-raised">
+            <tr className="border-b border-border-dim">
+              <Th label="Score" sortKey="score" current={sortKey} dir={sortDir} onSort={handleSort} />
+              <Th label="Symbol" sortKey="symbol" current={sortKey} dir={sortDir} onSort={handleSort} align="left" />
+              <Th label="Action" align="left" />
+              <Th label="Price" sortKey="price" current={sortKey} dir={sortDir} onSort={handleSort} />
+              <Th label="24h" sortKey="change24h" current={sortKey} dir={sortDir} onSort={handleSort} />
+              <Th label="RSI" sortKey="rsi" current={sortKey} dir={sortDir} onSort={handleSort} title="RSI-14" />
+              <Th label="Stoch" sortKey="stochRsi" current={sortKey} dir={sortDir} onSort={handleSort} title="Stochastic RSI" />
+              <Th label="MACD" sortKey="macd" current={sortKey} dir={sortDir} onSort={handleSort} title="MACD histogram %" />
+              <Th label="BB%" sortKey="bbPosition" current={sortKey} dir={sortDir} onSort={handleSort} title="Bollinger band position" />
+              <Th label="VWAP" sortKey="vwapDev" current={sortKey} dir={sortDir} onSort={handleSort} title="Deviation from session VWAP" />
+              <Th label="Gap" sortKey="gapPct" current={sortKey} dir={sortDir} onSort={handleSort} title="vs last NYSE close" />
+              <Th label="ORB" sortKey="orbBreakoutPct" current={sortKey} dir={sortDir} onSort={handleSort} title="Opening range (first 30m RTH)" />
+              <Th label="ATR" sortKey="atrPct" current={sortKey} dir={sortDir} onSort={handleSort} title="ATR as % of price" />
+              <Th label="Vol" sortKey="volumeRatio" current={sortKey} dir={sortDir} onSort={handleSort} title="Volume vs 20-period average" />
+              <Th label="News" sortKey="newsScore" current={sortKey} dir={sortDir} onSort={handleSort} />
+              <Th label="Edge" align="left" title="How this name uses cash-market hours" />
+              <Th label="Conf" sortKey="confidence" current={sortKey} dir={sortDir} onSort={handleSort} />
+              {!readOnly && <Th label="" />}
+            </tr>
+          </thead>
+          <tbody>
+            {filtered.length === 0 ? (
+              <tr>
+                <td colSpan={18} className="px-4 py-10 text-center text-[12px] font-mono text-text-muted">
+                  {tab === "blocked" ? "No skipped names." : "Waiting for market pulse…"}
+                </td>
+              </tr>
+            ) : (
+              filtered.map((signal, i) => {
+                const price =
+                  signal.livePrice && signal.livePrice > 0 ? signal.livePrice : signal.price;
+                const chg = signal.liveChange24h ?? signal.change24h;
+                const edge = stockEdge(signal, asSession(signal.session ?? session));
+                const hasAi = !!signal.aiSummary;
+                const expanded = openAi === signal.symbol;
+                return (
+                  <Fragment key={signal.symbol}>
+                    <tr
+                      className={cn(
+                        "border-b border-border-dim/60 hover:bg-surface-overlay/50",
+                        i % 2 === 0 && "bg-surface-overlay/20",
+                        signal.blacklisted && "opacity-50",
+                        hasAi && "cursor-pointer"
+                      )}
+                      onClick={() => hasAi && setOpenAi(expanded ? null : signal.symbol)}
+                    >
+                      <Td hot={signal.score >= 20} cold={signal.score <= -20}>
+                        {signal.score > 0 ? "+" : ""}
+                        {Math.round(signal.score)}
+                      </Td>
+                      <Td align="left" className="text-text-primary">
+                        <div className="flex items-center gap-2">
+                          <TokenLogo symbol={signal.symbol} icon={signal.icon} />
+                          <span className="font-semibold tracking-tight">{signal.symbol}</span>
+                          {hasAi && <ChevronDown className={cn("size-3 text-text-muted transition-transform", expanded && "rotate-180")} />}
+                        </div>
+                      </Td>
+                      <Td align="left">
+                        <ActionBadge strength={signal.strength} />
+                      </Td>
+                      <Td>{formatTokenPrice(price)}</Td>
+                      <Td hot={chg >= 0} cold={chg < 0}>
+                        {formatPct(chg)}
+                      </Td>
+                      <Td hot={signal.rsi < 30} cold={signal.rsi > 70}>
+                        {fmt(signal.rsi, 0)}
+                      </Td>
+                      <Td hot={(signal.stochRsi ?? 50) < 20} cold={(signal.stochRsi ?? 50) > 80}>
+                        {fmt(signal.stochRsi, 0)}
+                      </Td>
+                      <Td hot={(signal.macd ?? 0) > 0} cold={(signal.macd ?? 0) < 0}>
+                        {signed(signal.macd, 2)}
+                      </Td>
+                      <Td hot={(signal.bbPosition ?? 50) <= 25} cold={(signal.bbPosition ?? 50) >= 75}>
+                        {fmt(signal.bbPosition, 0)}
+                      </Td>
+                      <Td hot={(signal.vwapDev ?? 0) > 0} cold={(signal.vwapDev ?? 0) < 0}>
+                        {signed(signal.vwapDev, 2, "%")}
+                      </Td>
+                      <Td hot={(signal.gapPct ?? 0) < -1} cold={(signal.gapPct ?? 0) > 2}>
+                        {signed(signal.gapPct, 2, "%")}
+                      </Td>
+                      <Td hot={(signal.orbBreakoutPct ?? 0) > 0.3} cold={(signal.orbBreakoutPct ?? 0) < -0.3}>
+                        {signed(signal.orbBreakoutPct, 2, "%")}
+                      </Td>
+                      <Td>{fmt(signal.atrPct, 1, "%")}</Td>
+                      <Td hot={(signal.volumeRatio ?? 0) >= 2}>
+                        {fmt(signal.volumeRatio, 1, "x")}
+                      </Td>
+                      <Td>
+                        {signal.newsArticles
+                          ? `${Math.round(signal.newsScore ?? 0)}`
+                          : "—"}
+                      </Td>
+                      <Td align="left" className={toneClass(edge.tone)}>
+                        {edge.label}
+                      </Td>
+                      <Td>{Math.round(signal.confidence * 100)}%</Td>
+                      {!readOnly && (
+                        <Td>
+                          {signal.blacklisted ? (
+                            <button
+                              type="button"
+                              disabled={busySymbol === signal.symbol}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void (async () => {
+                                  setBusySymbol(signal.symbol);
+                                  try {
+                                    await onUnblacklist?.(signal.symbol);
+                                  } finally {
+                                    setBusySymbol(null);
+                                  }
+                                })();
+                              }}
+                              className="text-[10px] text-text-muted hover:text-neon inline-flex items-center gap-1"
+                            >
+                              <Undo2 className="size-3" /> resume
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={busySymbol === signal.symbol}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void (async () => {
+                                  setBusySymbol(signal.symbol);
+                                  try {
+                                    await onBlacklist?.(signal.symbol);
+                                  } finally {
+                                    setBusySymbol(null);
+                                  }
+                                })();
+                              }}
+                              className="text-[10px] text-text-muted hover:text-danger inline-flex items-center gap-1"
+                            >
+                              <Ban className="size-3" /> skip
+                            </button>
+                          )}
+                        </Td>
+                      )}
+                    </tr>
+                    {expanded && signal.aiSummary && (
+                      <tr key={`${signal.symbol}-ai`} className="bg-cyan/[0.04] border-b border-border-dim/60">
+                        <td colSpan={18} className="px-4 py-3 text-[12px] text-text-secondary leading-relaxed">
+                          <span className="text-cyan font-mono text-[10px] uppercase tracking-wider mr-2">
+                            AI {signal.aiVerdict ?? "note"}
+                          </span>
+                          {signal.aiSummary}
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
   );
 }

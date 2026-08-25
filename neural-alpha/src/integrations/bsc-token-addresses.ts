@@ -42,7 +42,7 @@ export const BSC_TOKEN_ADDRESSES: Record<string, string> = {
   AXS: "0x715D400F88C1674bb183aA2D1651498E75C0E5a2",
   RAY: "0x1367C4C22Ca419bAE618668D6E6943F417fcbe8d",
   // NOTE: ZRO has no verified BEP-20 deployment — the previous entry was the
-  // Ethereum LayerZero contract, which TWAK rejects on BSC. Left unmapped so
+  // Ethereum LayerZero contract, not a valid BSC swap target. Left unmapped.
   // the executor skips it instead of attempting a wrong-chain swap.
   STG: "0xB0D12492637F3F1aD7535416272550617A0623E2",
   CHEEMS: "0x0df0587216a4a1bb7d5082fdc491d93d2dd4b413",
@@ -95,7 +95,10 @@ export const BSC_TOKEN_ADDRESSES: Record<string, string> = {
   TAG: "0x208bf3e7da9639f1eaefa2de78c23396b0682025",
   TOSHI: "0x6a2608dabe09bc1128eec7275b92dfb939d5db3f",
   TRIA: "0xb0b92de23baa85fb06208277e925ced53edab482",
-  U: "0xba5ed44733953d79717f6269357c77718c8ba5ed",
+  U: "0xcE24439F2D9C6a2289F741120FE202248B666666",
+  USD1: "0x8d0D000Ee44948FC98c9B98A4FA4921476f08B0d",
+  USDC: "0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d",
+  USDT: "0x55d398326f99059fF775485246999027B3197955",
   UAI: "0x3e5d4f8aee0d9b3082d5f6da5d6e225d17ba9ea0",
   UB: "0x40b8129b786d766267a7a118cf8c07e31cdb6fde",
   VELO: "0xf486ad071f3bee968384d2e39e2d8af0fcf6fd46",
@@ -129,11 +132,21 @@ export function trustWalletIconUrl(contractAddress: string): string {
  */
 export function hasBscSwapAddress(symbol: string): boolean {
   const upper = symbol.toUpperCase();
-  if (upper === "USDT" || upper === "BNB") return true;
+  if (upper === "USDT" || upper === "BNB" || upper === "USDC" || upper === "U" || upper === "USD1") {
+    return true;
+  }
   return knownBscAddress(symbol) !== undefined;
 }
 
 const addressCache = new Map<string, string>();
+
+/** Register a runtime-resolved BEP-20 address (bStock type=3, CMC, etc.). */
+export function cacheBscTokenAddress(symbol: string, address: string): string | undefined {
+  const addr = normalizeAddress(address);
+  if (!addr) return undefined;
+  addressCache.set(symbol.toUpperCase(), addr);
+  return addr;
+}
 
 function normalizeAddress(addr: string): string | undefined {
   const trimmed = addr.trim();

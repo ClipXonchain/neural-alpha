@@ -3,10 +3,8 @@
 import { motion } from "framer-motion";
 import {
   Shield,
-  AlertTriangle,
   CheckCircle2,
   XCircle,
-  Gauge,
 } from "lucide-react";
 import { cn, formatRatio } from "@/lib/utils";
 import type { AgentState } from "@/lib/mock-data";
@@ -83,13 +81,6 @@ export function RiskPanel({ state }: { state: AgentState }) {
       passed: state.currentDrawdownPct < state.maxDrawdownLimit && !state.emergencyMode,
     },
     {
-      label: "Daily Trades",
-      current: state.todayTrades,
-      max: state.maxDailyTradesLimit,
-      unit: "",
-      passed: state.todayTrades < state.maxDailyTradesLimit,
-    },
-    {
       label: "Open Positions",
       current: state.positions.length,
       max: state.maxPositionsLimit,
@@ -148,7 +139,7 @@ export function RiskPanel({ state }: { state: AgentState }) {
           <RiskItem
             key={check.label}
             {...check}
-            delay={0.5 + i * 0.08}
+            delay={0}
           />
         ))}
       </div>
@@ -163,29 +154,18 @@ export function RiskPanel({ state }: { state: AgentState }) {
             </span>
           </div>
           <span className="text-[10px] font-mono text-neon">
-            149 BEP-20 active
+            Eligible bStocks
           </span>
         </div>
         <div className="flex items-center justify-between mt-2">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="size-3 text-neon" />
             <span className="text-[11px] font-mono text-text-secondary">
-              Honeypot Scanner
+              Self-Custody (Agentic Wallet)
             </span>
           </div>
           <span className="text-[10px] font-mono text-neon">
-            Active
-          </span>
-        </div>
-        <div className="flex items-center justify-between mt-2">
-          <div className="flex items-center gap-2">
-            <CheckCircle2 className="size-3 text-neon" />
-            <span className="text-[11px] font-mono text-text-secondary">
-              Self-Custody (TWAK)
-            </span>
-          </div>
-          <span className="text-[10px] font-mono text-neon">
-            Local Signing
+            MPC Keyless
           </span>
         </div>
       </div>

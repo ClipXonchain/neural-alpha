@@ -4,7 +4,7 @@ import { BSC_CHAIN } from "../config.js";
 
 /**
  * Market data provider that uses CMC Agent Hub via x402 pay-per-request
- * and TWAK price feeds as fallback. All CMC data flows through x402
+ * and Binance Web3 / Agentic Wallet price feeds as fallback.
  * to satisfy the "Best Use of Agent Hub" special prize criteria.
  *
  * In the live agent loop, this module is called via MCP tool invocations
@@ -119,7 +119,7 @@ export function buildMarketData(
 
 /**
  * CMC x402 endpoint URLs for different data types.
- * These are called via TWAK's x402_request MCP tool, which handles
+ * These are called via the CMC Pro bridge or campaign x402, which handles
  * the payment flow (402 challenge → sign → retry with X-Payment header).
  */
 export const CMC_ENDPOINTS = {
@@ -128,8 +128,6 @@ export const CMC_ENDPOINTS = {
   /** Batch quotes — one x402 payment for many symbols (CMC Agent Hub). */
   quotes: (symbols: string[]) =>
     `${CMC_X402_BASE}/v1/cryptocurrency/quotes/latest?symbol=${encodeURIComponent(symbols.join(","))}`,
-  fearGreed: () =>
-    `${CMC_X402_BASE}/v1/global-metrics/fear-and-greed`,
   trending: () =>
     `${CMC_X402_BASE}/v1/cryptocurrency/trending/latest`,
   listings: (limit = 100) =>
@@ -166,28 +164,8 @@ export function parseCmcQuote(raw: Record<string, unknown>, symbol: string): Mar
   }
 }
 
-export function parseFearGreedIndex(raw: Record<string, unknown>): number | null {
-  try {
-    const payload = raw?.data;
-    if (payload && typeof payload === "object") {
-      if (Array.isArray(payload)) {
-        const first = payload[0] as Record<string, unknown> | undefined;
-        const v = first?.value;
-        if (typeof v === "number") return v;
-      } else {
-        const v = (payload as Record<string, unknown>).value;
-        if (typeof v === "number") return v;
-      }
-    }
-    const top = raw?.value;
-    return typeof top === "number" ? top : null;
-  } catch {
-    return null;
-  }
-}
-
 /**
- * Unwrap TWAK x402_request tool output into parsed JSON body.
+ * Unwrap x402 / CMC tool output into parsed JSON body.
  * Handles direct JSON, nested `data`, string `body`, and MCP text payloads.
  */
 export function unwrapX402Response(

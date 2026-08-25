@@ -22,10 +22,13 @@ out/
 .env.test.local
 .env.production.local
 
-# TWAK wallet/credentials (if copied into repo by mistake)
+# Binance Agentic Wallet / leftover TWAK credentials
+.baw/
 .twak/
 credentials.json
 wallet.json
+neural-alpha/data/campaign-state.json
+neural-alpha/data/position-entries.json
 
 # Logs
 logs/

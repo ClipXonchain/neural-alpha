@@ -1,48 +1,73 @@
 import "dotenv/config";
 import { logger } from "./utils/logger.js";
-import { COMPETITION_CONTRACT, BSC_CHAIN } from "./config.js";
+import {
+  CAMPAIGN_JOIN_URL,
+  CAMPAIGN_PAGE_URL,
+  CAMPAIGN_END_UTC,
+  campaignQualification,
+  isCampaignActive,
+  markCampaignRegistered,
+} from "./integrations/campaign.js";
+import { bawWalletStatus } from "./integrations/baw-cli.js";
+import { createAgenticWalletBridge } from "./integrations/agentic-wallet-bridge.js";
 
 /**
- * Neural Alpha — Competition Registration
+ * bStock PnL contest registration helper.
  *
- * Registers the agent wallet on the BNB Hack competition contract.
- * This MUST be done before June 22 (the live trading window).
- *
- * Two methods:
- * 1. MCP: competition_register tool (recommended)
- * 2. CLI: twak compete register
- *
- * This script demonstrates the MCP registration flow.
- * In practice, the AI orchestrator calls the MCP tool directly.
+ * Official registration is "Join Now" on the campaign page, binding this
+ * Agentic Wallet. Trades before registration do not count; the wallet cannot
+ * be changed once confirmed.
  */
-
 async function main() {
   console.log(`
 ╔══════════════════════════════════════════════════════════╗
-║   Neural Alpha — Competition Registration                ║
-║   Contract: ${COMPETITION_CONTRACT}   ║
+║   Neural Alpha — bStock PnL Contest Registration         ║
 ╚══════════════════════════════════════════════════════════╝
 `);
 
-  logger.info("Registration helper started");
-  logger.info("To register via MCP, use the competition_register tool");
-  logger.info("To register via CLI, run: twak compete register");
-  logger.info("To check status via MCP, use the competition_status tool");
+  let status = "UNCONNECTED";
+  let address: string | null = null;
+  try {
+    status = await bawWalletStatus();
+    const bridge = await createAgenticWalletBridge();
+    const addr = await bridge.getAddress("bsc");
+    address = addr?.address ?? null;
+  } catch (err) {
+    logger.warn("Could not read Agentic Wallet", { error: String(err) });
+  }
+
+  const q = campaignQualification();
+  if (process.env.CAMPAIGN_REGISTERED === "true") {
+    markCampaignRegistered(address ?? undefined);
+  }
 
   console.log(`
-Registration Steps:
-1. Ensure your TWAK wallet has BNB for gas on BSC
-2. Run one of:
-   - MCP tool: competition_register (no arguments needed)
-   - CLI: twak compete register
-3. Verify with: competition_status MCP tool
-4. Also register on DoraHacks with your agent wallet address
+Campaign window: 2026-08-17 09:00 UTC → 2026-09-01 00:00 UTC
+Active now:      ${isCampaignActive() ? "yes" : "no"}
+Ends:            ${new Date(CAMPAIGN_END_UTC).toISOString()}
 
-Competition Contract (BSC): ${COMPETITION_CONTRACT}
-Explorer: https://bsctrace.com/address/${COMPETITION_CONTRACT}
+Agentic Wallet:  ${status}
+BSC address:     ${address ?? "(sign in with baw auth signin)"}
+Local registered flag: ${q.registered}
+CMC x402 calls:  ${q.cmcCalls}/${q.minCmcCalls}
+Studio x402:     ${q.studioCalls}/${q.minStudioCalls}
 
-IMPORTANT: Registration must be completed BEFORE June 22, 2026!
-  `);
+Registration (required before any scored trade):
+  1. Create / sign in to a Binance Agentic Wallet
+       npx --yes @binance/agentic-wallet auth signin
+  2. Open the campaign page and tap Join Now, binding THIS wallet:
+       ${CAMPAIGN_JOIN_URL}
+  3. Docs:
+       ${CAMPAIGN_PAGE_URL}
+
+Then set CAMPAIGN_REGISTERED=true in .env so the agent records the bind.
+
+Hard requirements at campaign end:
+  • ≥ ${q.minCmcCalls} paid CMC MCP x402 calls (designated tools only)
+  • ≥ ${q.minStudioCalls} paid Agent Studio x402 analysis calls
+  • Realized PnL ≥ 0 on eligible bStocks, FIFO, payment token BNB/USDT/USDC/U/USD1
+  • Keep BNB for gas (AI calls are gasless; swaps are not)
+`);
 }
 
 main().catch((err) => {

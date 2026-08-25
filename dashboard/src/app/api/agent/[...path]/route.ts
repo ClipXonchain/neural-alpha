@@ -3,7 +3,7 @@ import { getAgentApiUrl } from "@/lib/agent-url";
 import { getServerEnv } from "@/lib/server-env";
 
 export const dynamic = "force-dynamic";
-/** Trades / wallet sync can take 1–2 min (TWAK approval + on-chain swap). */
+/** Trades / wallet sync can take 1–2 min (Agentic Wallet swap + on-chain confirm). */
 export const maxDuration = 300;
 
 function apiSecret(): string | undefined {
@@ -12,11 +12,14 @@ function apiSecret(): string | undefined {
 
 const PUBLIC_DASHBOARD_HOSTS = new Set(["agents.clipx.app"]);
 const LONG_RUNNING_PATHS = new Set([
-  "command",
+  "control/sell",
   "wallet/sync",
   "control/resync",
   "wallet/mode",
+  "wallet/signin",
+  "wallet/verify",
   "competition/register",
+  "campaign/ai-tasks",
   "control/start",
 ]);
 

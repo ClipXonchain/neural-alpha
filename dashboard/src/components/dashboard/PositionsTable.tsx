@@ -3,19 +3,38 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Layers, Loader2, ArrowDownRight } from "lucide-react";
-import { cn, formatUsd, formatPct, formatTradePrice } from "@/lib/utils";
+import { cn, formatUsd, formatPct, formatTradePrice, formatTokenQty } from "@/lib/utils";
 import type { Position } from "@/lib/mock-data";
 
-const TOKEN_COLORS: Record<string, string> = {
-  ETH: "#627eea",
-  LINK: "#2a5ada",
-  AVAX: "#e84142",
-  AAVE: "#b6509e",
-  DOT: "#e6007a",
-  UNI: "#ff007a",
-  DOGE: "#c3a634",
-  ADA: "#0033ad",
-};
+function tokenHue(symbol: string): string {
+  let h = 0;
+  for (let i = 0; i < symbol.length; i++) h = (h * 31 + symbol.charCodeAt(i)) % 360;
+  return `hsl(${h} 28% 46%)`;
+}
+
+function clampPct(n: number): number {
+  return Math.min(100, Math.max(0, n));
+}
+
+function positionValueUsd(pos: Position): number {
+  if (pos.currentPrice > 0 && pos.amount > 0) return pos.amount * pos.currentPrice;
+  return 0;
+}
+
+/** Entry sits at 50%. Left half is the SL run, right half is the TP run. */
+function exitMarkerPct(pos: Position): number {
+  const sl = pos.stopLossPrice;
+  const tp = pos.takeProfitPrice;
+  const entry = pos.entryPrice;
+  const current = pos.currentPrice;
+  if (sl == null || tp == null || !(entry > 0) || !(current > 0)) return 50;
+  if (current >= entry) {
+    const run = tp - entry;
+    return clampPct(50 + 50 * (run > 0 ? (current - entry) / run : 0));
+  }
+  const run = entry - sl;
+  return clampPct(50 + 50 * (run > 0 ? (current - entry) / run : 0));
+}
 
 function ExitLevels({ pos }: { pos: Position }) {
   const slDist = pos.distanceToStopPct;
@@ -32,16 +51,10 @@ function ExitLevels({ pos }: { pos: Position }) {
   const slHit = slDist <= 0;
   const tpHit = tpDist <= 0;
   const slNear = !slHit && slDist <= 2;
-  const stopLossPct = pos.entryPrice > 0
-    ? Math.abs((pos.stopLossPrice - pos.entryPrice) / pos.entryPrice) * 100
-    : 8;
-  const takeProfitPct = pos.entryPrice > 0
-    ? Math.abs((pos.takeProfitPrice - pos.entryPrice) / pos.entryPrice) * 100
-    : 15;
-  const spanPct = stopLossPct + takeProfitPct;
-  const markerPct = spanPct > 0
-    ? Math.min(100, Math.max(0, ((stopLossPct + pos.pnlPct) / spanPct) * 100))
-    : 50;
+  const inProfit = pos.currentPrice >= pos.entryPrice;
+  const markerPct = exitMarkerPct(pos);
+  const fillLeft = Math.min(50, markerPct);
+  const fillWidth = Math.abs(markerPct - 50);
 
   return (
     <div className="flex flex-col gap-1 min-w-[108px]">
@@ -51,7 +64,7 @@ function ExitLevels({ pos }: { pos: Position }) {
             "tabular-nums font-semibold",
             slHit ? "text-danger" : slNear ? "text-amber-400" : "text-text-muted"
           )}
-          title={`Stop @ ${formatTradePrice(pos.stopLossPrice)}`}
+          title={`Stop @ ${formatTradePrice(pos.stopLossPrice)} · ${slDist.toFixed(1)}% of price left`}
         >
           SL {slHit ? "HIT" : `${slDist.toFixed(1)}%`}
         </span>
@@ -60,21 +73,37 @@ function ExitLevels({ pos }: { pos: Position }) {
             "tabular-nums font-semibold",
             tpHit ? "text-neon" : "text-text-muted"
           )}
-          title={`Target @ ${formatTradePrice(pos.takeProfitPrice)}`}
+          title={`Target @ ${formatTradePrice(pos.takeProfitPrice)} · ${tpDist.toFixed(1)}% of price left`}
         >
           TP {tpHit ? "HIT" : `${tpDist.toFixed(1)}%`}
         </span>
       </div>
       <div
-        className="relative h-1.5 rounded-full bg-surface-overlay overflow-hidden"
+        className="relative h-1.5 rounded-full bg-surface-overlay"
         title={`Entry ${formatTradePrice(pos.entryPrice)} · Now ${formatTradePrice(pos.currentPrice)}`}
       >
-        <div className="absolute inset-y-0 left-0 w-1/2 bg-danger/20" />
-        <div className="absolute inset-y-0 right-0 w-1/2 bg-neon/15" />
+        <div className="absolute inset-0 rounded-full overflow-hidden">
+          <div className="absolute inset-y-0 left-0 w-1/2 bg-danger/20" />
+          <div className="absolute inset-y-0 right-0 w-1/2 bg-neon/15" />
+          {fillWidth > 0.3 && (
+            <div
+              className={cn(
+                "absolute inset-y-0 transition-[left,width] duration-500",
+                inProfit ? "bg-neon/55" : "bg-danger/55"
+              )}
+              style={{ left: `${fillLeft}%`, width: `${fillWidth}%` }}
+            />
+          )}
+        </div>
+        <div
+          className="absolute top-0 h-full w-px bg-text-muted/80"
+          style={{ left: "50%" }}
+          title="Entry"
+        />
         <div
           className={cn(
-            "absolute top-1/2 -translate-y-1/2 size-2 rounded-full border border-background shadow-sm",
-            pos.pnlPct >= 0 ? "bg-neon" : "bg-danger"
+            "absolute top-1/2 -translate-y-1/2 size-2 rounded-full border border-background shadow-sm transition-[left] duration-500",
+            inProfit ? "bg-neon" : "bg-danger"
           )}
           style={{ left: `calc(${markerPct}% - 4px)` }}
         />
@@ -107,8 +136,11 @@ export function PositionsTable({
   const handleSell = useCallback(
     async (symbol: string, amount: number) => {
       if (!onSell || sellingSymbol) return;
+      const pos = positions.find((p) => p.symbol === symbol);
+      const value = pos ? positionValueUsd(pos) : 0;
+      const qtyLabel = `${formatTokenQty(amount)} ${symbol}`;
       const ok = window.confirm(
-        `Sell entire ${symbol} position (${amount.toFixed(4)} ${symbol})?\n\nThis submits an on-chain swap at 1% max slippage.`
+        `Sell entire ${symbol} position (${qtyLabel}${value > 0 ? ` · ${formatUsd(value)}` : ""})?\n\nThis submits an on-chain swap at 1% max slippage.`
       );
       if (!ok) return;
 
@@ -122,7 +154,7 @@ export function PositionsTable({
         setSellingSymbol(null);
       }
     },
-    [onSell, sellingSymbol]
+    [onSell, sellingSymbol, positions]
   );
 
   const showActions = !readOnly && !!onSell;
@@ -162,7 +194,7 @@ export function PositionsTable({
             animate={{ width: `${pos.weight}%` }}
             transition={{ duration: 0.8, ease: "easeOut" }}
             className="rounded-full"
-            style={{ backgroundColor: TOKEN_COLORS[pos.symbol] || "#8b949e" }}
+            style={{ backgroundColor: tokenHue(pos.symbol) }}
           />
         ))}
       </div>
@@ -172,7 +204,9 @@ export function PositionsTable({
           <thead>
             <tr className="text-text-muted text-[10px] uppercase tracking-wider">
               <th className="text-left pb-3 pr-4">Token</th>
-              <th className="text-right pb-3 pr-4">Amount</th>
+              <th className="text-right pb-3 pr-4" title="Live USD value · token quantity below">
+                Value
+              </th>
               <th className="text-right pb-3 pr-4" title="Fixed at buy execution — not live price">
                 Entry
               </th>
@@ -185,12 +219,14 @@ export function PositionsTable({
           </thead>
           <tbody>
             <AnimatePresence>
-              {positions.map((pos, i) => (
+              {positions.map((pos) => {
+                const valueUsd = positionValueUsd(pos);
+                return (
                 <motion.tr
                   key={pos.symbol}
                   initial={{ opacity: 0, x: -10 }}
                   animate={{ opacity: 1, x: 0 }}
-                  transition={{ delay: 0.5 + i * 0.08 }}
+                  transition={{ duration: 0.15 }}
                   className="border-t border-border-dim hover:bg-surface-overlay/50 transition-colors"
                 >
                   <td className="py-3 pr-4">
@@ -199,7 +235,7 @@ export function PositionsTable({
                         className="size-2 rounded-full"
                         style={{
                           backgroundColor:
-                            TOKEN_COLORS[pos.symbol] || "#8b949e",
+                            tokenHue(pos.symbol),
                         }}
                       />
                       <span className="font-semibold text-text-primary">
@@ -207,8 +243,18 @@ export function PositionsTable({
                       </span>
                     </div>
                   </td>
-                  <td className="text-right py-3 pr-4 text-text-secondary tabular-nums">
-                    {pos.amount.toFixed(4)}
+                  <td
+                    className="text-right py-3 pr-4"
+                    title={`${formatTokenQty(pos.amount)} ${pos.symbol}`}
+                  >
+                    <div className="flex flex-col items-end">
+                      <span className="font-semibold text-text-primary tabular-nums">
+                        {valueUsd > 0 ? formatUsd(valueUsd) : "—"}
+                      </span>
+                      <span className="text-[10px] text-text-muted tabular-nums">
+                        {formatTokenQty(pos.amount)} {pos.symbol}
+                      </span>
+                    </div>
                   </td>
                   <td
                     className="text-right py-3 pr-4 text-text-secondary tabular-nums"
@@ -264,10 +310,10 @@ export function PositionsTable({
                           className="h-full rounded-full"
                           initial={{ width: 0 }}
                           animate={{ width: `${pos.weight}%` }}
-                          transition={{ duration: 0.6, delay: 0.6 + i * 0.1 }}
+                          transition={{ duration: 0.3 }}
                           style={{
                             backgroundColor:
-                              TOKEN_COLORS[pos.symbol] || "#8b949e",
+                              tokenHue(pos.symbol),
                           }}
                         />
                       </div>
@@ -307,7 +353,8 @@ export function PositionsTable({
                     </td>
                   )}
                 </motion.tr>
-              ))}
+                );
+              })}
             </AnimatePresence>
           </tbody>
         </table>

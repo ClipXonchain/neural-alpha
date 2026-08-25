@@ -15,9 +15,10 @@ import {
   resyncAgent,
   syncWallet,
   registerCompetition,
-  switchWalletMode,
+  startWalletSignin,
+  verifyWalletSignin,
   saveAgentConfig,
-  sendCommand,
+  sellPosition,
 } from "@/lib/agent-api";
 import { mapTrack1ToDashboard, enrichStateWithWallet, mergeWalletLiveIntoSignals } from "@/lib/map-agent-state";
 import { generateOfflineState } from "@/lib/mock-data";
@@ -58,7 +59,7 @@ export function useAgentConnection() {
           : prev
       );
     } catch {
-      /* agent may not have TWAK */
+      /* wallet cache may still be warming */
     }
   }, []);
 
@@ -206,9 +207,13 @@ export function useAgentConnection() {
     return result;
   }, [refreshWallet]);
 
-  const handleSwitchWallet = useCallback(
-    async (mode: "local" | "walletconnect") => {
-      const result = await switchWalletMode(mode);
+  const handleWalletSignin = useCallback(async () => {
+    return startWalletSignin();
+  }, []);
+
+  const handleWalletVerify = useCallback(
+    async (qrCodeId: string) => {
+      const result = await verifyWalletSignin(qrCodeId);
       await refreshWallet();
       return result;
     },
@@ -217,7 +222,9 @@ export function useAgentConnection() {
 
   const handleSaveConfig = useCallback(
     async (updates: Record<string, unknown>) => {
-      return saveAgentConfig(updates);
+      const result = await saveAgentConfig(updates);
+      if (result.ok && result.config) setAgentConfig(result.config);
+      return result;
     },
     []
   );
@@ -227,7 +234,7 @@ export function useAgentConnection() {
       if (!connectedRef.current) {
         throw new Error("Agent offline — start the agent first.");
       }
-      const result = await sendCommand(`sell all ${symbol}`);
+      const result = await sellPosition(symbol);
       if (!result.ok) {
         throw new Error(result.message || `Failed to sell ${symbol}`);
       }
@@ -259,7 +266,8 @@ export function useAgentConnection() {
     handleSyncWallet,
     handleResync,
     handleRegister,
-    handleSwitchWallet,
+    handleWalletSignin,
+    handleWalletVerify,
     handleSaveConfig,
     handleSellPosition,
     refreshWallet,

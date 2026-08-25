@@ -1,5 +1,5 @@
 /**
- * Out-of-process wallet scan — avoids TWAK wallet lock when agent MCP is active.
+ * Out-of-process wallet scan (legacy). Prefer Agentic Wallet `wallet balance`.
  * Usage: npx tsx scripts/cli-wallet-scan.ts <walletAddress>
  */
 import { scanKnownBscTokenBalances } from "../src/integrations/bscscan.js";

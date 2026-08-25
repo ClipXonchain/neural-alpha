@@ -3,9 +3,8 @@ import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isEligibleToken, isStablecoin } from "../config.js";
-import { BSC_TOKEN_ADDRESSES } from "./bsc-token-addresses.js";
-import { getTokenBalanceViaCli } from "./twak-cli-balance.js";
+import { isEligibleToken, isStablecoin, ELIGIBLE_TOKENS } from "../config.js";
+import { knownBscAddress } from "./bsc-token-addresses.js";
 import { logger } from "../utils/logger.js";
 
 const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -46,16 +45,16 @@ const BATCH_SIZE = 4;
 
 /**
  * Probe known BEP-20 contracts for non-zero balances.
- * Prefer queryBalance (TWAK MCP bridge — CLI inside) when provided;
- * falls back to direct TWAK CLI when run out-of-process (scripts/tests).
+ * Prefer queryBalance (Agentic Wallet bridge) when provided.
+ * Without a live wallet query, skip the contract probe (Binance Web3 is primary).
  */
 export async function scanKnownBscTokenBalances(
   walletAddress: string,
   queryBalance?: (symbol: string) => Promise<PortfolioHolding | null>
 ): Promise<PortfolioHolding[]> {
-  const symbols = Object.keys(BSC_TOKEN_ADDRESSES).filter((sym) => {
+  const symbols = ELIGIBLE_TOKENS.filter((sym) => {
     const upper = sym.toUpperCase();
-    return isEligibleToken(upper) && !isStablecoin(upper) && !NATIVE_GAS.has(upper);
+    return isEligibleToken(upper) && !isStablecoin(upper) && !NATIVE_GAS.has(upper) && knownBscAddress(upper);
   });
 
   const holdings: PortfolioHolding[] = [];
@@ -68,19 +67,7 @@ export async function scanKnownBscTokenBalances(
         return null;
       }
     }
-    const tokenAddress = BSC_TOKEN_ADDRESSES[sym];
-    if (!tokenAddress) return null;
-    try {
-      const bal = await getTokenBalanceViaCli("bsc", walletAddress, tokenAddress, sym);
-      if (!bal || !(bal.amount > 0)) return null;
-      return {
-        symbol: bal.symbol,
-        amount: bal.amount,
-        ...(bal.valueUsd && bal.valueUsd > 0 ? { valueUsd: bal.valueUsd } : {}),
-      };
-    } catch {
-      return null;
-    }
+    return null;
   };
 
   for (let i = 0; i < symbols.length; i += BATCH_SIZE) {
@@ -102,8 +89,7 @@ export async function scanKnownBscTokenBalances(
 }
 
 /**
- * Run the CLI wallet scan in a child process so TWAK MCP wallet lock
- * doesn't block balance reads while `twak serve` is active in the agent.
+ * Out-of-process wallet scan (legacy). Prefer Agentic Wallet `wallet balance`.
  */
 export async function scanWalletViaCliSubprocess(
   walletAddress: string

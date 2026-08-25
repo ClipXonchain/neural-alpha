@@ -403,7 +403,7 @@
 </div><!-- .main -->
 
 <div class="footer">
-  Neural Alpha &middot; CMC Agent Hub + TWAK + BSC
+  Neural Alpha &middot; Agentic Wallet + bStock + BSC
 </div>
 
 <script>
@@ -439,12 +439,12 @@ function updateDashboard(s) {
   // Data source
   const dp = document.getElementById('dataPill');
   const src = s.bridgeSource || 'unknown';
-  const isReal = src.includes('twak') || src.includes('cmc-pro');
-  const labels = {'twak-mcp':'CMC x402','twak+cmc-pro':'CMC PRO + TWAK','cmc-pro':'CMC PRO','mock':'MOCK','mock-fallback':'MOCK'};
+  const isReal = src.includes('baw') || src.includes('cmc-pro');
+  const labels = {'baw':'AW','baw+cmc-pro':'CMC + AW','cmc-pro':'CMC PRO','mock':'MOCK','mock-fallback':'MOCK'};
   dp.textContent = labels[src] || src.toUpperCase();
   dp.className = 'pill pill-data ' + (isReal ? 'live' : 'mock');
   const tips = {
-    'twak-mcp':'CMC Agent Hub via TWAK x402','twak+cmc-pro':'Real CMC data (Pro API) + TWAK execution',
+    'baw':'Binance Agentic Wallet','baw+cmc-pro':'CMC Pro + Agentic Wallet execution',
     'cmc-pro':'Real CMC data (Pro API) — paper swaps','mock':'Simulated data','mock-fallback':'Simulated fallback data'
   };
   dp.title = tips[src] || src;
@@ -493,7 +493,7 @@ function updateDashboard(s) {
     fgC.style.background = color + '18'; fgC.style.color = color; fgC.style.borderColor = color;
     document.getElementById('fgLabel').textContent = label;
     document.getElementById('fgLabel').style.color = color;
-    const srcLabel = (s.bridgeSource||'').includes('cmc-pro') ? 'CMC Pro API' : s.bridgeSource === 'twak-mcp' ? 'CMC x402' : 'Mock';
+    const srcLabel = (s.bridgeSource||'').includes('cmc-pro') ? 'CMC Pro API' : (s.bridgeSource||'').includes('baw') ? 'Agentic Wallet' : 'Mock';
     document.getElementById('fgSub').textContent = srcLabel;
   }
 

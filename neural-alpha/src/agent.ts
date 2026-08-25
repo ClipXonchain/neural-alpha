@@ -1,14 +1,17 @@
 import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot } from "./utils/types.js";
 import { loadConfig, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
-import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, parseCmcQuotesBatch, parseCmcTrending, parseFearGreedIndex, unwrapX402Response } from "./data/market.js";
+import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, parseCmcQuotesBatch, parseCmcTrending, unwrapX402Response } from "./data/market.js";
 import { fetchNewsFeed } from "./data/news.js";
 import { analyzeMarkets, selectTrades } from "./strategy/index.js";
-import { getStrategyProfile, isStrategyName } from "./strategy/presets.js";
-import { resolveBscTokenAddress, hasBscSwapAddress } from "./integrations/bsc-token-addresses.js";
+import { getSessionProfile } from "./strategy/presets.js";
+import { getSessionClock, isSessionPolicy } from "./strategy/session.js";
+import type { SessionClock } from "./strategy/session.js";
+import { resolveBscTokenAddress, hasBscSwapAddress, knownBscAddress, trustWalletIconUrl } from "./integrations/bsc-token-addresses.js";
 import { computeSignals, getTokenMomentumMetrics, getTokenDisplayMetrics } from "./strategy/signals.js";
 import { enrichSignalsWithAi, applyAiInsight } from "./strategy/ai-analyst.js";
 import type { AiSignalInsight } from "./strategy/ai-analyst.js";
 import { analyzeNewsSentiment, type NewsSentiment } from "./strategy/news-sentiment.js";
+import { getCmcMacro, refreshCmcMacro } from "./strategy/cmc-macro.js";
 import { RiskManager } from "./risk/manager.js";
 import { PortfolioTracker } from "./risk/portfolio.js";
 import {
@@ -37,11 +40,12 @@ import {
   brainProtectiveExit,
   brainProtectiveWatch,
   brainQueuedTrades,
+  brainBuyPacing,
   brainRefreshLoopStarted,
-  brainSentiment,
+  brainSession,
+  brainCmcMacro,
   brainSignalOverview,
   brainSignalPulse,
-  brainStartupCooldown,
   brainTradeExecuted,
   brainTradeFailed,
   brainTradeSkipped,
@@ -59,22 +63,31 @@ import {
   isPlausibleLivePrice,
   type BinanceLiveQuote,
 } from "./integrations/binance-web3-market.js";
-import { knownBscAddress, trustWalletIconUrl } from "./integrations/bsc-token-addresses.js";
+import { campaignQualification, loadCampaignState } from "./integrations/campaign.js";
+import {
+  startAgenticSignin,
+  verifyAgenticSignin,
+} from "./integrations/agentic-wallet-bridge.js";
+import {
+  completeCmcCampaignCall,
+  submitStudioAnalysis,
+  pollStudioJob,
+} from "./integrations/campaign-x402.js";
+import { tickerFromBstock } from "./integrations/bstock.js";
+
+/** CMC / eligible-universe refresh. Live Binance quotes pulse faster than this. */
+const DEEP_SCAN_MS = 180_000;
+/** ClipX news cadence — not needed on every live price tick. */
+const NEWS_REFRESH_MS = 120_000;
 
 /**
  * Core autonomous trading agent — Neural Alpha.
  *
  * Architecture:
- *   CMC Agent Hub (x402) → Market Data → Strategy Engine → Risk Manager → TWAK Swap → BSC
+ *   Binance Web3 bStock quotes + CMC x402 → Strategy → Risk → Agentic Wallet swap → BSC
  *
- * The agent operates in two modes:
- * 1. MCP-orchestrated: An AI agent calls TWAK MCP tools and feeds results
- *    to this engine. The agent class provides the decision logic.
- * 2. Standalone: The agent runs its own loop (for demo/testing), using
- *    direct HTTP calls or mock data.
- *
- * All execution goes through TWAK — self-custody, local signing, no
- * custodial intermediaries.
+ * All live execution goes through Binance Agentic Wallet (`baw`) — MPC keyless,
+ * no local private keys. Campaign PnL only counts eligible bStock trades via AW.
  */
 
 export interface McpBridge {
@@ -98,6 +111,20 @@ export interface McpBridge {
   competitionStatus?(): Promise<Record<string, unknown> | null>;
 }
 
+export interface CampaignSnapshot {
+  registered: boolean;
+  registrationOpen: boolean;
+  cmcCalls: number;
+  studioCalls: number;
+  minCmcCalls: number;
+  minStudioCalls: number;
+  cmcComplete: boolean;
+  studioComplete: boolean;
+  joinUrl: string;
+  docsUrl: string;
+  active: boolean;
+}
+
 export interface WalletInfo {
   address: string | null;
   bnbBalance: number;
@@ -107,6 +134,7 @@ export interface WalletInfo {
   registered: boolean;
   registrationOpen: boolean;
   binancePositions?: BinanceWeb3Position[];
+  campaign?: CampaignSnapshot;
 }
 
 export class TradingAgent {
@@ -117,21 +145,18 @@ export class TradingAgent {
   private cycleCount = 0;
   private running = false;
   private runGeneration = 0;
-  private fearGreedIndex: number | null = null;
   private watchlist: string[];
   private lastSignals: Map<string, number> = new Map();
   private lastSignalConfidence: Map<string, number> = new Map();
   private lastNewsSentiment: Map<string, NewsSentiment> = new Map();
   private lastNewsCount = 0;
   private lastAiInsights = new Map<string, AiSignalInsight>();
+  private lastTradeSignals = new Map<string, import("./utils/types.js").TradeSignal>();
   private bridgeSource = "unknown";
   private x402Payment = process.env.CMC_X402_MAX_PAYMENT || "10000";
   private startedAt = Date.now();
   /** Autonomous swap failures — prevents approve+retry spam on the same token. */
   private failedSwapUntil = new Map<string, number>();
-  /** Estimated autonomous on-chain txs sent today (approve + swap ≈ 2 each). */
-  private autonomousOnChainTxToday = 0;
-  private autonomousTxDay = "";
   private cycleInProgress = false;
   private lastCycleCompletedAt = 0;
   private lastCycleDurationMs = 0;
@@ -143,8 +168,11 @@ export class TradingAgent {
   /** Independent signal refresh loop (decoupled from trade cycle). */
   private signalRefreshTimer: ReturnType<typeof setInterval> | undefined;
   private signalRefreshInProgress = false;
+  private signalRefreshPromise: Promise<MarketData[]> | null = null;
   private signalRefreshCount = 0;
   private lastSignalRefreshAt = 0;
+  private lastFullScanAt = 0;
+  private lastNewsFetchedAt = 0;
   /** Independent SL/TP/trailing check (decoupled from trade cycle). */
   private protectiveExitTimer: ReturnType<typeof setInterval> | undefined;
   private protectiveExitInProgress = false;
@@ -167,7 +195,6 @@ export class TradingAgent {
       initialCash: initialCashUsd,
       watchlist: this.watchlist,
       maxDrawdown: this.config.maxDrawdownPct,
-      maxDailyTrades: this.config.maxDailyTrades,
       maxPositionSize: this.config.maxPositionSizeUsd,
       tradeInterval: this.config.tradeIntervalMs,
       signalRefresh: this.config.signalRefreshMs,
@@ -187,9 +214,6 @@ export class TradingAgent {
     this.startedAt = Date.now();
 
     await this.bootstrapPersistence();
-
-    // Fast CMC call — fetch before slow on-chain wallet reconcile so dashboard has F&G immediately.
-    await this.fetchSentiment().catch(() => undefined);
 
     // Live mode: import real on-chain holdings, then seed cash + NAV baseline.
     // Positions are imported first so the baseline reflects total wallet value.
@@ -223,12 +247,12 @@ export class TradingAgent {
 
     logger.info("Agent started — entering trading loop", {
       interval: `${this.config.tradeIntervalMs / 1000}s`,
-      startupCooldownSec: this.config.startupCooldownMs / 1000,
+      sessionPolicy: this.config.sessionPolicy,
     });
     brainAgentStarted(
       this.config.mode,
-      Math.round(this.config.tradeIntervalMs / 60000),
-      Math.round(this.config.signalRefreshMs / 60000)
+      this.config.tradeIntervalMs,
+      this.config.signalRefreshMs
     );
 
     while (this.running && generation === this.runGeneration) {
@@ -273,11 +297,11 @@ export class TradingAgent {
 
   /**
    * Execute one full trading cycle:
-   * 1. Fetch market data from CMC (x402) and TWAK
+   * 1. Fetch bStock quotes (Binance Web3 + CMC fallback)
    * 2. Compute technical signals
    * 3. Generate trade decisions
    * 4. Validate against risk guardrails
-   * 5. Execute approved trades via TWAK
+   * 5. Execute approved trades via Agentic Wallet
    * 6. Update portfolio and log results
    */
   async runCycle(): Promise<CycleResult> {
@@ -297,16 +321,13 @@ export class TradingAgent {
     // Step 1: Refresh market data + signals (full scan on cycle 1 and every N cycles).
     const fullScan =
       this.cycleCount <= 1 || this.cycleCount % FULL_SCAN_INTERVAL === 0;
+    this.applySessionSizing();
     const markets = await this.runMarketSignalRefresh({
       fullScan,
-      updateSentiment: false,
       force: true,
     });
     brainCycleStart(cycleId, markets.length, fullScan);
-
-    // Step 2: Fetch macro sentiment (Fear & Greed via CMC x402) then re-score for trades.
-    await this.fetchSentiment();
-    brainSentiment(this.fearGreedIndex, this.lastNewsCount);
+    brainSession(this.getSessionClock());
 
     const materialHeld = [...this.portfolio.getMaterialPositionSymbols()].sort();
     brainPortfolioContext(
@@ -317,33 +338,34 @@ export class TradingAgent {
       this.config.maxPortfolioTokens
     );
 
-    // Step 3: Analyze markets and generate signals (includes updated F&G).
-    let signals = analyzeMarkets(markets, this.fearGreedIndex, this.config, this.lastNewsSentiment);
+    // Step 2: Analyze markets and generate session-weighted signals.
+    let signals = analyzeMarkets(
+      markets,
+      this.config,
+      this.lastNewsSentiment,
+      getCmcMacro()
+    );
+    this.rememberSignals(signals);
     brainSignalOverview(markets.length, signals);
 
-    // Step 4b: AI technical analysis on top actionable signals (optional)
+    // Step 3: AI technical analysis on top actionable signals (optional)
     const technicalsMap = new Map(
-      markets.map((m) => [m.symbol, computeSignals(m.symbol)] as const)
+      markets.map((m) => [m.symbol, computeSignals(m.symbol, m.price)] as const)
     );
     this.lastAiInsights = await enrichSignalsWithAi(
       signals,
       markets,
-      technicalsMap,
-      this.fearGreedIndex
+      technicalsMap
     );
     if (this.lastAiInsights.size > 0) {
       signals = signals.map((s) =>
         applyAiInsight(s, this.lastAiInsights.get(s.symbol.toUpperCase()))
       );
+      this.rememberSignals(signals);
     }
 
-    // Persist (don't clear) so scores from periodic full eligible-token scans
-    // remain visible on the dashboard between scans — otherwise full-scan-only
-    // tokens (e.g. most Binance Alpha names) would vanish on non-scan cycles.
-    for (const s of signals) {
-      this.lastSignals.set(s.symbol, s.score);
-      this.lastSignalConfidence.set(s.symbol, s.confidence);
-    }
+    // Persist so scores from periodic full eligible-token scans remain visible.
+    this.rememberSignals(signals);
 
     if (this.config.autoExitEnabled && materialHeld.length > 0) {
       brainProtectiveWatch(materialHeld);
@@ -371,6 +393,26 @@ export class TradingAgent {
     // Step 4: Select best trades (dust holdings do not consume portfolio slots).
     const existingPositions = this.portfolio.getMaterialPositionSymbols(currentPrices);
     const tradesToExecute = selectTrades(signals, this.config, existingPositions);
+
+    const lastBuyAt = this.portfolio.lastSuccessfulBuyAt();
+    const buyInterval = this.config.minBuyIntervalMs ?? 600_000;
+    const buyWaitLeft = lastBuyAt > 0 ? buyInterval - (Date.now() - lastBuyAt) : 0;
+    if (buyWaitLeft > 0) {
+      const skipped = tradesToExecute.filter((t) => t.action === "buy");
+      if (skipped.length > 0) {
+        const waitMin = Math.max(1, Math.ceil(buyWaitLeft / 60_000));
+        logger.info("New buys paused — waiting after last entry", {
+          waitMin,
+          lastBuyAt: new Date(lastBuyAt).toISOString(),
+          skipped: skipped.map((s) => s.symbol),
+        });
+        brainBuyPacing(waitMin, skipped[0]?.symbol);
+      }
+      for (let i = tradesToExecute.length - 1; i >= 0; i--) {
+        if (tradesToExecute[i]!.action === "buy") tradesToExecute.splice(i, 1);
+      }
+    }
+
     brainQueuedTrades(tradesToExecute);
 
     // Prepend protective exits (highest priority — always execute first)
@@ -398,32 +440,13 @@ export class TradingAgent {
       }
     }
 
-    // Step 6: Execute trades (autonomous only — manual commands bypass cooldown)
+    // Step 5: Execute trades (serial via baw — all validated signals this cycle)
     const tradeResults: TradeResult[] = [];
-    const inStartupCooldown = this.isInStartupCooldown();
-    const maxPerCycle = this.config.maxAutonomousTradesPerCycle;
-    if (inStartupCooldown && tradesToExecute.length > 0) {
-      const remainingSec = Math.ceil(this.getStartupCooldownRemainingMs() / 1000);
-      logger.info("Startup cooldown — autonomous trades paused", {
-        remainingSec,
-        queued: tradesToExecute.length,
-      });
-      brainStartupCooldown(remainingSec, tradesToExecute.length);
-    } else if (tradesToExecute.length > maxPerCycle) {
-      logger.info("Autonomous trade queue trimmed to per-cycle cap", {
-        queued: tradesToExecute.length,
-        executing: maxPerCycle,
-        skipped: tradesToExecute.slice(maxPerCycle).map((t) => t.symbol),
-      });
-    }
-    let autonomousExecuted = 0;
     for (const signal of tradesToExecute) {
-      if (inStartupCooldown) continue;
-      if (autonomousExecuted >= maxPerCycle) break;
+      if (this.isInFailedSwapCooldown(signal.symbol)) continue;
       const result = await this.executeTrade(signal);
       if (result?.success) {
         tradeResults.push(result);
-        autonomousExecuted++;
       }
     }
 
@@ -444,26 +467,6 @@ export class TradingAgent {
     // Step 8: Log risk summary
     logger.info("Risk status", this.riskManager.riskSummary());
 
-    // Step 9: Min daily trade enforcement (competition requires ≥1 trade/day)
-    const todayTrades = this.portfolio.getTodayTradeCount();
-    const hour = new Date().getUTCHours();
-    if (
-      todayTrades === 0 &&
-      hour >= 20 &&
-      this.config.mode === "live" &&
-      !this.isInStartupCooldown() &&
-      autonomousExecuted < maxPerCycle
-    ) {
-      logger.risk("WARNING: 0 trades today — competition requires ≥1 trade/day. Forcing best available trade.");
-      const bestSignal = signals.find((s) => s.action !== "hold" && Math.abs(s.score) > 5);
-      if (bestSignal) {
-        const result = await this.executeTrade(bestSignal);
-        if (result?.success) tradeResults.push(result);
-      }
-    } else if (todayTrades === 0 && hour >= 18) {
-      logger.warn("No trades today yet — competition requires ≥1/day (June 22-28)", { hour });
-    }
-
     const duration = Date.now() - startTime;
     this.lastCycleCompletedAt = Date.now();
     this.lastCycleDurationMs = duration;
@@ -477,7 +480,7 @@ export class TradingAgent {
       queued: tradesToExecute.length,
       tradesToday: autoStatus.tradesToday,
       tradesLast24h: autoStatus.tradesLast24h,
-      txsToday: autoStatus.txsToday,
+      session: autoStatus.session,
       nextCycleInSec: autoStatus.nextCycleInSec,
       blockReason: autoStatus.blockReason,
     });
@@ -509,17 +512,20 @@ export class TradingAgent {
   }
 
   /**
-   * Background signal refresh — decoupled from the trade cycle.
+   * Background signal refresh — live Binance quotes on a short pulse,
+   * independent of the trade cycle.
    */
   private startSignalRefreshLoop(generation: number) {
-    void this.runMarketSignalRefresh({ fullScan: true, updateSentiment: false, force: true });
+    void this.runMarketSignalRefresh({ fullScan: true, force: true });
 
     this.signalRefreshTimer = setInterval(() => {
       if (!this.running || generation !== this.runGeneration) return;
-      if (this.signalRefreshInProgress || this.cycleInProgress) return;
+      if (this.signalRefreshInProgress) return;
       this.signalRefreshCount++;
-      const fullScan = this.signalRefreshCount % 3 === 0;
-      void this.runMarketSignalRefresh({ fullScan, updateSentiment: false });
+      const fullScan =
+        this.lastFullScanAt === 0 ||
+        Date.now() - this.lastFullScanAt >= DEEP_SCAN_MS;
+      void this.runMarketSignalRefresh({ fullScan });
     }, this.config.signalRefreshMs);
 
     logger.info("Signal refresh loop started", {
@@ -580,7 +586,7 @@ export class TradingAgent {
     }));
   }
 
-  /** Live prices for open positions — Binance live → market cache → TWAK fallback. */
+  /** Live prices for open positions — Binance live → market cache → wallet fallback. */
   private buildPositionPrices(): Map<string, number> {
     const prices = new Map<string, number>();
     for (const sym of this.portfolio.getMaterialPositionSymbols()) {
@@ -619,8 +625,8 @@ export class TradingAgent {
   }
 
   /**
-   * Check SL/TP/trailing and execute sells. Runs on its own timer (default 60s).
-   * Bypasses startup cooldown — capital protection should not wait for warmup.
+   * Check SL/TP/trailing and execute sells. Runs on its own timer (default 60s)
+   * so overnight gap risk can be cut without waiting for the next trade cycle.
    */
   private async runProtectiveExitCheck(
     opts: { refreshPrices?: boolean } = {}
@@ -677,38 +683,60 @@ export class TradingAgent {
 
   /**
    * Fetch quotes, Binance OHLCV/logos/live prices, and recompute signals.
+   * Light pulses reuse the last universe and overlay live Binance prices.
    */
   private async runMarketSignalRefresh(opts: {
     fullScan?: boolean;
-    updateSentiment?: boolean;
     force?: boolean;
   } = {}): Promise<MarketData[]> {
-    if (this.signalRefreshInProgress && !opts.force) {
-      return this.lastMarketData;
+    if (this.signalRefreshPromise) {
+      if (!opts.force) return this.lastMarketData;
+      while (this.signalRefreshPromise) {
+        await this.signalRefreshPromise.catch(() => {});
+      }
     }
 
+    const work = this.doMarketSignalRefresh(opts);
+    this.signalRefreshPromise = work;
+    try {
+      return await work;
+    } finally {
+      if (this.signalRefreshPromise === work) this.signalRefreshPromise = null;
+    }
+  }
+
+  private async doMarketSignalRefresh(opts: {
+    fullScan?: boolean;
+    force?: boolean;
+  }): Promise<MarketData[]> {
     this.signalRefreshInProgress = true;
     const started = Date.now();
+    const fullScan = !!opts.fullScan || this.lastMarketData.length === 0;
     try {
-      if (opts.updateSentiment) {
-        await this.fetchSentiment().catch(() => undefined);
+      this.applySessionSizing();
+      await this.fetchNewsIfStale();
+      if (fullScan || this.cycleInProgress) {
+        const cmc = await refreshCmcMacro();
+        if (cmc) brainCmcMacro(cmc.summary, cmc.sizeScale, cmc.eventRisk);
       }
-
-      await this.fetchNews();
-      const markets = await this.collectMarketData(!!opts.fullScan);
-      await this.applyBinanceEnrichment(markets, !!opts.fullScan);
+      const markets = fullScan
+        ? await this.collectMarketData(true)
+        : this.lastMarketData.map((m) => ({ ...m }));
+      await this.applyBinanceEnrichment(markets, fullScan);
       const signals = this.runSignalAnalysis(markets);
       this.lastMarketData = markets;
       this.lastSignalRefreshAt = Date.now();
+      if (fullScan) this.lastFullScanAt = Date.now();
 
-      if (!this.cycleInProgress) {
-        brainSignalPulse(!!opts.fullScan, markets.length, signals);
+      if (!this.cycleInProgress && fullScan) {
+        brainSignalPulse(fullScan, markets.length, signals);
       }
 
       logger.info("Market signals refreshed", {
         tokens: markets.length,
         scored: this.lastSignals.size,
-        fullScan: !!opts.fullScan,
+        fullScan,
+        livePulse: !fullScan,
         durationMs: Date.now() - started,
       });
       return markets;
@@ -723,18 +751,16 @@ export class TradingAgent {
   private runSignalAnalysis(markets: MarketData[]): import("./utils/types.js").TradeSignal[] {
     const signals = analyzeMarkets(
       markets,
-      this.fearGreedIndex,
       this.config,
-      this.lastNewsSentiment
+      this.lastNewsSentiment,
+      getCmcMacro()
     );
-    for (const s of signals) {
-      this.lastSignals.set(s.symbol, s.score);
-      this.lastSignalConfidence.set(s.symbol, s.confidence);
-    }
+    this.rememberSignals(signals);
     for (const md of markets) {
       if (!isTradableToken(md.symbol, md.price)) {
         this.lastSignals.delete(md.symbol);
         this.lastSignalConfidence.delete(md.symbol);
+        this.lastTradeSignals.delete(md.symbol);
         continue;
       }
       if (!this.lastSignals.has(md.symbol)) {
@@ -872,7 +898,7 @@ export class TradingAgent {
       markets.push(md);
     }
 
-    // Fallback: TWAK spot prices for symbols CMC did not return
+    // Fallback: Agentic Wallet / Binance spot for symbols CMC did not return
     for (const symbol of symbols) {
       if (cmcQuotes.has(symbol)) continue;
       try {
@@ -884,11 +910,11 @@ export class TradingAgent {
           markets.push(buildMarketData(symbol, priceData.price));
         }
       } catch (err) {
-        logger.warn(`TWAK price fallback failed for ${symbol}`, { error: String(err) });
+        logger.warn(`Price fallback failed for ${symbol}`, { error: String(err) });
       }
     }
 
-    // Trending: CMC Agent Hub x402 first, TWAK fallback
+    // Trending: eligible bStock list / CMC, then wallet fallback
     try {
       const raw = await this.mcp.x402Request(CMC_ENDPOINTS.trending(), this.x402Payment);
       trendingTokens = parseCmcTrending(unwrapX402Response(raw));
@@ -1025,6 +1051,29 @@ export class TradingAgent {
         logger.warn("CMC x402 batch quote failed", { batch: batch.join(","), error: String(err) });
       }
     }
+
+    const missing = symbols.filter((s) => !out.has(s));
+    if (missing.length > 0) {
+      try {
+        const enrich = await enrichSymbolsFromBinance(missing, {
+          fetchLive: true,
+          fetchIcons: false,
+          fetchOhlcv: true,
+        });
+        for (const [symbol, q] of enrich.liveQuotes) {
+          if (q.price <= 0) continue;
+          out.set(symbol, {
+            symbol,
+            price: q.price,
+            change24h: q.change24hPct,
+            volume24h: q.volume24h,
+            timestamp: q.updatedAt,
+          });
+        }
+      } catch (err) {
+        logger.warn("Binance bStock quote fallback failed", { error: String(err) });
+      }
+    }
     return out;
   }
 
@@ -1074,28 +1123,34 @@ export class TradingAgent {
     this.watchlist = [...next];
   }
 
-  private async fetchSentiment() {
-    try {
-      const result = await this.mcp.x402Request(
-        CMC_ENDPOINTS.fearGreed(),
-        this.x402Payment
-      );
-      const unwrapped = unwrapX402Response(result) ?? result ?? {};
-      const value = parseFearGreedIndex(unwrapped);
-      if (value !== null) {
-        this.fearGreedIndex = value;
-        logger.info("Fear & Greed Index updated", { value, source: this.bridgeSource });
-      } else {
-        logger.warn("Fear & Greed response had no parseable value", {
-          keys: result ? Object.keys(result) : [],
-        });
-      }
-    } catch (err) {
-      logger.warn("Failed to fetch Fear & Greed — using last known value", {
-        lastKnown: this.fearGreedIndex,
-        error: String(err),
-      });
+  private rememberSignals(signals: import("./utils/types.js").TradeSignal[]) {
+    for (const s of signals) {
+      this.lastSignals.set(s.symbol, s.score);
+      this.lastSignalConfidence.set(s.symbol, s.confidence);
+      this.lastTradeSignals.set(s.symbol, s);
     }
+  }
+
+  private applySessionSizing() {
+    const clock = getSessionClock(this.config.sessionPolicy);
+    const profile = getSessionProfile(clock.active);
+    this.config.positionSizeMultiplier = profile.positionSizeMultiplier;
+  }
+
+  getSessionClock(): SessionClock {
+    return getSessionClock(this.config.sessionPolicy);
+  }
+
+  private async fetchNewsIfStale(): Promise<Map<string, NewsSentiment>> {
+    if (
+      this.lastNewsSentiment.size > 0 &&
+      Date.now() - this.lastNewsFetchedAt < NEWS_REFRESH_MS
+    ) {
+      return this.lastNewsSentiment;
+    }
+    const sentiment = await this.fetchNews();
+    this.lastNewsFetchedAt = Date.now();
+    return sentiment;
   }
 
   /** Fetch ClipX news and compute per-token sentiment map. */
@@ -1116,14 +1171,6 @@ export class TradingAgent {
     }
   }
 
-  private isInStartupCooldown(): boolean {
-    return this.getStartupCooldownRemainingMs() > 0;
-  }
-
-  private getStartupCooldownRemainingMs(): number {
-    return Math.max(0, this.config.startupCooldownMs - (Date.now() - this.startedAt));
-  }
-
   private isInFailedSwapCooldown(symbol: string): boolean {
     const until = this.failedSwapUntil.get(symbol.toUpperCase()) ?? 0;
     return until > Date.now();
@@ -1136,44 +1183,6 @@ export class TradingAgent {
     );
   }
 
-  private resetAutonomousTxDayIfNeeded() {
-    const today = new Date().toISOString().split("T")[0];
-    if (this.autonomousTxDay !== today) {
-      this.autonomousTxDay = today;
-      this.autonomousOnChainTxToday = 0;
-    }
-  }
-
-  /** Each live swap typically costs 2 on-chain txs (approve + swap). */
-  private static readonly TX_PER_SWAP = 2;
-
-  private autonomousTxBudgetRemaining(): number {
-    this.resetAutonomousTxDayIfNeeded();
-    return Math.max(0, this.config.maxOnChainTxPerDay - this.autonomousOnChainTxToday);
-  }
-
-  private canExecuteAutonomousTrade(): { ok: boolean; reason?: string } {
-    const dailyTrades = this.portfolio.getTodayTradeCount();
-    if (dailyTrades >= this.config.maxDailyTrades) {
-      return {
-        ok: false,
-        reason: `daily autonomous trade cap (${this.config.maxDailyTrades})`,
-      };
-    }
-    if (this.autonomousTxBudgetRemaining() < TradingAgent.TX_PER_SWAP) {
-      return {
-        ok: false,
-        reason: `on-chain tx budget (${this.config.maxOnChainTxPerDay}/day)`,
-      };
-    }
-    return { ok: true };
-  }
-
-  private reserveAutonomousOnChainTx() {
-    this.resetAutonomousTxDayIfNeeded();
-    this.autonomousOnChainTxToday += TradingAgent.TX_PER_SWAP;
-  }
-
   private async executeTrade(
     signal: import("./utils/types.js").TradeSignal,
     opts: {
@@ -1182,19 +1191,10 @@ export class TradingAgent {
       /** Sell entire on-chain balance (not a partial $-denominated slice). */
       sellAll?: boolean;
       amountUsd?: number;
-      /** SL/TP/trailing — bypass startup cooldown, still subject to tx budget. */
+      /** SL/TP/trailing. */
       protectiveExit?: boolean;
     } = {}
   ): Promise<TradeResult | null> {
-    if (!opts.manual && !opts.protectiveExit && this.isInStartupCooldown()) {
-      logger.info("Trade deferred — startup cooldown active", {
-        symbol: signal.symbol,
-        action: signal.action,
-        remainingSec: Math.ceil(this.getStartupCooldownRemainingMs() / 1000),
-      });
-      return null;
-    }
-
     if (!opts.manual && this.isInFailedSwapCooldown(signal.symbol)) {
       const until = this.failedSwapUntil.get(signal.symbol.toUpperCase()) ?? 0;
       logger.info("Trade skipped — recent failed swap cooldown", {
@@ -1204,14 +1204,13 @@ export class TradingAgent {
       return null;
     }
 
-    if (!opts.manual && this.config.mode === "live") {
-      const gate = this.canExecuteAutonomousTrade();
-      if (!gate.ok) {
-        logger.info("Autonomous trade blocked", {
+    if (opts.protectiveExit && signal.action === "sell") {
+      const pos = this.portfolio.getPosition(signal.symbol);
+      const entry = pos?.avgEntryPrice ?? 0;
+      if (!(entry > 0) || !Number.isFinite(entry)) {
+        logger.risk("Protective sell blocked — missing entry price", {
           symbol: signal.symbol,
-          reason: gate.reason,
         });
-        brainTradeSkipped(signal.symbol, signal.action, gate.reason ?? "autonomous gate");
         return null;
       }
     }
@@ -1334,10 +1333,9 @@ export class TradingAgent {
       }
 
       const swapParams = buildSwapParams(order);
-      if (!opts.manual) this.reserveAutonomousOnChainTx();
       const swapResult = await this.mcp.executeSwap(swapParams);
 
-      logger.info("TWAK swap raw response", {
+      logger.info("Agentic Wallet swap raw response", {
         symbol: order.symbol,
         side: order.side,
         keys: Object.keys(swapResult),
@@ -1393,8 +1391,8 @@ export class TradingAgent {
    */
   /**
    * Make a token tradable on demand for assistant/manual commands, even if it
-   * isn't on the active watchlist. Resolves the BEP-20 contract (static map →
-   * CMC lookup, cached) and fetches a live price (CMC quote → TWAK spot),
+   * isn't on the active watchlist. Resolves the bStock contract (type=3) and
+   * fetches a live price (Binance Web3 → CMC fallback),
    * seeding price history so sizing/execution have real numbers.
    *
    * Returns whether the token can now be routed (has a contract + price).
@@ -1430,7 +1428,7 @@ export class TradingAgent {
           seedPriceHistory(sym, priceData.price, 50, 3.5);
         }
       } catch (err) {
-        logger.warn("Manual-trade TWAK price prime failed", { symbol: sym, error: String(err) });
+        logger.warn("Manual-trade wallet price prime failed", { symbol: sym, error: String(err) });
       }
     }
 
@@ -1501,41 +1499,41 @@ export class TradingAgent {
    * Live-update agent config from dashboard controls.
    * Only allows safe fields — mode cannot be changed at runtime.
    */
-  updateConfig(partial: Partial<AgentConfig>) {
+  updateConfig(partial: Partial<AgentConfig> & { strategy?: string }) {
     const changed: Record<string, unknown> = {};
 
-    // Switching strategy applies that preset's risk profile + sizing first;
-    // any explicit fields in the same payload then override on top.
-    if (partial.strategy !== undefined && isStrategyName(partial.strategy)) {
-      const profile = getStrategyProfile(partial.strategy);
-      this.config.strategy = profile.name;
+    const policyRaw = partial.sessionPolicy ?? (partial as { strategy?: string }).strategy;
+    if (policyRaw !== undefined && isSessionPolicy(policyRaw)) {
+      this.config.sessionPolicy = policyRaw;
+      const clock = getSessionClock(policyRaw);
+      const profile = getSessionProfile(clock.active);
       this.config.positionSizeMultiplier = profile.positionSizeMultiplier;
-      this.config.maxDrawdownPct = profile.risk.maxDrawdownPct;
-      if (!process.env.MAX_DAILY_TRADES?.trim()) {
-        this.config.maxDailyTrades = profile.risk.maxDailyTrades;
-      }
-      this.config.maxPortfolioTokens = profile.risk.maxPortfolioTokens;
-      this.config.minBuyConfidence = profile.risk.minBuyConfidence;
-      this.config.stopLossPct = profile.risk.stopLossPct;
-      this.config.takeProfitPct = profile.risk.takeProfitPct;
-      this.config.trailingActivatePct = profile.risk.trailingActivatePct;
-      this.config.trailingGivebackPct = profile.risk.trailingGivebackPct;
-      changed.strategy = profile.name;
+      if (partial.maxDrawdownPct === undefined) this.config.maxDrawdownPct = profile.risk.maxDrawdownPct;
+      if (partial.maxPortfolioTokens === undefined) this.config.maxPortfolioTokens = profile.risk.maxPortfolioTokens;
+      if (partial.minBuyConfidence === undefined) this.config.minBuyConfidence = profile.risk.minBuyConfidence;
+      if (partial.stopLossPct === undefined) this.config.stopLossPct = profile.risk.stopLossPct;
+      if (partial.takeProfitPct === undefined) this.config.takeProfitPct = profile.risk.takeProfitPct;
+      if (partial.trailingActivatePct === undefined) this.config.trailingActivatePct = profile.risk.trailingActivatePct;
+      if (partial.trailingGivebackPct === undefined) this.config.trailingGivebackPct = profile.risk.trailingGivebackPct;
+      changed.sessionPolicy = policyRaw;
+      changed.session = clock.active;
     }
 
     const safe: (keyof AgentConfig)[] = [
-      "tradeIntervalMs", "maxPositionSizeUsd", "maxDailyTrades",
-      "maxDrawdownPct", "slippageTolerance", "maxPortfolioTokens",
+      "tradeIntervalMs", "maxPositionSizeUsd",
+      "maxDrawdownPct", "slippageTolerance", "minGasReserveUsd", "maxPortfolioTokens",
       "minTradeAmountUsd", "minBuyConfidence", "stopLossPct", "takeProfitPct",
       "trailingActivatePct", "trailingGivebackPct", "autoExitEnabled",
-      "protectiveExitCheckMs", "signalRefreshMs",
-      "maxAutonomousTradesPerCycle", "maxOnChainTxPerDay",
+      "protectiveExitCheckMs", "signalRefreshMs", "minBuyIntervalMs",
     ];
     for (const key of safe) {
       if (partial[key] !== undefined) {
         (this.config as unknown as Record<string, unknown>)[key] = partial[key];
         changed[key] = partial[key];
       }
+    }
+    if (partial.minGasReserveUsd !== undefined) {
+      this.portfolio.setMinGasReserveUsd(Number(partial.minGasReserveUsd));
     }
     if (Object.keys(changed).length > 0) {
       logger.info("Config updated via dashboard", changed);
@@ -1581,13 +1579,51 @@ export class TradingAgent {
     return [...this.watchlist];
   }
 
-  getFearGreedIndex(): number | null {
-    return this.fearGreedIndex;
+  async sellPosition(symbol: string): Promise<{
+    result: TradeResult | null;
+    violations?: string[];
+    tradeSizeUsd: number;
+    message: string;
+  }> {
+    const sym = symbol.toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (!sym) {
+      return { result: null, violations: ["Invalid symbol"], tradeSizeUsd: 0, message: "Invalid symbol" };
+    }
+    const tracked = await this.ensureTrackedPosition(sym);
+    if (!tracked && !this.portfolio.getPosition(sym)) {
+      return {
+        result: null,
+        violations: [`No position in ${sym}`],
+        tradeSizeUsd: 0,
+        message: `No position in ${sym} to sell`,
+      };
+    }
+    const signal: import("./utils/types.js").TradeSignal = {
+      symbol: sym,
+      action: "sell",
+      strength: "strong_sell",
+      score: -80,
+      reasons: ["Manual sell from dashboard"],
+      targetAllocationPct: 0,
+      confidence: 1,
+    };
+    const { result, violations, tradeSizeUsd } = await this.executeManualTrade(signal, {
+      sellAll: true,
+    });
+    if (!result?.success) {
+      return {
+        result,
+        violations,
+        tradeSizeUsd,
+        message: violations?.join("; ") || result?.error || `Failed to sell ${sym}`,
+      };
+    }
+    return { result, tradeSizeUsd, message: `Sold ${sym}` };
   }
 
   /**
    * Resolve the real BSC wallet address.
-   * Prefers the live TWAK MCP address; falls back to AGENT_WALLET_ADDRESS env
+   * Prefers the live Agentic Wallet address; falls back to AGENT_WALLET_ADDRESS env
    * when the bridge returns nothing or a known placeholder (mock/cmc-pro modes).
    */
   private resolveWalletAddress(mcpAddress?: string | null): string | null {
@@ -1604,7 +1640,7 @@ export class TradingAgent {
     return this.resolveWalletAddress(this._cachedWalletInfo?.address ?? null);
   }
 
-  /** Read TWAK wallet address + on-chain balances for dashboard. */
+  /** Read Agentic Wallet address + on-chain balances for dashboard. */
   private _cachedWalletInfo: WalletInfo | null = null;
   private _walletInfoRefreshing = false;
 
@@ -1672,6 +1708,9 @@ export class TradingAgent {
       registered = Boolean(comp?.registered ?? comp?.isRegistered);
       registrationOpen = Boolean(comp?.registrationOpen ?? comp?.windowOpen);
     }
+    const campaign = campaignQualification();
+    registered = registered || campaign.registered;
+    registrationOpen = campaign.active;
 
     const info: WalletInfo = {
       address,
@@ -1681,6 +1720,7 @@ export class TradingAgent {
       walletState,
       registered,
       registrationOpen,
+      campaign,
       ...(binancePositions && binancePositions.length > 0 ? { binancePositions } : {}),
     };
     this._cachedWalletInfo = info;
@@ -1798,8 +1838,8 @@ export class TradingAgent {
         positionsRemoved: syncMeta.removed,
         ...(gas.valueUsd > 0 ? { gas } : {}),
       });
-      void store.savePositionEntries(this.portfolio.exportPositionEntries());
     }
+    void store.savePositionEntries(this.portfolio.exportPositionEntries());
 
     if (syncMeta.removed.length > 0) {
       this.scheduleTradeHistoryBackfill([], { force: true });
@@ -1812,14 +1852,14 @@ export class TradingAgent {
     const store = getAgentStore();
     let dbTrades: import("./utils/types.js").TradeResult[] = [];
 
+    const entries = await store.loadPositionEntries();
+    if (entries) this.portfolio.restorePersistedEntries(entries);
+
     if (store.enabled) {
       const navState = await store.loadNavState();
       if (navState) this.portfolio.restorePersistedNav(navState);
 
       const wallet = await this.resolveBootstrapWalletAddress();
-      const entries = await store.loadPositionEntries();
-      if (entries) this.portfolio.restorePersistedEntries(entries);
-
       const bl = await store.loadUserBlacklist();
       restoreUserBlacklist(bl);
 
@@ -1886,7 +1926,7 @@ export class TradingAgent {
 
     const wallet = await this.resolveBootstrapWalletAddress();
     if (!wallet) {
-      logger.warn("Trade history backfill skipped — set AGENT_WALLET_ADDRESS or bind TWAK wallet");
+      logger.warn("Trade history backfill skipped — set AGENT_WALLET_ADDRESS or bind Agentic Wallet");
       return;
     }
 
@@ -1974,7 +2014,7 @@ export class TradingAgent {
     }
   }
 
-  /** Wallet address for DB scoping before TWAK cache is warm. */
+  /** Wallet address for DB scoping before wallet cache is warm. */
   private async resolveBootstrapWalletAddress(): Promise<string | null> {
     const envAddr = this.resolveWalletAddress(process.env.AGENT_WALLET_ADDRESS);
     if (envAddr) return envAddr;
@@ -1992,22 +2032,25 @@ export class TradingAgent {
     twakResponse?: Record<string, unknown> | null
   ) {
     const store = getAgentStore();
-    if (!store.enabled) return;
-    await store.saveTrade(order, result, this.config.mode, twakResponse, this.currentWalletAddress());
+    if (store.enabled) {
+      await store.saveTrade(order, result, this.config.mode, twakResponse, this.currentWalletAddress());
+    }
     if (result.success) {
       this.portfolio.markTradePersisted(result.orderId);
       void store.savePositionEntries(this.portfolio.exportPositionEntries());
-      logger.trade(
-        `Trade persisted to DB — ${order.side.toUpperCase()} ${order.symbol}`,
-        {
-          side: order.side,
-          symbol: order.symbol,
-          amountUsd: order.amountUsd,
-          status: this.config.mode === "paper" ? "paper" : "confirmed",
-          realizedPnl: result.realizedPnl,
-        },
-        result.txHash
-      );
+      if (store.enabled) {
+        logger.trade(
+          `Trade persisted to DB — ${order.side.toUpperCase()} ${order.symbol}`,
+          {
+            side: order.side,
+            symbol: order.symbol,
+            amountUsd: order.amountUsd,
+            status: this.config.mode === "paper" ? "paper" : "confirmed",
+            realizedPnl: result.realizedPnl,
+          },
+          result.txHash
+        );
+      }
     }
   }
 
@@ -2022,7 +2065,7 @@ export class TradingAgent {
       totalTrades: this.portfolio.getTradeHistory().filter((t) => t.success).length,
       todayTrades: this.portfolio.getTodayTradeCount(),
       winRate: Math.round(closed.winRate * 10) / 10,
-      fearGreed: this.fearGreedIndex,
+      fearGreed: null,
       emergencyMode: this.riskManager.isEmergencyMode(),
     };
   }
@@ -2092,7 +2135,7 @@ export class TradingAgent {
    */
   /**
    * Best-effort lookup of the wallet's actual transferable balance for a single
-   * token. TWAK per-token → TWAK portfolio → Binance Web3 cache → live fetch.
+   * token. Agentic Wallet per-token → portfolio → Binance Web3 cache → live fetch.
    */
   private async getOnChainTokenBalance(symbol: string): Promise<number | null> {
     const sym = symbol.toUpperCase();
@@ -2101,7 +2144,7 @@ export class TradingAgent {
       try {
         const bal = await this.mcp.getTokenBalance(BSC_CHAIN, sym);
         if (bal && typeof bal.amount === "number" && bal.amount > 0) {
-          logger.info("Sell balance resolved via TWAK getTokenBalance", {
+          logger.info("Sell balance resolved via Agentic Wallet getTokenBalance", {
             symbol: sym,
             amount: bal.amount,
           });
@@ -2120,7 +2163,7 @@ export class TradingAgent {
         const holdings = await this.mcp.getPortfolio(BSC_CHAIN);
         const match = holdings?.find((h) => h.symbol.toUpperCase() === sym);
         if (match && typeof match.amount === "number" && match.amount > 0) {
-          logger.info("Sell balance resolved via TWAK getPortfolio", {
+          logger.info("Sell balance resolved via Agentic Wallet getPortfolio", {
             symbol: sym,
             amount: match.amount,
           });
@@ -2240,7 +2283,7 @@ export class TradingAgent {
       if (!isEligibleToken(symbol) || isStablecoin(symbol)) return;
       if (!(h.amount > 0)) return;
 
-      // TWAK balance APIs can echo native BNB for unrelated ERC-20 queries.
+      // Wallet balance APIs can echo native BNB for unrelated ERC-20 queries.
       if (nativeGasAmount > 0) {
         const rel = Math.abs(h.amount - nativeGasAmount) / nativeGasAmount;
         if (rel < 1e-6) return;
@@ -2432,7 +2475,7 @@ export class TradingAgent {
 
     const stable = await this.mcp.getStablecoinBalance(BSC_CHAIN);
     if (!stable) {
-      logger.warn("Could not read USDT balance — TWAK wallet not connected?");
+      logger.warn("Could not read USDT balance — Agentic Wallet not connected?");
       return { usdtBalance: this.portfolio.cash, synced: false };
     }
 
@@ -2470,21 +2513,59 @@ export class TradingAgent {
 
   async registerCompetition(): Promise<Record<string, unknown>> {
     if (!this.mcp.competitionRegister) {
-      throw new Error("Competition registration requires TWAK MCP (twak serve)");
+      throw new Error("Competition registration requires Binance Agentic Wallet (`baw`)");
     }
     const result = await this.mcp.competitionRegister();
-    if (!result) throw new Error("Registration failed — check TWAK logs");
-    logger.info("Competition registration submitted", result);
+    if (!result) throw new Error("Registration failed — bind the wallet on the campaign Join Now page");
+    logger.info("Campaign registration recorded", result);
     return result;
+  }
+
+  async startWalletSignin(): Promise<Record<string, unknown>> {
+    return startAgenticSignin();
+  }
+
+  async verifyWalletSignin(qrCodeId: string): Promise<Record<string, unknown>> {
+    const result = await verifyAgenticSignin(qrCodeId);
+    this._cachedWalletInfo = null;
+    await this.getWalletInfo().catch(() => undefined);
+    return result;
+  }
+
+  getCampaignStatus(): Record<string, unknown> {
+    return campaignQualification();
+  }
+
+  async runCampaignAiTasks(opts: { cmc?: boolean; studio?: boolean; tickers?: string[] } = {}) {
+    const out: Record<string, unknown> = {};
+    if (opts.cmc !== false) {
+      const { text, record } = await completeCmcCampaignCall("get_global_metrics_latest");
+      out.cmc = { tool: record.tool, preview: text.slice(0, 1500) };
+    }
+    if (opts.studio !== false) {
+      const tickers =
+        opts.tickers && opts.tickers.length > 0
+          ? opts.tickers
+          : this.watchlist.slice(0, 3).map((s) => tickerFromBstock(s));
+      const job = await submitStudioAnalysis(tickers);
+      out.studio = job;
+    }
+    return { ...out, qualification: campaignQualification() };
+  }
+
+  async pollCampaignStudioJob(): Promise<Record<string, unknown> | null> {
+    const job = loadCampaignState().lastStudioJob;
+    if (!job) return null;
+    return pollStudioJob(job.jobId, job.jobToken);
   }
 
   async switchWalletMode(mode: "local" | "walletconnect"): Promise<Record<string, unknown>> {
     if (!this.mcp.switchWalletMode) {
-      throw new Error("Wallet mode switch requires TWAK MCP (twak serve)");
+      throw new Error("Wallet status requires Binance Agentic Wallet (`baw`)");
     }
     const result = await this.mcp.switchWalletMode(mode);
-    if (!result) throw new Error("Wallet mode switch failed");
-    logger.info("Wallet mode switched", { mode });
+    if (!result) throw new Error("Wallet status check failed");
+    logger.info("Wallet status", { mode, ...result });
     return result;
   }
 
@@ -2492,20 +2573,13 @@ export class TradingAgent {
    * Structured autonomous-mode status for dashboard / API.
    */
   buildAutonomousStatus(): AutonomousStatus {
-    this.resetAutonomousTxDayIfNeeded();
     const risk = this.riskManager.riskSummary();
     const tradesToday = this.portfolio.getTodayTradeCount();
-    const maxTradesToday = this.config.maxDailyTrades;
-    const txsToday = this.autonomousOnChainTxToday;
-    const maxTxsToday = this.config.maxOnChainTxPerDay;
-    const txRemaining = this.autonomousTxBudgetRemaining();
-    const swapsRemaining = Math.floor(txRemaining / TradingAgent.TX_PER_SWAP);
     const tradesLast24h = this.portfolio.countSuccessfulTradesSince(
       Date.now() - 24 * 60 * 60 * 1000
     );
-    const cooldownSec = Math.ceil(this.getStartupCooldownRemainingMs() / 1000);
     const emergencyMode = this.riskManager.isEmergencyMode();
-    const hourUtc = new Date().getUTCHours();
+    const session = this.getSessionClock();
 
     const failedSwapCooldowns: AutonomousStatus["failedSwapCooldowns"] = [];
     for (const [symbol, until] of this.failedSwapUntil) {
@@ -2537,51 +2611,41 @@ export class TradingAgent {
 
     if (!this.running) {
       phase = "stopped";
-      headline = "Autonomous engine stopped";
-      blockReason = "Start the agent to resume autonomous trading";
+      headline = "Engine stopped";
+      blockReason = "Start the agent to resume 24/7 trading";
     } else if (this.cycleInProgress) {
       phase = "scanning";
-      headline = `Scanning markets — cycle #${this.cycleCount}`;
-    } else if (this.isInStartupCooldown()) {
-      phase = "warming";
-      headline = `Warming up — autonomous trades in ${cooldownSec}s`;
-      blockReason = `Startup cooldown (${cooldownSec}s remaining)`;
+      headline = `LIVE · cycle #${this.cycleCount} · ${session.label}`;
+    } else if (this.signalRefreshInProgress) {
+      phase = "scanning";
+      headline = `LIVE · pulsing ${session.label}`;
     } else if (emergencyMode) {
       phase = "blocked";
-      headline = "Emergency mode — new buys paused";
+      headline = "Drawdown halt — new buys paused";
       blockReason = `Drawdown ${Math.round(risk.drawdownPct as number)}% (limit ${this.config.maxDrawdownPct}%)`;
-    } else if (tradesToday >= maxTradesToday) {
-      phase = "blocked";
-      headline = "Daily trade cap reached";
-      blockReason = `${tradesToday}/${maxTradesToday} trades today`;
-    } else if (txRemaining < TradingAgent.TX_PER_SWAP) {
-      phase = "blocked";
-      headline = "On-chain tx budget exhausted";
-      blockReason = `${txsToday}/${maxTxsToday} estimated txs today`;
     } else if (
       (risk.positionCount as number) >= (risk.maxPositions as number) &&
       (risk.positionCount as number) > 0
     ) {
       phase = "idle";
-      headline = "Position slots full — watching for exits";
+      headline = "LIVE · slots full — watching exits";
       blockReason = `${risk.positionCount}/${risk.maxPositions} positions`;
     } else {
-      phase = "idle";
-      const next =
-        nextCycleInSec !== null
-          ? `next scan in ${formatDurationSec(nextCycleInSec)}`
-          : "awaiting first cycle";
-      headline = `Autonomous — ${next}`;
+      const lastBuyAt = this.portfolio.lastSuccessfulBuyAt();
+      const interval = this.config.minBuyIntervalMs ?? 600_000;
+      const waitLeft = lastBuyAt > 0 ? interval - (Date.now() - lastBuyAt) : 0;
+      if (waitLeft > 0) {
+        const waitMin = Math.max(1, Math.ceil(waitLeft / 60_000));
+        phase = "idle";
+        headline = `LIVE · next buy in ~${waitMin}m`;
+        blockReason = `Entry pacing ${waitMin}m`;
+      } else {
+        phase = "idle";
+        headline = `LIVE · ${session.label}`;
+      }
     }
 
-    const ready =
-      this.running &&
-      !this.isInStartupCooldown() &&
-      !emergencyMode &&
-      tradesToday < maxTradesToday &&
-      txRemaining >= TradingAgent.TX_PER_SWAP;
-
-    const competitionNudge = tradesToday === 0 && hourUtc >= 18;
+    const ready = this.running && !emergencyMode;
 
     return {
       phase,
@@ -2589,13 +2653,8 @@ export class TradingAgent {
       headline,
       blockReason,
       tradesToday,
-      maxTradesToday,
       tradesLast24h,
-      txsToday,
-      maxTxsToday,
-      swapsRemainingToday: swapsRemaining,
       emergencyMode,
-      startupCooldownSec: cooldownSec,
       nextCycleInSec,
       lastCycleAt: this.lastCycleCompletedAt || null,
       lastCycleDurationSec: this.lastCycleDurationMs
@@ -2604,11 +2663,12 @@ export class TradingAgent {
       lastCycleTrades: this.lastCycleTradesExecuted,
       lastCycleQueued: this.lastCycleSignalsQueued,
       tradeIntervalSec: Math.round(this.config.tradeIntervalMs / 1000),
-      maxPerCycle: this.config.maxAutonomousTradesPerCycle,
       autoExitEnabled: this.config.autoExitEnabled,
-      strategy: this.config.strategy,
+      sessionPolicy: this.config.sessionPolicy,
+      session: session.active,
+      sessionLabel: session.label,
+      nyTimeLabel: session.nyTimeLabel,
       failedSwapCooldowns,
-      competitionNudge,
     };
   }
 
@@ -2617,7 +2677,7 @@ export class TradingAgent {
    */
   getStateSnapshot(): AgentState {
     // Report the full set of analyzed tokens (watchlist + every token scored in
-    // the last cycle, incl. full-scan / Binance Alpha promotions), not just the
+    // the last cycle, including full-scan promotions), not just the
     // 15-token trading watchlist — so the dashboard can show all of them.
     const held = new Set(this.portfolio.getAllPositions().keys());
     const userBlacklisted = getUserBlacklistedTokens();
@@ -2665,6 +2725,11 @@ export class TradingAgent {
       macd: number | null;
       bbPosition: number | null;
       vwapDev: number | null;
+      stochRsi?: number | null;
+      gapPct?: number | null;
+      orbBreakoutPct?: number | null;
+      session?: string;
+      regime?: string;
       ohlcvReal?: boolean;
       aiSummary?: string;
       aiVerdict?: string;
@@ -2673,13 +2738,14 @@ export class TradingAgent {
     for (const symbol of reportSymbols) {
       const { momentum, atrPct, volumeRatio } = getTokenMomentumMetrics(symbol);
       const sig = this.lastSignals.get(symbol);
+      const stored = this.lastTradeSignals.get(symbol);
       const news = this.lastNewsSentiment.get(symbol);
-      const tech = computeSignals(symbol);
+      const tech = computeSignals(symbol, currentPrices.get(symbol));
       const display = getTokenDisplayMetrics(symbol, currentPrices.get(symbol));
       const ai = this.lastAiInsights.get(symbol.toUpperCase());
       tokenMetrics[symbol] = {
         momentum,
-        atrPct,
+        atrPct: stored?.atrPct ?? atrPct,
         volumeRatio: volumeRatio !== null ? Math.round(volumeRatio * 100) / 100 : null,
         score: sig !== undefined ? Math.round(sig) : null,
         confidence: this.lastSignalConfidence.get(symbol) ?? null,
@@ -2689,7 +2755,12 @@ export class TradingAgent {
         macd: display.macdPct !== null ? Math.round(display.macdPct * 100) / 100 : null,
         bbPosition:
           display.bbPosition !== null ? Math.round(display.bbPosition * 10) / 10 : null,
-        vwapDev: display.vwapDev !== null ? Math.round(display.vwapDev * 100) / 100 : null,
+        vwapDev: stored?.vwapDev ?? (display.vwapDev !== null ? Math.round(display.vwapDev * 100) / 100 : null),
+        stochRsi: stored?.stochRsi ?? display.stochRsi,
+        gapPct: stored?.gapPct ?? display.gapPct,
+        orbBreakoutPct: stored?.orbBreakoutPct ?? display.orbBreakoutPct,
+        session: stored?.session,
+        regime: stored?.regime,
         ohlcvReal: hasRealHistory(symbol),
         ...(ai
           ? {
@@ -2700,6 +2771,8 @@ export class TradingAgent {
           : {}),
       };
     }
+
+    const session = this.getSessionClock();
 
     return {
       mode: this.config.mode,
@@ -2715,7 +2788,6 @@ export class TradingAgent {
       trades: this.portfolio.getTradeHistory(),
       risk: this.riskManager.riskSummary(),
       watchlist: reportSymbols,
-      fearGreedIndex: this.fearGreedIndex,
       prices: Object.fromEntries(currentPrices),
       bridgeSource: this.bridgeSource,
       tokenMetrics,
@@ -2738,9 +2810,9 @@ export class TradingAgent {
         ])
       ),
       startedAt: this.startedAt,
-      startupCooldownActive: this.isInStartupCooldown(),
-      startupCooldownRemainingMs: this.getStartupCooldownRemainingMs(),
+      session,
       autonomous: this.buildAutonomousStatus(),
+      cmcMacro: getCmcMacro(),
       ...(this._cachedWalletInfo?.binancePositions?.length
         ? { binancePositions: this._cachedWalletInfo.binancePositions }
         : {}),
@@ -2774,7 +2846,6 @@ export interface AgentState {
   trades: import("./utils/types.js").TradeResult[];
   risk: Record<string, unknown>;
   watchlist: string[];
-  fearGreedIndex: number | null;
   prices: Record<string, number>;
   bridgeSource?: string;
   tokenMetrics?: Record<string, {
@@ -2789,14 +2860,19 @@ export interface AgentState {
     macd?: number | null;
     bbPosition?: number | null;
     vwapDev?: number | null;
+    stochRsi?: number | null;
+    gapPct?: number | null;
+    orbBreakoutPct?: number | null;
+    session?: string;
+    regime?: string;
     aiSummary?: string;
     aiVerdict?: string;
     aiAgrees?: boolean;
+    ohlcvReal?: boolean;
   }>;
   newsCount?: number;
   startedAt?: number;
-  startupCooldownActive?: boolean;
-  startupCooldownRemainingMs?: number;
+  session?: SessionClock;
   autonomous?: AutonomousStatus;
   binancePositions?: BinanceWeb3Position[];
   lastSignalRefreshAt?: number | null;
@@ -2806,40 +2882,38 @@ export interface AgentState {
     { price: number; change24hPct: number; updatedAt: number }
   >;
   userBlacklisted?: string[];
+  cmcMacro?: {
+    at: number;
+    regime: string;
+    mcap24hPct: number | null;
+    mcap7dPct: number | null;
+    sizeScale: number;
+    eventRisk: string;
+    eventHint: string | null;
+    summary: string;
+  } | null;
 }
 
 export interface AutonomousStatus {
-  phase: "stopped" | "warming" | "scanning" | "idle" | "blocked";
+  phase: "stopped" | "scanning" | "idle" | "blocked";
   ready: boolean;
   headline: string;
   blockReason?: string;
   tradesToday: number;
-  maxTradesToday: number;
   tradesLast24h: number;
-  txsToday: number;
-  maxTxsToday: number;
-  swapsRemainingToday: number;
   emergencyMode: boolean;
-  startupCooldownSec: number;
   nextCycleInSec: number | null;
   lastCycleAt: number | null;
   lastCycleDurationSec: number | null;
   lastCycleTrades: number;
   lastCycleQueued: number;
   tradeIntervalSec: number;
-  maxPerCycle: number;
   autoExitEnabled: boolean;
-  strategy: string;
+  sessionPolicy: string;
+  session: string;
+  sessionLabel: string;
+  nyTimeLabel: string;
   failedSwapCooldowns: Array<{ symbol: string; remainingMin: number }>;
-  competitionNudge: boolean;
-}
-
-function formatDurationSec(totalSec: number): string {
-  if (totalSec < 60) return `${totalSec}s`;
-  if (totalSec < 3600) return `${Math.floor(totalSec / 60)}m ${totalSec % 60}s`;
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  return m > 0 ? `${h}h ${m}m` : `${h}h`;
 }
 
 function sleep(ms: number): Promise<void> {

@@ -10,44 +10,49 @@ const MIN_POSITION_USD = 1;
 /** Native gas coin on BSC — tracked separately, never a tradeable position. */
 const GAS_SYMBOL = "BNB";
 
-/** Treated as cash (USDT-first agent). */
-const CASH_SYMBOLS = new Set(["USDT", "USDC", "BUSD", "DAI", "FDUSD", "TUSD", "USD1"]);
+/** Treated as cash (USDT-first agent). Campaign payment tokens except BNB. */
+const CASH_SYMBOLS = new Set(["USDT", "USDC", "U", "USD1", "BUSD", "DAI", "FDUSD", "TUSD"]);
 
 /** Funding-side tokens for buy/sell classification (matches agent portfolio). */
 const FUNDING_TOKENS = new Set([...CASH_SYMBOLS, "BNB"]);
+
+/** Buy = funding → asset. Sell = asset → funding. Skip USDT↔BNB and asset↔asset. */
+function classifyAssetTrade(fromToken: string, toToken: string): "buy" | "sell" | null {
+  const from = fromToken.toUpperCase();
+  const to = toToken.toUpperCase();
+  const fromFund = FUNDING_TOKENS.has(from);
+  const toFund = FUNDING_TOKENS.has(to);
+  if (fromFund && !toFund) return "buy";
+  if (!fromFund && toFund) return "sell";
+  return null;
+}
 
 const ON_CHAIN_TX_PATTERN = /^0x[a-fA-F0-9]{40,}$/;
 
 function fallbackAutonomous(snap: Track1Snapshot): AutonomousStatus {
   const risk = snap.risk;
   const tradesToday = (risk.dailyTrades as number) ?? 0;
-  const maxTrades = snap.config.maxDailyTrades ?? 10;
-  const intervalSec = Math.round((snap.config.tradeIntervalMs ?? 3600000) / 1000);
+  const intervalSec = Math.round((snap.config.tradeIntervalMs ?? 300000) / 1000);
+  const session = snap.session;
   return {
     phase: snap.running ? "idle" : "stopped",
     ready: Boolean(snap.running),
-    headline: snap.running ? "Autonomous engine active" : "Autonomous engine stopped",
+    headline: snap.running ? "Engine active" : "Engine stopped",
     tradesToday,
-    maxTradesToday: maxTrades,
     tradesLast24h: snap.trades.filter((t) => t.success && t.timestamp >= Date.now() - 86400000).length,
-    txsToday: 0,
-    maxTxsToday: 10,
-    swapsRemainingToday: 0,
     emergencyMode: Boolean(risk.emergencyMode),
-    startupCooldownSec: snap.startupCooldownRemainingMs
-      ? Math.ceil(snap.startupCooldownRemainingMs / 1000)
-      : 0,
     nextCycleInSec: null,
     lastCycleAt: null,
     lastCycleDurationSec: null,
     lastCycleTrades: 0,
     lastCycleQueued: 0,
     tradeIntervalSec: intervalSec,
-    maxPerCycle: 1,
-    autoExitEnabled: false,
-    strategy: snap.config.strategy ?? "medium",
+    autoExitEnabled: Boolean(snap.config.autoExitEnabled),
+    sessionPolicy: snap.config.sessionPolicy ?? session?.policy ?? "auto",
+    session: session?.active ?? "overnight",
+    sessionLabel: session?.label ?? "Overnight",
+    nyTimeLabel: session?.nyTimeLabel ?? "—",
     failedSwapCooldowns: [],
-    competitionNudge: tradesToday === 0,
   };
 }
 
@@ -80,13 +85,14 @@ function scoreToAction(strength: Signal["strength"]): Signal["action"] {
 function mapPosition(
   p: Track1Snapshot["portfolio"]["positions"][number]
 ): AgentState["positions"][number] {
+  const entryUnknown = !(p.avgEntryPrice > 0);
   return {
     symbol: p.symbol,
     amount: roundNum(p.amount, 4),
-    entryPrice: roundTokenPrice(p.avgEntryPrice),
+    entryPrice: entryUnknown ? 0 : roundTokenPrice(p.avgEntryPrice),
     currentPrice: roundTokenPrice(p.currentPrice),
-    pnl: roundNum(p.unrealizedPnl, 2),
-    pnlPct: roundNum(p.unrealizedPnlPct, 2),
+    pnl: entryUnknown ? 0 : roundNum(p.unrealizedPnl, 2),
+    pnlPct: entryUnknown ? 0 : roundNum(p.unrealizedPnlPct, 2),
     weight: roundNum(p.weight, 1),
     ...(p.stopLossPrice != null
       ? { stopLossPrice: roundTokenPrice(p.stopLossPrice) }
@@ -102,6 +108,7 @@ function mapPosition(
       : {}),
     ...(p.peakPnlPct != null ? { peakPnlPct: roundNum(p.peakPnlPct, 1) } : {}),
     ...(p.entryFromTrades ? { entryFromTrades: true } : {}),
+    entryUnknown,
   };
 }
 
@@ -110,7 +117,7 @@ function parseTradeAmt(raw?: string): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
-/** Win rate from closed sells — replays cost basis when realizedPnl is missing. */
+/** FIFO realized PnL — only matched buy→sell of assets. Funding swaps ignored. */
 function computeClosedTradeStats(
   trades: Track1Snapshot["trades"],
   mode: string
@@ -120,6 +127,8 @@ function computeClosedTradeStats(
   losses: number;
   winRate: number;
   realizedPnl: number;
+  costClosed: number;
+  dailyRealizedPnl: number;
   sellPnlByOrderId: Map<string, number>;
 } {
   const confirmed = trades
@@ -132,15 +141,17 @@ function computeClosedTradeStats(
   let losses = 0;
   let closedSells = 0;
   let realizedPnl = 0;
+  let costClosed = 0;
+  let dailyRealizedPnl = 0;
+  const dayStart = Date.now() - 86_400_000;
 
   for (const t of confirmed) {
     const from = t.fromToken.toUpperCase();
     const to = t.toToken.toUpperCase();
     const price = t.priceAtExecution > 0 ? t.priceAtExecution : 0;
-    const isBuy = FUNDING_TOKENS.has(from) && !FUNDING_TOKENS.has(to);
-    const isSell = !FUNDING_TOKENS.has(from) && FUNDING_TOKENS.has(to);
+    const side = classifyAssetTrade(from, to);
 
-    if (isBuy) {
+    if (side === "buy") {
       const sym = to;
       let tokenQty = parseTradeAmt(t.toAmount);
       if (tokenQty <= 0 && price > 0) tokenQty = parseTradeAmt(t.fromAmount) / price;
@@ -152,9 +163,11 @@ function computeClosedTradeStats(
       continue;
     }
 
-    if (!isSell) continue;
+    if (side !== "sell") continue;
 
-    const sym = from;
+    const ledger = ledgers.get(from);
+    if (!ledger || ledger.qty <= 0) continue;
+
     let soldQty = parseTradeAmt(t.fromAmount);
     if (soldQty <= 0 && price > 0) soldQty = parseTradeAmt(t.toAmount) / price;
     if (soldQty <= 0) continue;
@@ -162,33 +175,36 @@ function computeClosedTradeStats(
     let proceeds = parseTradeAmt(t.toAmount);
     if (proceeds <= 0 && price > 0) proceeds = soldQty * price;
 
-    let pnl = t.realizedPnl;
-    const ledger = ledgers.get(sym);
-    if (pnl === undefined) {
-      if (!ledger || ledger.qty <= 0) continue;
-      const avgEntry = ledger.cost / ledger.qty;
-      const sold = Math.min(soldQty, ledger.qty);
-      pnl = proceeds - avgEntry * sold;
-    }
+    const avgEntry = ledger.cost / ledger.qty;
+    const sold = Math.min(soldQty, ledger.qty);
+    const cost = avgEntry * sold;
+    const pnl = proceeds - cost;
 
-    if (ledger && ledger.qty > 0) {
-      const avg = ledger.cost / ledger.qty;
-      const sold = Math.min(soldQty, ledger.qty);
-      ledger.qty -= sold;
-      ledger.cost = ledger.qty > 0 ? avg * ledger.qty : 0;
-      if (ledger.qty <= 1e-12) ledgers.delete(sym);
-      else ledgers.set(sym, ledger);
-    }
+    ledger.qty -= sold;
+    ledger.cost = ledger.qty > 0 ? avgEntry * ledger.qty : 0;
+    if (ledger.qty <= 1e-12) ledgers.delete(from);
+    else ledgers.set(from, ledger);
 
     closedSells++;
+    costClosed += cost;
     realizedPnl += pnl;
+    if (t.timestamp >= dayStart) dailyRealizedPnl += pnl;
     sellPnlByOrderId.set(t.orderId, pnl);
     if (pnl >= 0) wins++;
     else losses++;
   }
 
   const winRate = closedSells > 0 ? (wins / closedSells) * 100 : 0;
-  return { closedSells, wins, losses, winRate, realizedPnl, sellPnlByOrderId };
+  return {
+    closedSells,
+    wins,
+    losses,
+    winRate,
+    realizedPnl,
+    costClosed,
+    dailyRealizedPnl,
+    sellPnlByOrderId,
+  };
 }
 
 function inferEntryFromDashboardTrades(
@@ -281,6 +297,12 @@ function mapSignals(snap: Track1Snapshot): Signal[] {
       macd: metrics?.macd != null ? roundNum(metrics.macd, 2) : null,
       bbPosition: metrics?.bbPosition ?? null,
       vwapDev: metrics?.vwapDev ?? null,
+      stochRsi: metrics?.stochRsi ?? null,
+      gapPct: metrics?.gapPct ?? null,
+      orbBreakoutPct: metrics?.orbBreakoutPct ?? null,
+      atrPct: metrics?.atrPct ?? null,
+      session: metrics?.session,
+      regime: metrics?.regime,
       confidence: roundNum(
         metrics?.confidence ?? Math.min(1, Math.abs(score) / 80 + 0.3),
         2
@@ -333,16 +355,15 @@ function mapTrades(
 
   return [...seen.values()]
     .sort((a, b) => b.timestamp - a.timestamp)
-    .map((t) => {
-      const isBuy = ["USDT", "BNB", snap.config.baseCurrency]
-        .includes(t.fromToken.toUpperCase());
+    .flatMap((t) => {
+      const side = classifyAssetTrade(t.fromToken, t.toToken);
+      if (!side) return [];
+      const isBuy = side === "buy";
       const symbol = isBuy ? t.toToken : t.fromToken;
       const price = t.priceAtExecution || 0;
       const fromAmt = parseFloat(t.fromAmount) || 0;
       const toAmt = parseFloat(t.toAmount || "") || 0;
 
-      // Buys: fromAmount = USDT spent, toAmount = tokens received.
-      // Sells: fromAmount = tokens sold, toAmount = USDT received.
       const tokenQty = isBuy
         ? toAmt || (price > 0 ? fromAmt / price : 0)
         : fromAmt || (price > 0 ? toAmt / price : 0);
@@ -351,21 +372,19 @@ function mapTrades(
         : toAmt || (price > 0 ? tokenQty * price : 0);
 
       const inferredSellPnl = !isBuy ? sellPnls?.get(t.orderId) : undefined;
-      const sellPnl = !isBuy
-        ? (t.realizedPnl ?? inferredSellPnl)
-        : undefined;
+      const sellPnl = !isBuy ? (inferredSellPnl ?? t.realizedPnl) : undefined;
 
-      return {
+      return [{
         id: t.orderId,
         timestamp: t.timestamp,
         symbol,
-        side: (isBuy ? "buy" : "sell") as "buy" | "sell",
+        side,
         amount: roundNum(tokenQty, 4),
         price: roundNum(price, price > 0 && price < 1 ? 6 : 2),
         total: roundNum(usdTotal, 2),
         txHash: t.txHash!,
         ...(sellPnl !== undefined ? { pnl: roundNum(sellPnl, 2) } : {}),
-      };
+      }];
     });
 }
 
@@ -375,7 +394,7 @@ function mapActivity(logs: LogEntry[]): ActivityItem[] {
 
 function mapEquityCurve(snap: Track1Snapshot) {
   const snaps = snap.snapshots.length > 0 ? snap.snapshots : [snap.portfolio];
-  const initial = snap.portfolio.totalValueUsd - snap.portfolio.totalPnl;
+  const initial = snap.portfolio.initialNavUsd ?? 0;
 
   return snaps.map((s) => ({
     time: new Date(s.timestamp).toLocaleTimeString("en", {
@@ -383,7 +402,7 @@ function mapEquityCurve(snap: Track1Snapshot) {
       minute: "2-digit",
     }),
     value: roundNum(s.totalValueUsd, 2),
-    pnl: roundNum(s.totalValueUsd - initial, 2),
+    pnl: initial > 0 ? roundNum(s.totalValueUsd - initial, 2) : 0,
   }));
 }
 
@@ -416,10 +435,13 @@ export function enrichStateWithWallet(
 
   let gasUsd = 0;
   let cashUsd = 0;
-  // NAV 24h ago, reconstructed from each holding's 24h price change, so we can
-  // derive a real, dynamic daily (24h) PnL for the live wallet.
-  let value24hAgo = 0;
-  const tokens: Array<{ symbol: string; value: number; qty: number; price: number }> = [];
+  const tokens: Array<{
+    symbol: string;
+    value: number;
+    qty: number;
+    price: number;
+    pct24h: number;
+  }> = [];
 
   const priorValue = (value: number, pct: number) => {
     const factor = 1 + pct / 100;
@@ -432,35 +454,34 @@ export function enrichStateWithWallet(
     const value = p.valueUsd > 0 ? p.valueUsd : p.remainQty * p.price;
     if (symbol === GAS_SYMBOL) {
       gasUsd += value;
-      value24hAgo += priorValue(value, p.percentChange24h ?? 0);
       continue;
     }
     if (CASH_SYMBOLS.has(symbol)) {
       cashUsd += value;
-      value24hAgo += value; // stables ≈ flat
       continue;
     }
-    if (value < MIN_POSITION_USD) continue; // skip dust / airdrop spam
-    // Competition-style tickers only (hides Chinese spam/airdrop rows in Open Positions)
+    if (value < MIN_POSITION_USD) continue;
     if (!/^[A-Z0-9]{1,12}$/.test(symbol) && !prevBySymbol.has(symbol)) continue;
-    tokens.push({ symbol, value, qty: p.remainQty, price: p.price });
-    value24hAgo += priorValue(value, p.percentChange24h ?? 0);
+    tokens.push({
+      symbol,
+      value,
+      qty: p.remainQty,
+      price: p.price,
+      pct24h: p.percentChange24h ?? 0,
+    });
   }
 
   const positionsValue = tokens.reduce((s, t) => s + t.value, 0);
   const nav = cashUsd + gasUsd + positionsValue;
-  const dailyPnl = value24hAgo > 0 ? nav - value24hAgo : 0;
-  const dailyPnlPct = value24hAgo > 0 ? (dailyPnl / value24hAgo) * 100 : 0;
 
   const mapped = tokens
     .sort((a, b) => b.value - a.value)
     .map((t) => {
       const prev = prevBySymbol.get(t.symbol);
       const fromTrades = inferEntryFromDashboardTrades(state.trades, t.symbol);
-      const entryPrice =
-        (prev?.entryPrice && prev.entryPrice > 0 ? prev.entryPrice : 0) ||
-        fromTrades ||
-        0;
+      const fromAgent =
+        prev?.entryPrice && prev.entryPrice > 0 ? prev.entryPrice : 0;
+      const entryPrice = fromTrades || fromAgent || 0;
       const entryUnknown = entryPrice <= 0;
 
       const effectiveEntry = entryUnknown ? t.price : entryPrice;
@@ -498,10 +519,7 @@ export function enrichStateWithWallet(
   // snapshots track its own bookkeeping value, but the headline Portfolio Value
   // is the on-chain scan (nav). Shift the whole curve by the delta so the latest
   // point equals Portfolio Value while preserving the curve's shape and PnL.
-  const initialNav =
-    state.initialNavUsd > 0
-      ? state.initialNavUsd
-      : Math.max(0, state.portfolioValue - state.totalPnl);
+  const initialNav = state.initialNavUsd > 0 ? state.initialNavUsd : 0;
   const lastVal = state.equityCurve[state.equityCurve.length - 1]?.value;
   const offset = lastVal !== undefined ? nav - lastVal : 0;
   const equityCurve =
@@ -509,20 +527,57 @@ export function enrichStateWithWallet(
       ? state.equityCurve.map((p) => ({
           ...p,
           value: roundNum(p.value + offset, 2),
-          pnl: roundNum(p.value + offset - initialNav, 2),
+          pnl: initialNav > 0 ? roundNum(p.value + offset - initialNav, 2) : 0,
         }))
       : state.equityCurve.map((p) => ({
           ...p,
-          pnl: roundNum(p.value - initialNav, 2),
+          pnl: initialNav > 0 ? roundNum(p.value - initialNav, 2) : 0,
         }));
 
   const unrealizedPnl = mapped.reduce(
     (sum, p) => sum + (p.entryUnknown ? 0 : p.pnl),
     0
   );
-  const totalPnl = roundNum(nav - initialNav, 2);
-  const totalPnlPct =
-    initialNav > 0 ? roundNum((totalPnl / initialNav) * 100, 2) : 0;
+  const costOpen = mapped.reduce(
+    (sum, p) => sum + (p.entryUnknown ? 0 : p.entryPrice * p.amount),
+    0
+  );
+  const realizedPnl = roundNum(state.realizedPnl || 0, 2);
+  const costClosed = state.trades
+    .filter((t) => t.side === "sell" && t.pnl !== undefined)
+    .reduce((s, t) => s + (t.total - (t.pnl ?? 0)), 0);
+  const totalPnl = roundNum(realizedPnl + unrealizedPnl, 2);
+  const tradedCost = costOpen + Math.max(0, costClosed);
+  const totalPnlPct = tradedCost > 0 ? roundNum((totalPnl / tradedCost) * 100, 2) : 0;
+
+  const dayStart = Date.now() - 86_400_000;
+  const firstBuyAt = new Map<string, number>();
+  for (const t of [...state.trades].sort((a, b) => a.timestamp - b.timestamp)) {
+    if (t.side === "buy" && !firstBuyAt.has(t.symbol.toUpperCase())) {
+      firstBuyAt.set(t.symbol.toUpperCase(), t.timestamp);
+    }
+  }
+  const dailyRealized = state.trades
+    .filter((t) => t.side === "sell" && t.pnl !== undefined && t.timestamp >= dayStart)
+    .reduce((s, t) => s + (t.pnl ?? 0), 0);
+
+  let dailyMtm = 0;
+  let assetValue24hAgo = 0;
+  for (const t of tokens) {
+    const row = mapped.find((p) => p.symbol === t.symbol);
+    if (!row || row.entryUnknown) continue;
+    const openedAt = firstBuyAt.get(t.symbol) ?? 0;
+    if (openedAt <= 0) continue;
+    const mtm =
+      openedAt >= dayStart
+        ? (t.price - row.entryPrice) * t.qty
+        : t.value - priorValue(t.value, t.pct24h);
+    dailyMtm += mtm;
+    assetValue24hAgo += t.value - mtm;
+  }
+  const dailyPnl = dailyRealized + dailyMtm;
+  const dailyPnlPct =
+    assetValue24hAgo > 0 ? (dailyPnl / assetValue24hAgo) * 100 : 0;
 
   return {
     ...state,
@@ -533,7 +588,7 @@ export function enrichStateWithWallet(
     dailyPnlPct: roundNum(dailyPnlPct, 2),
     totalPnl,
     totalPnlPct,
-    realizedPnl: roundNum(state.realizedPnl || 0, 2),
+    realizedPnl,
     unrealizedPnl: roundNum(unrealizedPnl, 2),
     initialNavUsd: roundNum(initialNav, 2),
     positions: mapped,
@@ -556,6 +611,16 @@ export function mapTrack1ToDashboard(
 
   const confirmedTrades = snap.trades.filter((t) => isConfirmedTrade(t, snap.mode));
   const closedStats = computeClosedTradeStats(snap.trades, snap.mode);
+  const unrealizedPnl = snap.portfolio.positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+  const costOpen = snap.portfolio.positions.reduce(
+    (s, p) => s + p.avgEntryPrice * p.amount,
+    0
+  );
+  const assetPnl = closedStats.realizedPnl + unrealizedPnl;
+  const tradedCost = costOpen + closedStats.costClosed;
+  const assetPnlPct = tradedCost > 0 ? (assetPnl / tradedCost) * 100 : 0;
+  const dailyPnl = closedStats.dailyRealizedPnl;
+  const dailyPnlPct = tradedCost > 0 ? (dailyPnl / tradedCost) * 100 : 0;
 
   const base: AgentState = {
     status: snap.running ? "running" : "paused",
@@ -564,27 +629,14 @@ export function mapTrack1ToDashboard(
     cycleCount: snap.cycleCount,
     portfolioValue: roundNum(snap.portfolio.totalValueUsd, 2),
     cashBalance: roundNum(snap.portfolio.cashUsd, 2),
-    initialNavUsd: roundNum(
-      snap.portfolio.initialNavUsd
-        ?? Math.max(0, snap.portfolio.totalValueUsd - snap.portfolio.totalPnl),
-      2
-    ),
-    totalPnl: roundNum(snap.portfolio.totalPnl, 2),
-    totalPnlPct: roundNum(snap.portfolio.totalPnlPct, 2),
-    realizedPnl: roundNum(
-      closedStats.realizedPnl || snap.portfolio.realizedPnl || 0,
-      2
-    ),
-    unrealizedPnl: roundNum(
-      snap.portfolio.positions.reduce((s, p) => s + p.unrealizedPnl, 0),
-      2
-    ),
+    initialNavUsd: roundNum(snap.portfolio.initialNavUsd ?? 0, 2),
+    totalPnl: roundNum(assetPnl, 2),
+    totalPnlPct: roundNum(assetPnlPct, 2),
+    realizedPnl: roundNum(closedStats.realizedPnl, 2),
+    unrealizedPnl: roundNum(unrealizedPnl, 2),
     gasReserveUsd: roundNum(snap.portfolio.gasReserveUsd ?? 0, 2),
-    dailyPnl: roundNum(snap.portfolio.dailyPnl, 2),
-    dailyPnlPct: roundNum(
-      (snap.portfolio.dailyPnl / Math.max(snap.portfolio.totalValueUsd, 1)) * 100,
-      2
-    ),
+    dailyPnl: roundNum(dailyPnl, 2),
+    dailyPnlPct: roundNum(dailyPnlPct, 2),
     maxDrawdownPct: roundNum(snap.portfolio.maxDrawdownPct, 2),
     currentDrawdownPct: drawdownPct,
     todayTrades: (risk.dailyTrades as number) ?? 0,
@@ -593,16 +645,16 @@ export function mapTrack1ToDashboard(
     winCount: closedStats.wins,
     lossCount: closedStats.losses,
     winRate: roundNum(closedStats.winRate, 1),
-    fearGreedIndex: snap.fearGreedIndex ?? null,
     autonomous: snap.autonomous ?? fallbackAutonomous(snap),
     maxDrawdownLimit: snap.config.maxDrawdownPct ?? 20,
-    maxDailyTradesLimit:
-      snap.config.maxDailyTrades ?? (risk.maxDailyTrades as number) ?? 10,
     maxPositionsLimit:
       snap.config.maxPortfolioTokens ?? (risk.maxPositions as number) ?? 4,
     emergencyMode: Boolean(risk.emergencyMode ?? snap.autonomous?.emergencyMode),
     startedAt: snap.startedAt ?? null,
-    startupCooldownMs: snap.config.startupCooldownMs ?? 120_000,
+    sessionPolicy: snap.config.sessionPolicy ?? snap.session?.policy,
+    sessionActive: snap.session?.active ?? snap.autonomous?.session,
+    sessionLabel: snap.session?.label ?? snap.autonomous?.sessionLabel,
+    nyTimeLabel: snap.session?.nyTimeLabel ?? snap.autonomous?.nyTimeLabel,
     positions: snap.portfolio.positions
       .filter((p) => p.amount * p.currentPrice >= MIN_POSITION_USD)
       .map(mapPosition),
@@ -612,9 +664,12 @@ export function mapTrack1ToDashboard(
     equityCurve: mapEquityCurve(snap),
     drawdownCurve: mapDrawdownCurve(snap),
     lastSignalRefreshAt: snap.lastSignalRefreshAt ?? null,
-    signalRefreshSec: Math.round((snap.config.signalRefreshMs ?? 300_000) / 1000),
+    signalRefreshSec: Math.round((snap.config.signalRefreshMs ?? 10_000) / 1000),
     stopLossPct: snap.config.stopLossPct ?? 8,
     takeProfitPct: snap.config.takeProfitPct ?? 15,
+    trailingActivatePct: snap.config.trailingActivatePct,
+    trailingGivebackPct: snap.config.trailingGivebackPct,
+    autoExitEnabled: snap.config.autoExitEnabled,
     minTradablePriceUsd: snap.config.minTradablePriceUsd ?? 0.01,
     excludedTokens: snap.config.excludedTokens,
   };

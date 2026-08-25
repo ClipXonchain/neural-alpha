@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Neural Alpha — Trading Dashboard",
-  description: "Neural Alpha — autonomous BSC trading agent monitor",
+  description: "Neural Alpha — autonomous bStock trading agent monitor",
 };
 
 export default function RootLayout({

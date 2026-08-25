@@ -31,23 +31,20 @@ export function brainPortfolioContext(
   );
 }
 
-export function brainSentiment(fearGreed: number | null, newsArticles?: number) {
-  if (fearGreed == null) return;
-  const mood =
-    fearGreed <= 25
-      ? "extreme fear"
-      : fearGreed <= 45
-        ? "fear"
-        : fearGreed <= 55
-          ? "neutral"
-          : fearGreed <= 75
-            ? "greed"
-            : "extreme greed";
-  const news =
-    newsArticles != null && newsArticles > 0
-      ? ` · ${newsArticles} news articles scanned`
-      : "";
-  brain(`Market mood — Fear & Greed ${fearGreed} (${mood})${news}.`);
+export function brainSession(clock: {
+  label: string;
+  nyTimeLabel: string;
+  policy: string;
+  active: string;
+}) {
+  brain(
+    `Session — ${clock.label} (${clock.nyTimeLabel}). Policy ${clock.policy === "auto" ? "auto" : "locked"} · scoring ${clock.active}.`
+  );
+}
+
+export function brainCmcMacro(summary: string, sizeScale: number, eventRisk: string) {
+  const event = eventRisk === "high" ? " · event-risk ON" : "";
+  brain(`CMC overlay — ${summary} · size ${sizeScale.toFixed(2)}x${event}.`);
 }
 
 export function brainSignalOverview(
@@ -134,6 +131,11 @@ export function brainTradeSkipped(symbol: string, action: string, reason: string
   brain(`Skipped ${action} ${symbol} — ${reason}.`, { symbol, action, reason });
 }
 
+export function brainBuyPacing(waitMin: number, candidate?: string) {
+  const name = candidate ? ` (${candidate} can wait)` : "";
+  brain(`Pacing entries — next buy in ~${waitMin} min. One name at a time${name}.`);
+}
+
 export function brainTradeFailed(symbol: string, reason: string) {
   brain(`Trade failed on ${symbol} — ${reason}.`, { symbol, reason });
 }
@@ -203,17 +205,16 @@ export function brainCycleDone(
   );
 }
 
-export function brainStartupCooldown(remainingSec: number, queued: number) {
-  brain(
-    queued > 0
-      ? `Warming up (${remainingSec}s left) — ${queued} trade${queued === 1 ? "" : "s"} queued until ready.`
-      : `Warming up — ${remainingSec}s until autonomous trading starts.`
-  );
+function formatLoopInterval(ms: number): string {
+  const sec = Math.max(1, Math.round(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.round(sec / 60);
+  return `${min} min`;
 }
 
-export function brainAgentStarted(mode: string, intervalMin: number, signalRefreshMin: number) {
+export function brainAgentStarted(mode: string, tradeIntervalMs: number, signalRefreshMs: number) {
   brain(
-    `Agent online (${mode} mode). Trade cycle ~${intervalMin} min · market pulse ~${signalRefreshMin} min. Decisions will stream here.`
+    `Agent online (${mode} mode). Trade cycle ~${formatLoopInterval(tradeIntervalMs)} · market pulse ~${formatLoopInterval(signalRefreshMs)}. 24/7 on-chain bStock desk.`
   );
 }
 
@@ -222,6 +223,6 @@ export function brainLoopsStarted(protectiveSec: number, autoExit: boolean) {
   brain(`Protective exits armed — checking SL/TP every ${protectiveSec}s.`);
 }
 
-export function brainRefreshLoopStarted(intervalSec: number) {
-  brain(`Signal refresh loop started — market pulse every ${Math.max(1, Math.round(intervalSec / 60))} min.`);
+export function brainRefreshLoopStarted(intervalMs: number) {
+  brain(`Signal refresh loop started — live market pulse every ${formatLoopInterval(intervalMs)}.`);
 }

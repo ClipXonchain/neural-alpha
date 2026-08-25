@@ -195,8 +195,17 @@ export function momentum(closes: number[], period = 10): number | null {
 }
 
 /**
- * Stochastic RSI — maps RSI to 0-100 range for more sensitive signals.
+ * ADX-lite trend strength 0–100 from |EMA fast−slow| / ATR.
+ * Higher = more directional; used as a regime companion, not a directional bet.
  */
+export function trendStrength(
+  emaDiffAbs: number | null,
+  atrVal: number | null
+): number | null {
+  if (emaDiffAbs === null || atrVal === null || atrVal <= 0) return null;
+  return Math.min(100, (emaDiffAbs / atrVal) * 25);
+}
+
 export function stochRsi(closes: number[], rsiPeriod = 14, stochPeriod = 14): number | null {
   const rsiValues: number[] = [];
   for (let i = rsiPeriod + 1; i <= closes.length; i++) {

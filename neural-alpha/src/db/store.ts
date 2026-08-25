@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { Pool } from "@neondatabase/serverless";
 import type { PortfolioSnapshot, TradeOrder, TradeResult } from "../utils/types.js";
 import { isPaperTxHash } from "../execution/executor.js";
@@ -27,6 +28,34 @@ export interface PositionEntryRecord {
 }
 
 export type PositionEntriesState = Record<string, PositionEntryRecord>;
+
+const PKG_ROOT = join(dirname(fileURLToPath(import.meta.url)), "../..");
+const LOCAL_ENTRIES_FILE = join(PKG_ROOT, "data/position-entries.json");
+
+function readLocalPositionEntries(): PositionEntriesState | null {
+  try {
+    if (!existsSync(LOCAL_ENTRIES_FILE)) return null;
+    const raw = JSON.parse(readFileSync(LOCAL_ENTRIES_FILE, "utf8")) as PositionEntriesState;
+    if (!raw || typeof raw !== "object") return null;
+    return raw;
+  } catch (err) {
+    logger.warn("Could not read data/position-entries.json", { error: String(err) });
+    return null;
+  }
+}
+
+function writeLocalPositionEntries(entries: PositionEntriesState) {
+  try {
+    if (Object.keys(entries).length === 0) {
+      const existing = readLocalPositionEntries();
+      if (existing && Object.keys(existing).length > 0) return;
+    }
+    mkdirSync(dirname(LOCAL_ENTRIES_FILE), { recursive: true });
+    writeFileSync(LOCAL_ENTRIES_FILE, JSON.stringify(entries, null, 2));
+  } catch (err) {
+    logger.warn("Could not write data/position-entries.json", { error: String(err) });
+  }
+}
 
 export interface CycleStats {
   realizedPnl: number;
@@ -191,8 +220,10 @@ export class AgentStore {
   /** Persist a trade reconstructed from on-chain transfer history (idempotent). */
   async saveChainTrade(trade: TradeResult, walletAddress: string): Promise<void> {
     if (!this.pool || !trade.txHash) return;
-    const stables = new Set(["USDT", "USDC", "BNB", "BUSD", "DAI", "FDUSD"]);
-    const isBuy = stables.has(trade.fromToken.toUpperCase());
+    const funding = new Set(["USDT", "USDC", "U", "USD1", "BNB", "BUSD", "DAI", "FDUSD"]);
+    const from = trade.fromToken.toUpperCase();
+    const to = trade.toToken.toUpperCase();
+    const isBuy = funding.has(from) && !funding.has(to);
     const side = isBuy ? "buy" : "sell";
     const symbol = isBuy ? trade.toToken : trade.fromToken;
     const fromAmt = parseFloat(trade.fromAmount) || 0;
@@ -420,6 +451,7 @@ export class AgentStore {
   }
 
   async savePositionEntries(entries: PositionEntriesState): Promise<void> {
+    writeLocalPositionEntries(entries);
     if (!this.pool) return;
     try {
       await this.pool.query(
@@ -434,15 +466,17 @@ export class AgentStore {
   }
 
   async loadPositionEntries(): Promise<PositionEntriesState | null> {
-    if (!this.pool) return null;
+    const local = readLocalPositionEntries();
+    if (!this.pool) return local;
     try {
       const { rows } = await this.pool.query<{ value_json: PositionEntriesState }>(
         `SELECT value_json FROM agent_state WHERE key = 'position_entries' LIMIT 1`
       );
-      return rows[0]?.value_json ?? null;
+      const neon = rows[0]?.value_json ?? null;
+      return neon && Object.keys(neon).length > 0 ? neon : local;
     } catch (err) {
       logger.warn("Failed to load position entries from Neon", { error: String(err) });
-      return null;
+      return local;
     }
   }
 

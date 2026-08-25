@@ -1,56 +1,53 @@
 import type { AgentConfig } from "./utils/types.js";
-import { getStrategyProfile, resolveStrategyName } from "./strategy/presets.js";
+import { getSessionProfile, resolveStrategyName } from "./strategy/presets.js";
+import { getSessionClock } from "./strategy/session.js";
 import { isUserBlacklisted } from "./risk/token-blacklist.js";
+import { getEligibleBstockSymbols, isEligibleBstock } from "./integrations/bstock.js";
 
-export const ELIGIBLE_TOKENS: string[] = [
-  "ETH", "USDT", "USDC", "XRP", "TRX", "DOGE", "ZEC", "ADA", "LINK", "BCH", "BNB",
-  "DAI", "TON", "USD1", "USDe", "M", "LTC", "AVAX", "SHIB", "XAUt", "WLFI",
-  "H", "DOT", "UNI", "ASTER", "DEXE", "USDD", "ETC", "AAVE", "ATOM", "U",
-  "STABLE", "FIL", "INJ", "NIGHT", "FET", "TUSD", "BONK", "PENGU", "CAKE",
-  "SIREN", "LUNC", "ZRO", "KITE", "FDUSD", "BEAT", "PIEVERSE", "BTT", "NFT",
-  "EDGE", "FLOKI", "LDO", "B", "FF", "PENDLE", "NEX", "STG", "AXS", "TWT",
-  "HOME", "RAY", "COMP", "GWEI", "XCN", "GENIUS", "XPL", "BAT", "SKYAI",
-  "APE", "IP", "SFP", "TAG", "NXPC", "AB", "SAHARA", "1INCH", "CHEEMS",
-  "BANANAS31", "RIVER", "MYX", "RAVE", "SNX", "FORM", "LAB", "HTX", "USDf",
-  "CTM", "BDX", "SLX", "UB", "DUCKY", "FRAX", "BILL", "WFI", "KOGE", "ALE",
-  "FRXUSD", "USDF", "GOMINING", "VCNT", "GUA", "DUSD", "SMILEK", "0G", "BEAM",
-  "MY", "SOON", "REAL", "Q", "AIOZ", "ZIG", "YFI", "TAC", "lisUSD", "CYS",
-  "ZAMA", "TRIA", "HUMA", "PLUME", "ZIL", "XPR", "ZETA", "BabyDoge", "NILA",
-  "ROSE", "VELO", "UAI", "BRETT", "OPEN", "BSB", "TOSHI", "BAS", "ACH", "AXL",
-  "LUR", "ELF", "KAVA", "APR", "IRYS", "EURI", "XUSD", "BARD", "DUSK",
-  "SUSHI", "PEAQ", "COAI", "BDCA", "XAUM",
+/** Fallback watchlist used before the type=3 bootstrap completes. */
+const BSTOCK_FALLBACK = [
+  "NVDAB", "AAPLB", "TSLAB", "MSFTB", "GOOGLB", "AMZNB", "METAB", "PLTRB",
+  "SPYB", "QQQB", "NFLXB", "AMDB", "INTCB", "AVGOB", "ORCLB", "COINB", "MSTRB",
 ];
 
-/** Low-conviction / micro-cap tokens — excluded from scans, signals, and new buys. */
+/**
+ * Campaign-eligible bStocks (suffix B). Populated from the type=3 API + weekly
+ * list at bootstrap; this array is the fallback until then.
+ */
+export let ELIGIBLE_TOKENS: string[] = [...BSTOCK_FALLBACK];
+
+export function setEligibleTokens(symbols: string[]) {
+  const unique = [...new Set(symbols.map((s) => s.toUpperCase()).filter(Boolean))];
+  if (unique.length > 0) ELIGIBLE_TOKENS = unique;
+}
+
+/** Leveraged / inverse ETFs — excluded from new buys unless ALLOW_LEVERAGED_BSTOCKS=true. */
 export const EXCLUDED_TOKENS = new Set<string>([
   ...(process.env.EXCLUDED_TOKENS?.split(",").map((s) => s.trim().toUpperCase()).filter(Boolean) ?? []),
-  "NEX", "BTT", "SHIB", "AB", "BRETT", "NFT", "U", "HTX", "BDX", "RAY",
-  "ZIL", "XCN", "BONK", "ROSE", "VELO", "LUNC", "NILA", "REAL", "FLOKI",
-  "JUDAO", "BABYDOGE", "GOMINING", "XAUT",
 ]);
 
-/** Skip tokens priced below this USD threshold (meme/dust). */
+/** Skip tokens priced below this USD threshold. */
 export const MIN_TRADABLE_PRICE_USD = parseFloat(
   process.env.MIN_TRADABLE_PRICE_USD || "0.01"
 );
 
 export const STABLECOINS = new Set([
   "USDT", "USDC", "DAI", "USD1", "USDe", "USDD", "TUSD", "FDUSD", "USDf",
-  "FRAX", "FRXUSD", "USDF", "DUSD", "lisUSD", "EURI", "XUSD", "STABLE",
+  "FRAX", "FRXUSD", "USDF", "DUSD", "lisUSD", "EURI", "XUSD", "STABLE", "U", "BNB",
 ]);
 
-/** High-momentum eligible tokens — always on watchlist */
+/** High-conviction bStocks — always on watchlist */
 export const MOMENTUM_CORE = [
-  "FET", "PENDLE", "INJ", "APE", "CAKE", "1INCH", "SNX", "DEXE",
+  "NVDAB", "AAPLB", "TSLAB", "MSFTB", "GOOGLB", "AMZNB", "METAB", "PLTRB",
 ];
 
-/** Rotated in when trending or showing movement */
+/** Rotated in when showing movement */
 export const MOMENTUM_VOLATILE = [
-  "PENGU", "AXS", "COMP", "LDO", "SUSHI", "ZRO", "STG", "NXPC", "CHEEMS",
+  "COINB", "MSTRB", "HOODB", "NFLXB", "AMDB", "CRCLB", "IRENB", "GMEB",
 ];
 
-/** Low-beta anchors for stability / hedge */
-export const ANCHOR_TOKENS = ["ETH", "LINK", "AVAX"];
+/** Low-beta index bStocks */
+export const ANCHOR_TOKENS = ["SPYB", "QQQB"];
 
 export const MAX_WATCHLIST_SIZE = 15;
 
@@ -80,7 +77,9 @@ export function isExcludedToken(symbol: string): boolean {
 }
 
 export function isEligibleToken(symbol: string): boolean {
-  return ELIGIBLE_TOKENS.includes(symbol.toUpperCase());
+  const upper = symbol.toUpperCase();
+  if (isEligibleBstock(upper)) return true;
+  return ELIGIBLE_TOKENS.includes(upper);
 }
 
 /** Competition-eligible, not stable, not blocklisted, and above min price when known. */
@@ -94,11 +93,12 @@ export function isTradableToken(symbol: string, price?: number | null): boolean 
   return true;
 }
 
-export const COMPETITION_CONTRACT = "0x212c61b9b72c95d95bf29cf032f5e5635629aed5";
+export const COMPETITION_CONTRACT = "";
 
 export const BSC_CHAIN = "bsc";
+export const BSC_CHAIN_ID = process.env.BINANCE_CHAIN_ID?.trim() || "56";
 
-/** BSC mainnet USDT (BEP-20) — base currency for competition swaps */
+/** BSC mainnet USDT (BEP-20) — default payment token for campaign swaps */
 export const BSC_USDT_ADDRESS = "0x55d398326f99059fF775485246999027B3197955";
 
 /** Minimum BNB (USD value) kept for gas — BNB is never used as swap currency */
@@ -107,8 +107,10 @@ export const MIN_GAS_RESERVE_USD = parseFloat(process.env.MIN_GAS_RESERVE_USD ||
 /** Ignore wallet holdings below this USD value (dust + balance API noise). */
 export const MIN_POSITION_VALUE_USD = parseFloat(process.env.MIN_POSITION_VALUE_USD || "1");
 
-/** All buys and sells settle in USDT only — BNB is gas reserve only. */
+/** Buys must be funded with a campaign payment token (BNB/USDT/USDC/U/USD1). */
 export function parseSwapCurrencies(_raw?: string): string[] {
+  const preferred = (process.env.PAYMENT_TOKEN || "USDT").toUpperCase();
+  if (["BNB", "USDT", "USDC", "U", "USD1"].includes(preferred)) return [preferred];
   return ["USDT"];
 }
 
@@ -118,11 +120,13 @@ export function isSwapCurrency(symbol: string, swapCurrencies: string[]): boolea
 
 export function loadConfig(): AgentConfig {
   const mode = (process.env.AGENT_MODE as "live" | "paper") || "paper";
-  const defaultInterval = mode === "paper" ? "30000" : "3600000"; // 30s paper, 60min live
+  const defaultInterval = mode === "paper" ? "30000" : "300000"; // 30s paper, 5min live
 
-  // Strategy preset supplies risk defaults; explicit env vars still override.
-  const strategy = resolveStrategyName(process.env.STRATEGY);
-  const profile = getStrategyProfile(strategy);
+  const sessionPolicy = resolveStrategyName(
+    process.env.SESSION_POLICY || process.env.STRATEGY
+  );
+  const clock = getSessionClock(sessionPolicy);
+  const profile = getSessionProfile(clock.active);
   const r = profile.risk;
   const num = (env: string | undefined, fallback: number) =>
     env !== undefined && env !== "" ? parseFloat(env) : fallback;
@@ -134,38 +138,29 @@ export function loadConfig(): AgentConfig {
 
   return {
     mode,
-    strategy,
+    sessionPolicy,
     positionSizeMultiplier: profile.positionSizeMultiplier,
     tradeIntervalMs: parseInt(process.env.TRADE_INTERVAL_MS || defaultInterval, 10),
-    maxPositionSizeUsd: num(process.env.MAX_POSITION_SIZE_USD, 100),
-    maxDailyTrades: Math.round(
-      process.env.MAX_DAILY_TRADES !== undefined && process.env.MAX_DAILY_TRADES !== ""
-        ? parseFloat(process.env.MAX_DAILY_TRADES)
-        : 10
-    ),
+    maxPositionSizeUsd: num(process.env.MAX_POSITION_SIZE_USD, 250),
     maxDrawdownPct,
     drawdownLimitEnabled: !disableDrawdownLimit && maxDrawdownPct < 100,
-    signalRefreshMs: parseInt(process.env.SIGNAL_REFRESH_MS || "300000", 10),
+    signalRefreshMs: parseInt(process.env.SIGNAL_REFRESH_MS || "10000", 10),
     protectiveExitCheckMs: parseInt(process.env.PROTECTIVE_EXIT_CHECK_MS || "60000", 10),
     slippageTolerance: num(process.env.SLIPPAGE_TOLERANCE, 1),
+    minGasReserveUsd: num(process.env.MIN_GAS_RESERVE_USD, 1.5),
     baseCurrency: "USDT",
     swapCurrencies: parseSwapCurrencies(),
     maxPortfolioTokens: Math.round(num(process.env.MAX_PORTFOLIO_TOKENS, r.maxPortfolioTokens)),
     minTradeAmountUsd: num(process.env.MIN_TRADE_AMOUNT_USD, 5),
     rebalanceThresholdPct: 10,
-    // Safety-first exit rules — keep per-trade losses small to limit drawdown.
     stopLossPct: num(process.env.STOP_LOSS_PCT, r.stopLossPct),
     takeProfitPct: num(process.env.TAKE_PROFIT_PCT, r.takeProfitPct),
     trailingActivatePct: num(process.env.TRAILING_ACTIVATE_PCT, r.trailingActivatePct),
     trailingGivebackPct: num(process.env.TRAILING_GIVEBACK_PCT, r.trailingGivebackPct),
     minBuyConfidence: num(process.env.MIN_BUY_CONFIDENCE, r.minBuyConfidence),
-    startupCooldownMs: parseInt(process.env.STARTUP_TRADE_COOLDOWN_MS || "120000", 10),
-    autoExitEnabled: process.env.AUTO_EXIT_ENABLED === "true",
+    autoExitEnabled: process.env.AUTO_EXIT_ENABLED !== "false",
     failedSwapCooldownMs: parseInt(process.env.FAILED_SWAP_COOLDOWN_MS || "1800000", 10),
-    maxAutonomousTradesPerCycle: Math.round(
-      num(process.env.MAX_AUTONOMOUS_TRADES_PER_CYCLE, 1)
-    ),
-    maxOnChainTxPerDay: Math.round(num(process.env.MAX_ONCHAIN_TX_PER_DAY, 10)),
+    minBuyIntervalMs: parseInt(process.env.MIN_BUY_INTERVAL_MS || "600000", 10),
   };
 }
 

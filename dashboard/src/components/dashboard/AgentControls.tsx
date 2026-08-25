@@ -1,138 +1,32 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { motion } from "framer-motion";
-import {
-  Settings2,
-  Save,
-  Check,
-  AlertTriangle,
-  RotateCcw,
-  Shield,
-  Scale,
-  Rocket,
-} from "lucide-react";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { Save, Check, AlertTriangle, RotateCcw, Minus, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-type StrategyName = "safe" | "medium" | "momentum";
-
-interface AgentConfig {
+export interface DeskConfig {
   mode: string;
-  strategy?: StrategyName;
   maxPositionSizeUsd: number;
-  tradeIntervalMs: number;
-  maxDrawdownPct: number;
   slippageTolerance: number;
-  maxDailyTrades: number;
+  minGasReserveUsd: number;
   maxPortfolioTokens: number;
   baseCurrency: string;
   swapCurrencies?: string[];
+  stopLossPct?: number;
+  takeProfitPct?: number;
 }
 
-const STRATEGY_OPTIONS: {
-  id: StrategyName;
-  label: string;
-  desc: string;
-  icon: typeof Shield;
-  accent: string;
-}[] = [
-  {
-    id: "safe",
-    label: "SafeTrade",
-    desc: "Lowest drawdown · tight stops · smallest size",
-    icon: Shield,
-    accent: "neon",
-  },
-  {
-    id: "medium",
-    label: "Medium",
-    desc: "Balanced risk/return · moderate stops",
-    icon: Scale,
-    accent: "cyan",
-  },
-  {
-    id: "momentum",
-    label: "Momentum",
-    desc: "Highest ROI · chases volume · wider stops",
-    icon: Rocket,
-    accent: "amber-400",
-  },
-];
-
-function StrategySelector({
-  value,
-  onChange,
-  disabled,
-}: {
-  value: StrategyName;
-  onChange: (v: StrategyName) => void;
-  disabled?: boolean;
-}) {
-  return (
-    <div className="flex flex-col gap-2 mb-4">
-      <label
-        className="text-[11px] text-text-secondary font-medium"
-        style={{ fontFamily: "var(--font-body)" }}
-      >
-        Strategy Preset
-        <span className="text-text-muted ml-1.5">
-          (SafeTrade &lt; Medium &lt; Momentum — risk &amp; expected ROI rise left→right)
-        </span>
-      </label>
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-        {STRATEGY_OPTIONS.map((opt) => {
-          const Icon = opt.icon;
-          const selected = value === opt.id;
-          return (
-            <button
-              key={opt.id}
-              type="button"
-              disabled={disabled}
-              onClick={() => onChange(opt.id)}
-              className={cn(
-                "flex flex-col gap-1.5 text-left rounded-lg border px-3 py-2.5 transition-all",
-                "disabled:opacity-30 disabled:cursor-not-allowed",
-                selected
-                  ? "bg-neon/8 border-neon/40 ring-1 ring-neon/10"
-                  : "bg-surface border-border-dim hover:border-border-glow"
-              )}
-            >
-              <div className="flex items-center gap-2">
-                <Icon
-                  className={cn(
-                    "size-3.5",
-                    selected ? "text-neon" : "text-text-muted"
-                  )}
-                />
-                <span
-                  className={cn(
-                    "text-[12px] font-semibold",
-                    selected ? "text-text-primary" : "text-text-secondary"
-                  )}
-                  style={{ fontFamily: "var(--font-mono)" }}
-                >
-                  {opt.label}
-                </span>
-                {selected && <Check className="size-3 text-neon ml-auto" />}
-              </div>
-              <span className="text-[10px] text-text-muted leading-tight">
-                {opt.desc}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </div>
-  );
+function snap(value: number, step: number): number {
+  const decimals = step < 1 ? (String(step).split(".")[1]?.length ?? 1) : 0;
+  return Number((Math.round(value / step) * step).toFixed(decimals));
 }
 
-interface AgentControlsProps {
-  connected: boolean;
-  config: AgentConfig | null;
-  onSave: (updates: Partial<AgentConfig>) => Promise<{ ok: boolean; error?: string }>;
+function clamp(value: number, min: number, max: number, step: number): number {
+  if (!Number.isFinite(value)) return min;
+  return snap(Math.min(max, Math.max(min, value)), step);
 }
 
-function ControlInput({
+function SettingField({
   label,
   hint,
   value,
@@ -142,6 +36,8 @@ function ControlInput({
   step,
   disabled,
   unit,
+  presets,
+  accent,
 }: {
   label: string;
   hint: string;
@@ -152,102 +48,144 @@ function ControlInput({
   step: number;
   disabled?: boolean;
   unit?: string;
+  presets?: number[];
+  accent?: "danger" | "neon" | "cyan" | "warning";
 }) {
+  const accentClass =
+    accent === "danger"
+      ? "focus-within:border-danger/50"
+      : accent === "neon"
+        ? "focus-within:border-neon/50"
+        : accent === "warning"
+          ? "focus-within:border-warning/50"
+          : "focus-within:border-cyan/50";
+
+  const unitClass =
+    accent === "danger"
+      ? "text-danger/80"
+      : accent === "neon"
+        ? "text-neon/80"
+        : "text-text-muted";
+
   return (
     <div className="flex flex-col gap-2">
-      <label
-        className="text-[11px] text-text-secondary font-medium"
-        style={{ fontFamily: "var(--font-body)" }}
-      >
-        {label}
-      </label>
-      <div className="relative">
-        <input
-          type="number"
-          value={value}
-          onChange={(e) => onChange(parseFloat(e.target.value) || 0)}
-          min={min}
-          max={max}
-          step={step}
-          disabled={disabled}
-          className={cn(
-            "w-full bg-surface border border-border-dim rounded-lg px-4 py-3",
-            "text-[15px] font-semibold text-text-primary tabular-nums",
-            "focus:outline-none focus:border-neon/50 focus:ring-1 focus:ring-neon/10",
-            "hover:border-border-glow transition-all duration-150",
-            "disabled:opacity-30 disabled:cursor-not-allowed",
-            "[appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-          )}
-          style={{ fontFamily: "var(--font-mono)" }}
-        />
-        {unit && (
-          <span
-            className="absolute right-4 top-1/2 -translate-y-1/2 text-[11px] text-text-muted font-medium"
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {unit}
-          </span>
-        )}
+      <div className="flex items-baseline justify-between gap-2">
+        <label className="text-[10px] uppercase tracking-[0.14em] text-text-muted">
+          {label}
+        </label>
+        <span className="text-[10px] text-text-muted tabular-nums">{hint}</span>
       </div>
-      <span className="text-[10px] text-text-muted leading-tight">
-        {hint}
-      </span>
+      <div
+        className={cn(
+          "flex items-center gap-1 rounded-lg border border-border-dim bg-void/60 px-1",
+          accentClass,
+          disabled && "opacity-40"
+        )}
+      >
+        <button
+          type="button"
+          disabled={disabled || value <= min}
+          onClick={() => onChange(clamp(value - step, min, max, step))}
+          className="flex size-8 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary disabled:opacity-30"
+          aria-label={`Decrease ${label}`}
+        >
+          <Minus className="size-3.5" />
+        </button>
+        <div className="relative min-w-0 flex-1">
+          <input
+            type="number"
+            value={value}
+            onChange={(e) => {
+              const n = parseFloat(e.target.value);
+              if (Number.isFinite(n)) onChange(n);
+            }}
+            onBlur={() => onChange(clamp(value, min, max, step))}
+            min={min}
+            max={max}
+            step={step}
+            disabled={disabled}
+            className={cn(
+              "w-full bg-transparent py-2 text-center text-[16px] font-semibold text-text-primary tabular-nums",
+              "focus:outline-none disabled:opacity-30",
+              unit ? "pr-8" : ""
+            )}
+            style={{ fontFamily: "var(--font-mono)" }}
+          />
+          {unit && (
+            <span
+              className={cn(
+                "pointer-events-none absolute right-0 top-1/2 -translate-y-1/2 text-[10px] font-medium",
+                unitClass
+              )}
+            >
+              {unit}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          disabled={disabled || value >= max}
+          onClick={() => onChange(clamp(value + step, min, max, step))}
+          className="flex size-8 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary disabled:opacity-30"
+          aria-label={`Increase ${label}`}
+        >
+          <Plus className="size-3.5" />
+        </button>
+      </div>
+      {presets && presets.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {presets.map((p) => (
+            <button
+              key={p}
+              type="button"
+              disabled={disabled}
+              onClick={() => onChange(p)}
+              className={cn(
+                "rounded-md px-2 py-0.5 text-[10px] tabular-nums border transition-colors",
+                value === p
+                  ? "border-cyan/40 bg-cyan/10 text-cyan"
+                  : "border-transparent bg-surface-overlay text-text-muted hover:text-text-secondary"
+              )}
+              style={{ fontFamily: "var(--font-mono)" }}
+            >
+              {unit === "%" ? `${p}%` : unit === "USD" ? `$${p}` : p}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function ReadonlyField({
-  label,
-  value,
-  hint,
-  color,
-}: {
-  label: string;
-  value: string;
-  hint: string;
-  color?: string;
-}) {
-  return (
-    <div className="flex flex-col gap-2">
-      <label className="text-[11px] text-text-secondary font-medium">
-        {label}
-      </label>
-      <div
-        className={cn("text-[15px] font-bold py-3", color || "text-text-primary")}
-        style={{ fontFamily: "var(--font-mono)" }}
-      >
-        {value}
-      </div>
-      <span className="text-[10px] text-text-muted leading-tight">
-        {hint}
-      </span>
-    </div>
-  );
+interface AgentControlsProps {
+  connected: boolean;
+  config: DeskConfig | null;
+  onSave: (updates: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
 }
 
 export function AgentControls({ connected, config, onSave }: AgentControlsProps) {
-  const [strategy, setStrategy] = useState<StrategyName>("medium");
-  const [maxPos, setMaxPos] = useState(100);
-  const [interval, setInterval_] = useState(60);
-  const [drawdown, setDrawdown] = useState(20);
+  const [maxPos, setMaxPos] = useState(250);
   const [slippage, setSlippage] = useState(1);
-  const [maxDaily, setMaxDaily] = useState(10);
-  const [maxPositions, setMaxPositions] = useState(3);
+  const [gasReserve, setGasReserve] = useState(1.5);
+  const [maxPositions, setMaxPositions] = useState(4);
+  const [stopLoss, setStopLoss] = useState(8);
+  const [takeProfit, setTakeProfit] = useState(14);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
   const [dirty, setDirty] = useState(false);
 
+  const applyConfig = useCallback((next: DeskConfig) => {
+    setMaxPos(next.maxPositionSizeUsd);
+    setSlippage(next.slippageTolerance);
+    setGasReserve(next.minGasReserveUsd);
+    setMaxPositions(next.maxPortfolioTokens);
+    if (next.stopLossPct != null) setStopLoss(next.stopLossPct);
+    if (next.takeProfitPct != null) setTakeProfit(next.takeProfitPct);
+  }, []);
+
   useEffect(() => {
-    if (config && !dirty) {
-      if (config.strategy) setStrategy(config.strategy);
-      setMaxPos(config.maxPositionSizeUsd);
-      setInterval_(config.tradeIntervalMs / 60000);
-      setDrawdown(config.maxDrawdownPct);
-      setSlippage(config.slippageTolerance);
-      setMaxDaily(config.maxDailyTrades);
-      setMaxPositions(config.maxPortfolioTokens);
-    }
-  }, [config, dirty]);
+    if (config && !dirty) applyConfig(config);
+  }, [config, dirty, applyConfig]);
 
   const markDirty = useCallback((setter: (v: number) => void) => {
     return (v: number) => {
@@ -257,25 +195,33 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
     };
   }, []);
 
+  const rewardRisk = useMemo(
+    () => (stopLoss > 0 ? takeProfit / stopLoss : 0),
+    [stopLoss, takeProfit]
+  );
+
+  const slShare = useMemo(() => {
+    const span = stopLoss + takeProfit;
+    return span > 0 ? (stopLoss / span) * 100 : 50;
+  }, [stopLoss, takeProfit]);
+
   const handleSave = async () => {
-    if (drawdown > 30) {
-      setMessage({ text: "Drawdown > 30% will DQ you!", ok: false });
-      return;
-    }
     setSaving(true);
     setMessage(null);
     try {
       const result = await onSave({
-        strategy,
-        maxPositionSizeUsd: maxPos,
-        tradeIntervalMs: interval * 60000,
-        maxDrawdownPct: drawdown,
-        slippageTolerance: slippage,
-        maxDailyTrades: maxDaily,
-        maxPortfolioTokens: maxPositions,
+        maxPositionSizeUsd: clamp(maxPos, 5, 10000, 5),
+        maxPortfolioTokens: clamp(maxPositions, 1, 20, 1),
+        slippageTolerance: clamp(slippage, 0.1, 10, 0.1),
+        minGasReserveUsd: clamp(gasReserve, 0.5, 50, 0.5),
+        stopLossPct: clamp(stopLoss, 1, 40, 0.5),
+        takeProfitPct: clamp(takeProfit, 1, 80, 0.5),
+        autoExitEnabled: true,
+        trailingActivatePct: 0,
+        trailingGivebackPct: 0,
       });
       if (result.ok) {
-        setMessage({ text: "Saved — applied next cycle", ok: true });
+        setMessage({ text: "Live — applies on next check", ok: true });
         setDirty(false);
       } else {
         setMessage({ text: result.error || "Failed to save", ok: false });
@@ -287,182 +233,189 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
     }
   };
 
-  const handleReset = () => {
-    setDirty(false);
-    setMessage(null);
-  };
+  const quote = (config?.swapCurrencies || ["USDT"]).join("/");
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: 0.5 }}
-      className="glass-raised rounded-xl p-5"
-    >
-      {/* Header */}
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center justify-center size-7 rounded-lg bg-cyan/8">
-            <Settings2 className="size-3.5 text-cyan" />
-          </div>
+    <div className="glass-raised rounded-xl p-5">
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
           <h3
             className="text-sm font-semibold tracking-wide uppercase"
             style={{ fontFamily: "var(--font-display)" }}
           >
-            Agent Controls
+            Trade settings
           </h3>
+          <p className="mt-0.5 text-[11px] text-text-muted">
+            Size, count, slippage, gas, stop and take-profit. Applies immediately.
+          </p>
         </div>
         <span
-          className="text-[10px] text-text-muted font-medium"
+          className="shrink-0 rounded-md border border-border-dim bg-void/50 px-2 py-0.5 text-[10px] text-text-muted"
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          changes apply next cycle
+          {(config?.mode || "paper").toUpperCase()} · {quote}
         </span>
       </div>
 
-      {/* Strategy preset selector */}
-      <StrategySelector
-        value={strategy}
-        disabled={!connected}
-        onChange={(v) => {
-          setStrategy(v);
-          setDirty(true);
-          setMessage(null);
-        }}
-      />
-
-      {/* Controls Grid */}
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 mb-4">
-        <ReadonlyField
-          label="Mode"
-          value={config?.mode?.toUpperCase() || "PAPER"}
-          hint="Set via AGENT_MODE env"
-        />
-        <ControlInput
-          label="Max Position ($)"
-          hint="Max USD per single trade"
-          value={maxPos}
-          onChange={markDirty(setMaxPos)}
-          min={5}
-          max={10000}
-          step={5}
-          disabled={!connected}
-          unit="USD"
-        />
-        <ControlInput
-          label="Trade Interval"
-          hint="Minutes between cycles"
-          value={interval}
-          onChange={markDirty(setInterval_)}
-          min={0.5}
-          max={60}
-          step={0.5}
-          disabled={!connected}
-          unit="min"
-        />
-        <ControlInput
-          label="Max Drawdown"
-          hint="DQ at 30% — keep ≤ 25"
-          value={drawdown}
-          onChange={markDirty(setDrawdown)}
-          min={5}
-          max={30}
-          step={1}
-          disabled={!connected}
-          unit="%"
-        />
-        <ControlInput
-          label="Slippage"
-          hint="Max slippage per swap"
-          value={slippage}
-          onChange={markDirty(setSlippage)}
-          min={0.1}
-          max={10}
-          step={0.1}
-          disabled={!connected}
-          unit="%"
-        />
-        <ControlInput
-          label="Max Daily Trades"
-          hint="Trades per day cap"
-          value={maxDaily}
-          onChange={markDirty(setMaxDaily)}
-          min={1}
-          max={50}
-          step={1}
-          disabled={!connected}
-        />
-        <ControlInput
-          label="Max Positions"
-          hint="Concurrent token positions"
-          value={maxPositions}
-          onChange={markDirty(setMaxPositions)}
-          min={1}
-          max={20}
-          step={1}
-          disabled={!connected}
-        />
-        <ReadonlyField
-          label="Swap Currencies"
-          value={(config?.swapCurrencies || ["USDT"]).join(" + ")}
-          hint={`All buys and sells use USDT only; BNB reserved for gas`}
-        />
-        <ReadonlyField
-          label="Risk Guard"
-          value={`${drawdown}%`}
-          hint="New buys pause near limit"
-          color="text-neon"
-        />
+      <div className="mb-4 rounded-lg border border-border-dim bg-void/40 px-3 py-2 text-[11px] text-text-secondary tabular-nums">
+        Each buy ≤ ${maxPos} · up to {maxPositions} names · cut −{stopLoss}% · take +{takeProfit}%
       </div>
 
-      {/* Save bar */}
-      <div className="flex items-center gap-3 pt-4 border-t border-border-dim">
+      <section className="mb-4">
+        <p className="mb-2 text-[10px] uppercase tracking-[0.16em] text-text-muted">Position</p>
+        <div className="grid grid-cols-2 gap-3">
+          <SettingField
+            label="Max size"
+            hint="per name"
+            value={maxPos}
+            onChange={markDirty(setMaxPos)}
+            min={5}
+            max={10000}
+            step={5}
+            disabled={!connected}
+            unit="USD"
+            presets={[50, 100, 250]}
+            accent="cyan"
+          />
+          <SettingField
+            label="Max names"
+            hint="open at once"
+            value={maxPositions}
+            onChange={markDirty(setMaxPositions)}
+            min={1}
+            max={20}
+            step={1}
+            disabled={!connected}
+            presets={[2, 3, 4, 6]}
+          />
+        </div>
+      </section>
+
+      <section className="mb-4">
+        <div className="mb-2 flex items-center justify-between">
+          <p className="text-[10px] uppercase tracking-[0.16em] text-text-muted">Exits</p>
+          <span
+            className={cn(
+              "text-[10px] tabular-nums font-medium",
+              rewardRisk >= 1.5 ? "text-neon" : rewardRisk >= 1 ? "text-warning" : "text-danger"
+            )}
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
+            {rewardRisk.toFixed(1)}R
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+          <SettingField
+            label="Stop-loss"
+            hint="cut loser"
+            value={stopLoss}
+            onChange={markDirty(setStopLoss)}
+            min={1}
+            max={40}
+            step={0.5}
+            disabled={!connected}
+            unit="%"
+            presets={[5, 8, 12]}
+            accent="danger"
+          />
+          <SettingField
+            label="Take-profit"
+            hint="lock gain"
+            value={takeProfit}
+            onChange={markDirty(setTakeProfit)}
+            min={1}
+            max={80}
+            step={0.5}
+            disabled={!connected}
+            unit="%"
+            presets={[10, 14, 20]}
+            accent="neon"
+          />
+        </div>
+        <div className="mt-3">
+          <div className="relative h-1.5 overflow-hidden rounded-full bg-surface-overlay">
+            <div className="absolute inset-y-0 left-0 bg-danger/45" style={{ width: `${slShare}%` }} />
+            <div className="absolute inset-y-0 right-0 bg-neon/40" style={{ width: `${100 - slShare}%` }} />
+            <div
+              className="absolute top-1/2 size-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-text-primary bg-text-primary"
+              style={{ left: `${slShare}%` }}
+            />
+          </div>
+          <div className="mt-1 flex justify-between text-[9px] uppercase tracking-wide text-text-muted">
+            <span className="text-danger/80">−{stopLoss}%</span>
+            <span>entry</span>
+            <span className="text-neon/80">+{takeProfit}%</span>
+          </div>
+        </div>
+      </section>
+
+      <section className="mb-4">
+        <p className="mb-2 text-[10px] uppercase tracking-[0.16em] text-text-muted">Execution</p>
+        <div className="grid grid-cols-2 gap-3">
+          <SettingField
+            label="Slippage"
+            hint="swap tolerance"
+            value={slippage}
+            onChange={markDirty(setSlippage)}
+            min={0.1}
+            max={10}
+            step={0.1}
+            disabled={!connected}
+            unit="%"
+            presets={[0.5, 1, 2]}
+            accent="warning"
+          />
+          <SettingField
+            label="Gas reserve"
+            hint="keep in BNB"
+            value={gasReserve}
+            onChange={markDirty(setGasReserve)}
+            min={0.5}
+            max={50}
+            step={0.5}
+            disabled={!connected}
+            unit="USD"
+            presets={[1, 1.5, 3]}
+          />
+        </div>
+      </section>
+
+      <div className="flex items-center gap-3 border-t border-border-dim pt-3">
         <button
+          type="button"
           onClick={handleSave}
           disabled={!connected || saving || !dirty}
           className={cn(
-            "flex items-center gap-2 px-5 py-2.5 rounded-lg text-xs font-semibold transition-all",
+            "flex items-center gap-2 rounded-lg px-4 py-2 text-[11px] font-semibold border transition-colors",
             dirty
-              ? "bg-neon/15 text-neon border border-neon/25 hover:bg-neon/25"
-              : "bg-surface-overlay text-text-muted border border-border-dim cursor-not-allowed"
+              ? "border-neon/40 bg-neon/10 text-neon hover:bg-neon/15"
+              : "border-border-dim text-text-muted cursor-not-allowed"
           )}
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          {saving ? (
-            <RotateCcw className="size-3.5 animate-spin" />
-          ) : (
-            <Save className="size-3.5" />
-          )}
-          {saving ? "SAVING..." : "SAVE CONFIG"}
+          {saving ? <RotateCcw className="size-3.5 animate-spin" /> : <Save className="size-3.5" />}
+          {saving ? "SAVING" : "APPLY"}
         </button>
-
         {dirty && (
           <button
-            onClick={handleReset}
-            className="text-[11px] text-text-muted hover:text-text-secondary transition-colors px-2 py-1"
-            style={{ fontFamily: "var(--font-mono)" }}
+            type="button"
+            onClick={() => {
+              if (config) applyConfig(config);
+              setDirty(false);
+              setMessage(null);
+            }}
+            className="text-[11px] text-text-muted hover:text-text-secondary"
           >
             Reset
           </button>
         )}
-
         {message && (
-          <span
-            className={cn(
-              "flex items-center gap-1.5 text-[11px] font-medium",
-              message.ok ? "text-neon" : "text-danger"
-            )}
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {message.ok ? (
-              <Check className="size-3" />
-            ) : (
-              <AlertTriangle className="size-3" />
-            )}
+          <span className={cn("flex items-center gap-1.5 text-[11px]", message.ok ? "text-neon" : "text-danger")}>
+            {message.ok ? <Check className="size-3" /> : <AlertTriangle className="size-3" />}
             {message.text}
           </span>
         )}
       </div>
-    </motion.div>
+    </div>
   );
 }

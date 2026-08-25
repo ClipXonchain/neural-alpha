@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { motion } from "framer-motion";
 import {
   Activity,
@@ -7,12 +8,11 @@ import {
   Eye,
   Play,
   Radio,
-  Settings,
   Square,
-  Zap,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { AgentState } from "@/lib/mock-data";
+import { clockSession, formatNyTime, sessionLabel } from "@/lib/session";
 
 interface HeaderProps {
   state: AgentState;
@@ -23,34 +23,42 @@ interface HeaderProps {
   readOnly?: boolean;
 }
 
+function useNyTick() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return now;
+}
+
 export function Header({ state, onStart, onStop, connected, readOnly }: HeaderProps) {
   const auto = state.autonomous;
   const isRunning = connected && state.status === "running";
   const showOffline = connected === false;
+  const now = useNyTick();
+  const session = clockSession(now);
+  const ny = formatNyTime(now);
 
   const statusLabel = showOffline
     ? "OFFLINE"
     : !isRunning
       ? "STOPPED"
-      : auto.phase === "warming"
-        ? "WARMING UP"
-        : auto.phase === "scanning"
-          ? "SCANNING"
-          : auto.phase === "blocked"
-            ? "BLOCKED"
-            : "RUNNING";
+      : auto.phase === "scanning"
+        ? "SCANNING"
+        : auto.phase === "blocked"
+          ? "BLOCKED"
+          : "RUNNING";
 
   const statusColor = showOffline
     ? "danger"
     : auto.phase === "blocked"
       ? "danger"
-      : auto.phase === "warming"
-        ? "warning"
-        : auto.phase === "scanning"
-          ? "cyan"
-          : isRunning
-            ? "neon"
-            : "warning";
+      : auto.phase === "scanning"
+        ? "cyan"
+        : isRunning
+          ? "neon"
+          : "warning";
 
   const uptimeHrs = Math.floor(state.uptime / 3600);
   const uptimeMin = Math.floor((state.uptime % 3600) / 60);
@@ -58,7 +66,6 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
   return (
     <header className="glass sticky top-0 z-50 flex items-center justify-between px-6 py-3">
       <div className="flex items-center gap-4">
-        {/* Logo */}
         <motion.div
           className="flex items-center gap-3"
           initial={{ opacity: 0, x: -20 }}
@@ -85,7 +92,6 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
           </div>
         </motion.div>
 
-        {/* Status Badge */}
         <motion.div
           initial={{ opacity: 0, scale: 0.8 }}
           animate={{ opacity: 1, scale: 1 }}
@@ -146,60 +152,41 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
       </div>
 
       <div className="flex items-center gap-3">
-        {/* Fear & Greed Badge */}
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          transition={{ delay: 0.4 }}
-          className="hidden lg:flex items-center gap-2 px-3 py-1.5 rounded-lg glass-raised text-xs font-mono"
-        >
-          {state.fearGreedIndex != null ? (
-            <>
-              <Zap
-                className={cn(
-                  "size-3",
-                  state.fearGreedIndex < 30
-                    ? "text-danger"
-                    : state.fearGreedIndex < 50
-                      ? "text-warning"
-                      : "text-neon"
-                )}
-              />
-              <span className="text-text-secondary">F&G</span>
-              <span
-                className={cn(
-                  "font-semibold",
-                  state.fearGreedIndex < 30
-                    ? "text-danger"
-                    : state.fearGreedIndex < 50
-                      ? "text-warning"
-                      : "text-neon"
-                )}
-              >
-                {state.fearGreedIndex}
-              </span>
-              <span className="text-text-muted">
-                {state.fearGreedIndex < 25
-                  ? "Extreme Fear"
-                  : state.fearGreedIndex < 45
-                    ? "Fear"
-                    : state.fearGreedIndex < 55
-                      ? "Neutral"
-                      : state.fearGreedIndex < 75
-                        ? "Greed"
-                        : "Extreme Greed"}
-              </span>
-            </>
-          ) : (
-            <>
-              <Zap className="size-3 text-text-muted" />
-              <span className="text-text-secondary">F&G</span>
-              <span className="text-text-muted">—</span>
-            </>
+          transition={{ delay: 0.3 }}
+          className={cn(
+            "hidden sm:flex items-center gap-2 px-3 py-1.5 rounded-lg glass-raised text-xs font-mono",
+            session === "rth" && "border-neon/25",
+            session === "close" && "border-cyan/30",
+            session === "overnight" && "border-warning/20"
           )}
+        >
+          <span
+            className={cn(
+              "size-1.5 rounded-full",
+              session === "rth" && "bg-neon",
+              session === "close" && "bg-cyan",
+              session === "overnight" && "bg-warning"
+            )}
+          />
+          <span
+            className={cn(
+              "font-semibold",
+              session === "rth" && "text-neon",
+              session === "close" && "text-cyan",
+              session === "overnight" && "text-warning"
+            )}
+          >
+            {sessionLabel(session)}
+          </span>
+          <span className="text-text-muted">{ny}</span>
+          <span className="text-text-muted">
+            {session === "rth" ? "cash open" : "cash closed"}
+          </span>
         </motion.div>
 
-        {/* Controls — hidden on public/read-only deployments */}
         {readOnly ? (
           <span
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg glass-raised text-[11px] font-mono text-text-muted"
@@ -208,33 +195,27 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
             <Eye className="size-3.5" /> MONITORING
           </span>
         ) : (
-          <>
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={isRunning ? onStop : onStart}
-              className={cn(
-                "flex items-center gap-2 px-4 py-2 rounded-lg font-mono text-xs font-semibold transition-all",
-                isRunning
-                  ? "bg-warning/10 text-warning border border-warning/30 hover:bg-warning/20"
-                  : "bg-neon/10 text-neon border border-neon/30 hover:bg-neon/20"
-              )}
-            >
-              {isRunning ? (
-                <>
-                  <Square className="size-3.5" /> STOP
-                </>
-              ) : (
-                <>
-                  <Play className="size-3.5" /> START
-                </>
-              )}
-            </motion.button>
-
-            <button className="flex items-center justify-center size-9 rounded-lg glass-raised text-text-secondary hover:text-text-primary transition-colors">
-              <Settings className="size-4" />
-            </button>
-          </>
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={isRunning ? onStop : onStart}
+            className={cn(
+              "flex items-center gap-2 px-4 py-2 rounded-lg font-mono text-xs font-semibold transition-all",
+              isRunning
+                ? "bg-warning/10 text-warning border border-warning/30 hover:bg-warning/20"
+                : "bg-neon/10 text-neon border border-neon/30 hover:bg-neon/20"
+            )}
+          >
+            {isRunning ? (
+              <>
+                <Square className="size-3.5" /> STOP
+              </>
+            ) : (
+              <>
+                <Play className="size-3.5" /> START
+              </>
+            )}
+          </motion.button>
         )}
       </div>
     </header>

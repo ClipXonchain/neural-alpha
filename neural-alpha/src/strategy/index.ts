@@ -1,37 +1,54 @@
 import type { MarketData, TradeSignal, AgentConfig } from "../utils/types.js";
-import { computeSignals, generateSignal } from "./signals.js";
+import { computeIndexRegime, computeSignals, generateSignal } from "./signals.js";
 import type { NewsSentiment } from "./news-sentiment.js";
+import { blendEquityAndCmc, type CmcMacroSnapshot } from "./cmc-macro.js";
 import { isStablecoin, isTradableToken } from "../config.js";
 import { logger } from "../utils/logger.js";
+import { getSessionClock } from "./session.js";
+import { getSessionProfile } from "./presets.js";
 
 /**
- * Strategy orchestrator — runs all market data through the signal
- * pipeline and returns ranked trade signals for the decision engine.
+ * Strategy orchestrator — runs all market data through the session-aware
+ * signal pipeline and returns ranked trade signals for the decision engine.
  */
 export function analyzeMarkets(
   markets: MarketData[],
-  fearGreedIndex: number | null,
   config: AgentConfig,
-  newsSentiment?: Map<string, NewsSentiment>
+  newsSentiment?: Map<string, NewsSentiment>,
+  cmcMacro?: CmcMacroSnapshot | null
 ): TradeSignal[] {
   const signals: TradeSignal[] = [];
+  const clock = getSessionClock(config.sessionPolicy);
+  const profile = getSessionProfile(clock.active);
+  const equity = computeIndexRegime(markets);
+  const regime = blendEquityAndCmc(equity, cmcMacro);
 
   for (const market of markets) {
     if (isStablecoin(market.symbol)) continue;
     if (!isTradableToken(market.symbol, market.price)) continue;
 
-    const technicals = computeSignals(market.symbol);
+    const technicals = computeSignals(market.symbol, market.price);
     const news = newsSentiment?.get(market.symbol) ?? null;
-    const signal = generateSignal(market, technicals, fearGreedIndex, news, config.strategy);
+    const signal = generateSignal(market, technicals, news, profile, regime, cmcMacro);
     signals.push(signal);
   }
 
-  // Sort by absolute score — strongest signals first
   signals.sort((a, b) => Math.abs(b.score) - Math.abs(a.score));
 
   const actionable = signals.filter((s) => s.action !== "hold");
   if (actionable.length > 0) {
     logger.info("Strategy analysis complete", {
+      session: clock.active,
+      policy: clock.policy,
+      regime,
+      cmc: cmcMacro
+        ? {
+            tape: cmcMacro.regime,
+            mcap24hPct: cmcMacro.mcap24hPct,
+            sizeScale: cmcMacro.sizeScale,
+            eventRisk: cmcMacro.eventRisk,
+          }
+        : null,
       total: markets.length,
       actionable: actionable.length,
       buys: actionable.filter((s) => s.action === "buy").length,
@@ -46,14 +63,11 @@ export function analyzeMarkets(
 }
 
 /**
- * Select the best trades to execute this cycle, respecting portfolio limits.
+ * Select the best trades this cycle.
  *
- * Holding policy: positions are HELD, not churned. We never sell an existing
- * position just to free a slot for a new entry. No duplicate buys into tokens
- * already held above the dust threshold (MIN_POSITION_VALUE_USD). Signal-driven
- * exits require a decisive `strong_sell` (clear reversal); mild weakness is held and left to
- * the protective exits (stop-loss / take-profit / trailing) to manage. When all
- * slots are full, new buys are simply skipped — no forced rotation.
+ * One new buy at a time — pick the strongest unused name, then wait
+ * (minBuyIntervalMs) before the next entry. Protective SL/TP sells are
+ * injected by the agent. Signal-driven exits require strong_sell.
  */
 export function selectTrades(
   signals: TradeSignal[],
@@ -61,9 +75,8 @@ export function selectTrades(
   existingPositions: Set<string>
 ): TradeSignal[] {
   const selected: TradeSignal[] = [];
+  const session = getSessionClock(config.sessionPolicy).active;
 
-  // Priority 1: close positions only on a decisive reversal (strong_sell).
-  // Protective exits (stop/TP/trailing) are injected separately by the agent.
   const sells = signals.filter(
     (s) =>
       s.action === "sell" &&
@@ -72,21 +85,30 @@ export function selectTrades(
   );
   selected.push(...sells);
 
-  // Priority 2: buys — only into genuinely free slots. A position leaving via
-  // a strong_sell this cycle frees its slot, but we never sell to make room.
-  const buys = signals.filter((s) => s.action === "buy");
+  let buys = signals.filter((s) => s.action === "buy");
+  if (session === "close") {
+    buys = [...buys].sort((a, b) => {
+      const aV = a.vwapDev ?? -99;
+      const bV = b.vwapDev ?? -99;
+      if (aV > 0 !== bV > 0) return aV > 0 ? -1 : 1;
+      return Math.abs(b.score) - Math.abs(a.score);
+    });
+  } else if (session === "overnight") {
+    buys = [...buys].sort((a, b) => {
+      const aGap = a.gapPct ?? 0;
+      const bGap = b.gapPct ?? 0;
+      return aGap - bGap;
+    });
+  }
+
   const openAfterSells = existingPositions.size - sells.length;
   const availableSlots = Math.max(0, config.maxPortfolioTokens - openAfterSells);
+  if (availableSlots <= 0) return selected;
 
-  let buysAdded = 0;
-  const maxBuysPerCycle = Math.max(0, config.maxAutonomousTradesPerCycle);
-  for (const buy of buys) {
-    if (existingPositions.has(buy.symbol)) continue;
-    if (buysAdded >= availableSlots) break;
-    if (buysAdded >= maxBuysPerCycle) break;
-    selected.push(buy);
-    buysAdded++;
-  }
+  const fresh = buys.filter((b) => !existingPositions.has(b.symbol));
+  const strong = fresh.filter((b) => b.strength === "strong_buy");
+  const pick = (strong.length > 0 ? strong : fresh)[0];
+  if (pick) selected.push(pick);
 
   return selected;
 }

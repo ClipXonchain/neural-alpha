@@ -38,18 +38,21 @@ export function EquityChart({ state }: { state: AgentState }) {
   const initialValue =
     last !== undefined ? Number((last.value - last.pnl).toFixed(2)) : 0;
   const values = data.map((d) => d.value);
-  const minValue = Math.min(...values, initialValue) * 0.995;
-  const maxValue = Math.max(...values, initialValue) * 1.005;
+  const minValue = values.length
+    ? Math.min(...values, initialValue) * 0.995
+    : 0;
+  const maxValue = values.length
+    ? Math.max(...values, initialValue) * 1.005
+    : 1;
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: 0.3 }}
+      transition={{ duration: 0.2 }}
       className="glass-raised rounded-xl p-5 col-span-full lg:col-span-3"
     >
-      <div className="flex items-center justify-between mb-4">
-        <div className="flex items-center gap-2">
+      <div className="flex items-center gap-2 mb-4">
           <TrendingUp className="size-4 text-cyan" />
           <h3
             className="text-sm font-semibold tracking-wide uppercase"
@@ -58,24 +61,13 @@ export function EquityChart({ state }: { state: AgentState }) {
             Equity Curve
           </h3>
         </div>
-        <div className="flex items-center gap-4 text-xs font-mono">
-          <button className="text-text-secondary hover:text-text-primary transition-colors">
-            1H
-          </button>
-          <button className="text-text-secondary hover:text-text-primary transition-colors">
-            6H
-          </button>
-          <button className="text-neon">24H</button>
-          <button className="text-text-secondary hover:text-text-primary transition-colors">
-            7D
-          </button>
-          <button className="text-text-secondary hover:text-text-primary transition-colors">
-            ALL
-          </button>
-        </div>
-      </div>
 
       <div className="h-[280px]">
+        {data.length === 0 ? (
+          <div className="h-full flex items-center justify-center text-[11px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
+            No NAV history yet
+          </div>
+        ) : (
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
             <defs>
@@ -91,7 +83,7 @@ export function EquityChart({ state }: { state: AgentState }) {
               tick={{ fontSize: 10, fill: "#848e9c", fontFamily: "IBM Plex Mono" }}
               axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
               tickLine={false}
-              interval={Math.floor(data.length / 8)}
+              interval={data.length > 8 ? Math.floor(data.length / 8) : 0}
             />
             <YAxis
               domain={[minValue, maxValue]}
@@ -121,18 +113,19 @@ export function EquityChart({ state }: { state: AgentState }) {
               stroke="#0ecb81"
               strokeWidth={2}
               fill="url(#equityGrad)"
-              animationDuration={2000}
+              animationDuration={800}
               animationEasing="ease-out"
               dot={false}
               activeDot={{
                 r: 4,
                 fill: "#0ecb81",
-                stroke: "#0b0e11",
+                stroke: "#050608",
                 strokeWidth: 2,
               }}
             />
           </AreaChart>
         </ResponsiveContainer>
+        )}
       </div>
     </motion.div>
   );

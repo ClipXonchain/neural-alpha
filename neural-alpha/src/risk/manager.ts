@@ -5,7 +5,7 @@ import { isUserBlacklisted } from "./token-blacklist.js";
 import { getLatestPrice } from "../data/market.js";
 import { PortfolioTracker } from "./portfolio.js";
 import { logger } from "../utils/logger.js";
-import { getTokenMomentumMetrics } from "../strategy/signals.js";
+import { getCmcMacro } from "../strategy/cmc-macro.js";
 
 export class RiskManager {
   private config: AgentConfig;
@@ -93,14 +93,8 @@ export class RiskManager {
       }
     }
 
-    // 5. Daily trade limit — autonomous pacing only. Manual (operator /
-    //    natural-language) commands override it: an explicit user trade should
-    //    always go through regardless of how many auto-trades ran today.
-    if (!opts.manual && dailyTradeCount >= this.config.maxDailyTrades) {
-      violations.push(
-        `Daily trade limit reached: ${dailyTradeCount}/${this.config.maxDailyTrades}`
-      );
-    }
+    // 5. Daily trade pacing removed — 24/7 on-chain, no campaign daily cap.
+
 
     // 6. Position size limit — autonomous only (assistant may size freely up to cash).
     if (
@@ -196,51 +190,10 @@ export class RiskManager {
     }
 
     const maxByConfig = this.config.maxPositionSizeUsd;
-    const maxByCash = this.portfolio.getSpendableCash() * 0.9; // Keep 10% reserve
-    const maxByAllocation = (this.portfolio.getSpendableCash() + this.estimatePositionsValue()) *
-      (signal.targetAllocationPct / 100);
-
-    let size = Math.min(maxByConfig, maxByCash, maxByAllocation);
-
-    // Scale by signal strength
-    const strengthMultiplier = {
-      strong_buy: 1.0,
-      buy: 0.6,
-      neutral: 0,
-      sell: 0,
-      strong_sell: 0,
-    }[signal.strength];
-
-    size *= strengthMultiplier;
-
-    // Scale by confidence
-    size *= signal.confidence;
-
-    // Strategy sizing aggressiveness (SafeTrade < Medium < Momentum)
-    size *= this.config.positionSizeMultiplier ?? 1;
-
-    // Volatility-weighted sizing: high ATR → slightly smaller positions
-    if (signal.action === "buy") {
-      const { atrPct } = getTokenMomentumMetrics(signal.symbol);
-      const baselineAtr = 2; // ~2% daily ATR baseline for mid-cap momentum
-      const volMultiplier = Math.min(
-        1.2,
-        Math.max(0.55, baselineAtr / Math.max(atrPct ?? baselineAtr, 0.5))
-      );
-      size *= volMultiplier;
-    }
-
-    // Small computed sizes on tiny accounts: use minimum trade if cash allows.
-    if (
-      signal.action === "buy" &&
-      size > 0 &&
-      size < this.config.minTradeAmountUsd &&
-      this.portfolio.getSpendableCash() >= this.config.minTradeAmountUsd
-    ) {
-      size = this.config.minTradeAmountUsd;
-    }
-
-    return Math.max(0, Math.round(size * 100) / 100);
+    const cash = this.portfolio.getSpendableCash();
+    const cmcScale = getCmcMacro()?.sizeScale ?? 1;
+    const scaled = cmcScale > 0 ? maxByConfig * Math.min(1.25, cmcScale) : maxByConfig;
+    return Math.max(0, Math.round(Math.min(scaled, cash) * 100) / 100);
   }
 
   /**
@@ -261,7 +214,6 @@ export class RiskManager {
       drawdownPct: Math.round(this.portfolio.getMaxDrawdown() * 10) / 10,
       maxDrawdownLimit: this.config.maxDrawdownPct,
       dailyTrades: this.portfolio.getTodayTradeCount(),
-      maxDailyTrades: this.config.maxDailyTrades,
       cashUsd: Math.round(this.portfolio.cash * 100) / 100,
       spendableCashUsd: Math.round(this.portfolio.getSpendableCash() * 100) / 100,
       spendableBnbUsd: Math.round(this.portfolio.getSpendableBnbUsd() * 100) / 100,
@@ -269,13 +221,5 @@ export class RiskManager {
       maxPositions: this.config.maxPortfolioTokens,
       emergencyMode: this.isEmergencyMode(),
     };
-  }
-
-  private estimatePositionsValue(): number {
-    let total = 0;
-    for (const pos of this.portfolio.getAllPositions().values()) {
-      total += pos.amount * pos.avgEntryPrice;
-    }
-    return total;
   }
 }

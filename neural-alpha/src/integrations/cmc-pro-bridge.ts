@@ -34,10 +34,9 @@ async function cmcFetch(path: string, apiKey: string): Promise<Record<string, un
 
 /**
  * Bridge that fetches real market data from CMC Pro API (traditional API key auth)
- * while still routing execution through TWAK MCP or paper simulation.
+ * while still routing execution through Binance Agentic Wallet or paper simulation.
  *
- * Best of both worlds: real CMC data without needing x402 / funded TWAK wallet.
- * The CMC hackathon team provides free Pro API keys to participants.
+ * Best of both worlds: CMC sentiment without needing x402 for every quote.
  */
 export function createCmcProBridge(apiKey: string): McpBridge {
   return {
@@ -70,6 +69,7 @@ export function createCmcProBridge(apiKey: string): McpBridge {
       return {
         txHash: `paper-${Date.now()}`,
         toAmount: "0",
+        success: true,
       };
     },
 
@@ -80,11 +80,6 @@ export function createCmcProBridge(apiKey: string): McpBridge {
     async x402Request(url: string, _maxPayment: string) {
       const parsed = new URL(url);
       let path = parsed.pathname + parsed.search;
-
-      // Translate Agent Hub paths → CMC Pro API paths where they differ
-      if (path.includes("/global-metrics/fear-and-greed")) {
-        path = "/v3/fear-and-greed/latest";
-      }
 
       const raw = await cmcFetch(path, apiKey);
       return raw;

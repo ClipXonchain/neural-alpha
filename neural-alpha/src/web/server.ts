@@ -5,13 +5,11 @@ import type { TradingAgent, AgentState } from "../agent.js";
 import { addLogListener, removeLogListener, type LogListener } from "../utils/logger.js";
 import { logger } from "../utils/logger.js";
 import type { LogEntry } from "../utils/types.js";
-import { executeCommand } from "../commands/handler.js";
 
 const DASHBOARD_PORT = parseInt(process.env.DASHBOARD_PORT || "3847", 10);
 const API_SECRET = process.env.API_SECRET?.trim();
 const MAX_BODY_BYTES = 64 * 1024; // 64 KB
 const MAX_SSE_CLIENTS = 20;
-const MAX_COMMAND_LENGTH = 500;
 
 const ALLOWED_ORIGINS = (() => {
   const env = process.env.CORS_ORIGINS?.trim();
@@ -94,7 +92,7 @@ function startStateBroadcast() {
       const state = agentRef.getStateSnapshot();
       broadcast("state", state);
     } catch { /* don't crash on state errors */ }
-  }, 2000);
+  }, 1000);
 }
 
 function getClientIp(req: IncomingMessage): string {
@@ -206,21 +204,26 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
     return true;
   }
 
-  if (url === "/api/command" && req.method === "POST") {
+  if (url === "/api/control/sell" && req.method === "POST") {
     if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
     readBody(req)
       .then((body) => {
         try {
-          const { command } = JSON.parse(body) as { command: string };
-          if (!command || typeof command !== "string") {
-            return json(req, res, { error: "command field required" }, 400);
+          const { symbol } = JSON.parse(body) as { symbol?: string };
+          if (!symbol || typeof symbol !== "string") {
+            return json(req, res, { error: "symbol field required" }, 400);
           }
-          if (command.length > MAX_COMMAND_LENGTH) {
-            return json(req, res, { error: `command exceeds ${MAX_COMMAND_LENGTH} chars` }, 400);
-          }
-          executeCommand(agentRef!, command)
-            .then((result) => json(req, res, result))
-            .catch((e) => json(req, res, { ok: false, intent: "error", message: safeErrorMessage(e) }, 500));
+          agentRef!.sellPosition(symbol)
+            .then((result) => {
+              json(req, res, {
+                ok: Boolean(result.result?.success),
+                message: result.message,
+                violations: result.violations,
+                tradeSizeUsd: result.tradeSizeUsd,
+                txHash: result.result?.txHash,
+              });
+            })
+            .catch((e) => json(req, res, { ok: false, error: safeErrorMessage(e) }, 500));
         } catch {
           json(req, res, { error: "Invalid JSON" }, 400);
         }
@@ -299,11 +302,55 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
 
   if (url === "/api/competition/status" && req.method === "GET") {
     if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
-    agentRef.getWalletInfo().then((w) => json(req, res, {
-      registered: w.registered,
-      registrationOpen: w.registrationOpen,
-      address: w.address,
-    })).catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
+    json(req, res, agentRef.getCampaignStatus());
+    return true;
+  }
+
+  if (url === "/api/wallet/signin" && req.method === "POST") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    agentRef.startWalletSignin().then((r) => json(req, res, r)).catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
+    return true;
+  }
+
+  if (url === "/api/wallet/verify" && req.method === "POST") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    readBody(req)
+      .then((body) => {
+        try {
+          const { qrCodeId } = JSON.parse(body) as { qrCodeId?: string };
+          if (!qrCodeId) return json(req, res, { error: "qrCodeId required" }, 400);
+          agentRef!.verifyWalletSignin(qrCodeId)
+            .then((r) => json(req, res, r))
+            .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
+        } catch {
+          json(req, res, { error: "Invalid JSON" }, 400);
+        }
+      })
+      .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 413));
+    return true;
+  }
+
+  if (url === "/api/campaign/ai-tasks" && req.method === "POST") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    readBody(req)
+      .then((body) => {
+        let opts: { cmc?: boolean; studio?: boolean; tickers?: string[] } = {};
+        try {
+          if (body.trim()) opts = JSON.parse(body) as typeof opts;
+        } catch {
+          return json(req, res, { error: "Invalid JSON" }, 400);
+        }
+        agentRef!.runCampaignAiTasks(opts)
+          .then((r) => json(req, res, r))
+          .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
+      })
+      .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 413));
+    return true;
+  }
+
+  if (url === "/api/campaign/studio-job" && req.method === "GET") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    agentRef.pollCampaignStudioJob().then((r) => json(req, res, r ?? { status: "none" })).catch((e) => json(req, res, { error: safeErrorMessage(e) }, 500));
     return true;
   }
 
@@ -375,12 +422,13 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
             return json(req, res, { error: "body must be a JSON object" }, 400);
           }
           const ALLOWED_CONFIG_KEYS = new Set([
-            "tradeIntervalMs", "maxPositionSizeUsd", "maxDailyTrades",
-            "maxDrawdownPct", "slippageTolerance", "maxPortfolioTokens",
-            "minTradeAmountUsd", "minBuyConfidence", "stopLossPct", "takeProfitPct",
-            "trailingActivatePct", "trailingGivebackPct", "autoExitEnabled",
-            "protectiveExitCheckMs", "signalRefreshMs",
-            "maxAutonomousTradesPerCycle", "maxOnChainTxPerDay", "strategy",
+            "maxPositionSizeUsd", "maxPortfolioTokens",
+            "slippageTolerance", "minGasReserveUsd",
+            "stopLossPct", "takeProfitPct", "autoExitEnabled",
+            "tradeIntervalMs", "maxDrawdownPct", "minTradeAmountUsd",
+            "minBuyConfidence", "trailingActivatePct", "trailingGivebackPct",
+            "protectiveExitCheckMs", "signalRefreshMs", "sessionPolicy",
+            "minBuyIntervalMs",
           ]);
           const disallowed = Object.keys(updates).filter((k) => !ALLOWED_CONFIG_KEYS.has(k));
           if (disallowed.length > 0) {
@@ -463,7 +511,7 @@ export function startDashboard(agent: TradingAgent) {
     res.end("Not found");
   });
 
-  // Trades + wallet sync can take 1–3 min (TWAK quote, approval, on-chain swap).
+  // Trades + wallet sync can take 1–3 min (quote, Agentic Wallet swap, on-chain confirm).
   const HTTP_IDLE_TIMEOUT_MS = 300_000;
   server.keepAliveTimeout = HTTP_IDLE_TIMEOUT_MS + 5_000;
   server.headersTimeout = HTTP_IDLE_TIMEOUT_MS + 10_000;

@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 import type { MarketData, TechnicalSignals, TradeSignal } from "../utils/types.js";
 import { logger } from "../utils/logger.js";
+import { getCmcMacro } from "./cmc-macro.js";
 
 export interface AiSignalInsight {
   symbol: string;
@@ -51,6 +52,9 @@ function formatTechnicals(t: TechnicalSignals, price: number): Record<string, un
     ema26: t.ema?.slow ?? null,
     bollingerPosition: bbPos,
     atr: t.atr ?? null,
+    atrPct: t.atrPct ?? null,
+    stochRsi: t.stochRsi !== null ? Math.round(t.stochRsi * 10) / 10 : null,
+    gapPct: t.gapPct ?? null,
     volumeRatio: t.volumeRatio !== null ? Math.round(t.volumeRatio * 100) / 100 : null,
   };
 }
@@ -58,8 +62,7 @@ function formatTechnicals(t: TechnicalSignals, price: number): Record<string, un
 function buildPayload(
   signals: TradeSignal[],
   markets: Map<string, MarketData>,
-  technicals: Map<string, TechnicalSignals>,
-  fearGreed: number | null
+  technicals: Map<string, TechnicalSignals>
 ) {
   return signals.map((s) => {
     const m = markets.get(s.symbol);
@@ -129,8 +132,7 @@ const ANALYSIS_TOOL: OpenAI.ChatCompletionTool = {
 export async function enrichSignalsWithAi(
   signals: TradeSignal[],
   markets: MarketData[],
-  technicalsBySymbol: Map<string, TechnicalSignals>,
-  fearGreed: number | null
+  technicalsBySymbol: Map<string, TechnicalSignals>
 ): Promise<Map<string, AiSignalInsight>> {
   const results = new Map<string, AiSignalInsight>();
   if (!isEnabled()) return results;
@@ -144,12 +146,14 @@ export async function enrichSignalsWithAi(
   if (candidates.length === 0) return results;
 
   const marketMap = new Map(markets.map((m) => [m.symbol, m]));
-  const payload = buildPayload(candidates, marketMap, technicalsBySymbol, fearGreed);
+  const payload = buildPayload(candidates, marketMap, technicalsBySymbol);
+  const cmc = getCmcMacro();
 
-  const system = `You are a crypto technical analyst for Neural Alpha, an autonomous BSC trading agent.
-Analyze each token using the provided indicators and rule-based signal.
+  const system = `You are a bStock technical analyst for Neural Alpha, a 24/7 on-chain US stock trading agent on BNB Smart Chain.
+Analyze each tokenized stock using the provided indicators and rule-based signal.
+Respect US session context (RTH vs overnight gaps) when mentioned in reasons.
+Use the CMC crypto-macro overlay as a risk-on/risk-off filter, not as a stock picker.
 Be concise and actionable. Flag contradictions (e.g. buy signal but bearish MACD + overbought RSI).
-Fear & Greed index: ${fearGreed ?? "unknown"} (0=extreme fear, 100=extreme greed).
 Do not invent prices or indicators not in the data.
 Always call submit_ta_analysis with one entry per token.`;
 
@@ -161,7 +165,14 @@ Always call submit_ta_analysis with one entry per token.`;
         { role: "system", content: system },
         {
           role: "user",
-          content: `Analyze these tokens:\n${JSON.stringify(payload, null, 2)}`,
+          content: `CMC overlay: ${cmc ? JSON.stringify({
+            regime: cmc.regime,
+            mcap24hPct: cmc.mcap24hPct,
+            mcap7dPct: cmc.mcap7dPct,
+            sizeScale: cmc.sizeScale,
+            eventRisk: cmc.eventRisk,
+            eventHint: cmc.eventHint,
+          }) : "unavailable"}\n\nAnalyze these tokens:\n${JSON.stringify(payload, null, 2)}`,
         },
       ],
       tools: [ANALYSIS_TOOL],
@@ -239,14 +250,12 @@ export function isAiAnalysisEnabled(): boolean {
 export async function analyzeSingleSignal(
   signal: TradeSignal,
   market: MarketData,
-  technicals: TechnicalSignals,
-  fearGreed: number | null
+  technicals: TechnicalSignals
 ): Promise<AiSignalInsight | null> {
   const map = await enrichSignalsWithAi(
     [signal],
     [market],
-    new Map([[signal.symbol, technicals]]),
-    fearGreed
+    new Map([[signal.symbol, technicals]])
   );
   return map.get(signal.symbol.toUpperCase()) ?? null;
 }
