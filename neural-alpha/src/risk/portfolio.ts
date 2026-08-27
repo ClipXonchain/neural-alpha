@@ -11,6 +11,9 @@ const FUNDING_TOKENS = new Set([
   "USDT", "USDC", "U", "USD1", "BNB", "BUSD", "DAI", "FDUSD", "TUSD",
 ]);
 
+/** Cap in-memory NAV history so dashboard SSE cannot grow without bound. */
+const MAX_NAV_POINTS = 240;
+
 /** Buy = funding → asset. Sell = asset → funding. Skip USDT↔BNB and asset↔asset. */
 function classifyAssetTrade(fromToken: string, toToken: string): "buy" | "sell" | null {
   const from = fromToken.toUpperCase();
@@ -860,6 +863,32 @@ export class PortfolioTracker {
       trailingActivatePct?: number;
     }
   ): PortfolioSnapshot {
+    const snap = this.buildSnapshot(currentPrices, exitRules);
+    this.snapshots.push(this.toNavPoint(snap));
+    this.trimSnapshots();
+    return snap;
+  }
+
+  /** Live NAV / exits without appending to the equity-curve history. */
+  peekSnapshot(
+    currentPrices: Map<string, number>,
+    exitRules?: {
+      stopLossPct: number;
+      takeProfitPct: number;
+      trailingActivatePct?: number;
+    }
+  ): PortfolioSnapshot {
+    return this.buildSnapshot(currentPrices, exitRules);
+  }
+
+  private buildSnapshot(
+    currentPrices: Map<string, number>,
+    exitRules?: {
+      stopLossPct: number;
+      takeProfitPct: number;
+      trailingActivatePct?: number;
+    }
+  ): PortfolioSnapshot {
     const positionSnapshots: PortfolioPosition[] = [];
     let positionsValueUsd = 0;
     const slPct = exitRules?.stopLossPct ?? 0;
@@ -921,7 +950,7 @@ export class PortfolioTracker {
     const tradedCost = costOpen + closed.costClosed;
     const assetPnl = closed.realizedPnl + unrealizedPnl;
 
-    const snap: PortfolioSnapshot = {
+    return {
       timestamp: Date.now(),
       totalValueUsd,
       cashUsd: this.cashUsd,
@@ -937,9 +966,60 @@ export class PortfolioTracker {
       maxDrawdownPct: drawdownPct,
       tradeCount: this.tradeHistory.length,
     };
+  }
 
-    this.snapshots.push(snap);
-    return snap;
+  private toNavPoint(snap: PortfolioSnapshot): PortfolioSnapshot {
+    return {
+      timestamp: snap.timestamp,
+      totalValueUsd: snap.totalValueUsd,
+      cashUsd: snap.cashUsd,
+      positions: [],
+      dailyPnl: snap.dailyPnl,
+      totalPnl: snap.totalPnl,
+      totalPnlPct: snap.totalPnlPct,
+      realizedPnl: snap.realizedPnl,
+      ...(snap.initialNavUsd != null ? { initialNavUsd: snap.initialNavUsd } : {}),
+      gasReserveUsd: snap.gasReserveUsd,
+      maxDrawdownPct: snap.maxDrawdownPct,
+      tradeCount: snap.tradeCount,
+    };
+  }
+
+  private trimSnapshots() {
+    const n = this.snapshots.length;
+    if (n === 0) return;
+
+    const compact = (s: PortfolioSnapshot) =>
+      s.positions.length > 0 ? this.toNavPoint(s) : s;
+
+    if (n <= MAX_NAV_POINTS) {
+      if (this.snapshots.some((s) => s.positions.length > 0)) {
+        this.snapshots = this.snapshots.map(compact);
+      }
+      return;
+    }
+
+    const step = n / MAX_NAV_POINTS;
+    const next: PortfolioSnapshot[] = [];
+    for (let i = 0; i < MAX_NAV_POINTS - 1; i++) {
+      next.push(compact(this.snapshots[Math.min(n - 1, Math.floor(i * step))]!));
+    }
+    next.push(compact(this.snapshots[n - 1]!));
+    this.snapshots = next;
+  }
+
+  /** Downsampled equity points for the dashboard chart — never full position history. */
+  getChartPoints(): Array<{
+    timestamp: number;
+    totalValueUsd: number;
+    maxDrawdownPct: number;
+  }> {
+    this.trimSnapshots();
+    return this.snapshots.map((s) => ({
+      timestamp: s.timestamp,
+      totalValueUsd: Math.round(s.totalValueUsd * 100) / 100,
+      maxDrawdownPct: Math.round(s.maxDrawdownPct * 100) / 100,
+    }));
   }
 
   getMaxDrawdown(): number {
@@ -966,6 +1046,7 @@ export class PortfolioTracker {
   }
 
   getSnapshots(): PortfolioSnapshot[] {
+    this.trimSnapshots();
     return [...this.snapshots];
   }
 

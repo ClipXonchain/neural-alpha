@@ -17,12 +17,34 @@ import dynamic from "next/dynamic";
 
 const EquityChart = dynamic(
   () => import("@/components/dashboard/EquityChart").then((m) => m.EquityChart),
-  { ssr: false }
+  { ssr: false, loading: () => <div className="lg:col-span-3 min-h-[260px] rounded-xl bg-surface border border-border-dim" /> }
 );
 const AllocationChart = dynamic(
   () => import("@/components/dashboard/AllocationChart").then((m) => m.AllocationChart),
-  { ssr: false }
+  { ssr: false, loading: () => <div className="lg:col-span-2 min-h-[260px] rounded-xl bg-surface border border-border-dim" /> }
 );
+
+function DashboardSkeleton() {
+  return (
+    <div className="min-h-screen bg-void">
+      <div className="h-[57px] border-b border-border-dim bg-surface" />
+      <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
+        <div className="h-16 rounded-xl bg-surface border border-border-dim animate-pulse" />
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div key={i} className="h-24 rounded-xl bg-surface border border-border-dim animate-pulse" />
+          ))}
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+          <div className="lg:col-span-3 h-[260px] rounded-xl bg-surface border border-border-dim animate-pulse" />
+          <div className="lg:col-span-2 h-[260px] rounded-xl bg-surface border border-border-dim animate-pulse" />
+        </div>
+        <div className="h-48 rounded-xl bg-surface border border-border-dim animate-pulse" />
+        <p className="text-center text-xs font-mono text-text-muted">Connecting to agent…</p>
+      </main>
+    </div>
+  );
+}
 
 export default function DashboardPage() {
   const readOnly = useReadOnly();
@@ -45,13 +67,7 @@ export default function DashboardPage() {
   } = useAgentConnection();
 
   if (loading || !state) {
-    return (
-      <div className="min-h-screen bg-void flex items-center justify-center">
-        <p className="text-sm font-mono text-text-muted animate-pulse">
-          Connecting to agent...
-        </p>
-      </div>
-    );
+    return <DashboardSkeleton />;
   }
 
   return (

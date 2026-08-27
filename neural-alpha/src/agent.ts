@@ -173,6 +173,8 @@ export class TradingAgent {
   private lastSignalRefreshAt = 0;
   private lastFullScanAt = 0;
   private lastNewsFetchedAt = 0;
+  /** Reuse dashboard JSON for ~1s so SSE + /api/state don't recompute indicators. */
+  private stateCache: { at: number; value: AgentState } | null = null;
   /** Independent SL/TP/trailing check (decoupled from trade cycle). */
   private protectiveExitTimer: ReturnType<typeof setInterval> | undefined;
   private protectiveExitInProgress = false;
@@ -2676,6 +2678,16 @@ export class TradingAgent {
    * Full agent state snapshot for dashboard / API consumers.
    */
   getStateSnapshot(): AgentState {
+    const now = Date.now();
+    if (this.stateCache && now - this.stateCache.at < 750) {
+      return this.stateCache.value;
+    }
+    const value = this.buildStateSnapshot();
+    this.stateCache = { at: now, value };
+    return value;
+  }
+
+  private buildStateSnapshot(): AgentState {
     // Report the full set of analyzed tokens (watchlist + every token scored in
     // the last cycle, including full-scan promotions), not just the
     // 15-token trading watchlist — so the dashboard can show all of them.
@@ -2705,13 +2717,14 @@ export class TradingAgent {
         ...userBlacklisted,
       ]),
     ];
+    const reportSet = new Set(reportSymbols);
 
-    const portfolioSnap = this.portfolio.snapshot(currentPrices, {
+    const portfolioSnap = this.portfolio.peekSnapshot(currentPrices, {
       stopLossPct: this.config.stopLossPct,
       takeProfitPct: this.config.takeProfitPct,
       trailingActivatePct: this.config.trailingActivatePct,
     });
-    const snapshots = this.portfolio.getSnapshots();
+    const snapshots = this.portfolio.getChartPoints();
 
     const tokenMetrics: Record<string, {
       momentum: number | null;
@@ -2740,9 +2753,13 @@ export class TradingAgent {
       const sig = this.lastSignals.get(symbol);
       const stored = this.lastTradeSignals.get(symbol);
       const news = this.lastNewsSentiment.get(symbol);
-      const tech = computeSignals(symbol, currentPrices.get(symbol));
       const display = getTokenDisplayMetrics(symbol, currentPrices.get(symbol));
       const ai = this.lastAiInsights.get(symbol.toUpperCase());
+      const summary = ai?.summary
+        ? ai.summary.length > 180
+          ? `${ai.summary.slice(0, 177)}...`
+          : ai.summary
+        : undefined;
       tokenMetrics[symbol] = {
         momentum,
         atrPct: stored?.atrPct ?? atrPct,
@@ -2751,7 +2768,7 @@ export class TradingAgent {
         confidence: this.lastSignalConfidence.get(symbol) ?? null,
         newsScore: news?.score ?? null,
         newsArticles: news?.articles ?? 0,
-        rsi: tech.rsi !== null ? Math.round(tech.rsi * 10) / 10 : null,
+        rsi: display.rsi,
         macd: display.macdPct !== null ? Math.round(display.macdPct * 100) / 100 : null,
         bbPosition:
           display.bbPosition !== null ? Math.round(display.bbPosition * 10) / 10 : null,
@@ -2762,19 +2779,40 @@ export class TradingAgent {
         session: stored?.session,
         regime: stored?.regime,
         ohlcvReal: hasRealHistory(symbol),
-        ...(ai
+        ...(summary
           ? {
-              aiSummary: ai.summary,
-              aiVerdict: ai.verdict,
-              aiAgrees: ai.agreesWithSignal,
+              aiSummary: summary,
+              aiVerdict: ai!.verdict,
+              aiAgrees: ai!.agreesWithSignal,
             }
           : {}),
       };
     }
 
     const session = this.getSessionClock();
+    const prices: Record<string, number> = {};
+    for (const symbol of reportSymbols) {
+      const p = currentPrices.get(symbol);
+      if (p != null) prices[symbol] = p;
+    }
 
-    return {
+    const tokenIcons: Record<string, string> = {};
+    for (const symbol of reportSymbols) {
+      const url = this.tokenIcons.get(symbol);
+      if (url) tokenIcons[symbol] = normalizeBinanceIcon(url) ?? url;
+    }
+
+    const livePrices: Record<string, { price: number; change24hPct: number; updatedAt: number }> = {};
+    for (const [sym, q] of this.livePrices) {
+      if (!reportSet.has(sym)) continue;
+      livePrices[sym] = {
+        price: q.price,
+        change24hPct: q.change24hPct,
+        updatedAt: q.updatedAt,
+      };
+    }
+
+    const value: AgentState = {
       mode: this.config.mode,
       running: this.running,
       cycleCount: this.cycleCount,
@@ -2788,27 +2826,13 @@ export class TradingAgent {
       trades: this.portfolio.getTradeHistory(),
       risk: this.riskManager.riskSummary(),
       watchlist: reportSymbols,
-      prices: Object.fromEntries(currentPrices),
+      prices,
       bridgeSource: this.bridgeSource,
       tokenMetrics,
       newsCount: this.lastNewsCount,
       lastSignalRefreshAt: this.lastSignalRefreshAt || null,
-      tokenIcons: Object.fromEntries(
-        [...this.tokenIcons.entries()].map(([sym, url]) => [
-          sym,
-          normalizeBinanceIcon(url) ?? url,
-        ])
-      ),
-      livePrices: Object.fromEntries(
-        [...this.livePrices.entries()].map(([sym, q]) => [
-          sym,
-          {
-            price: q.price,
-            change24hPct: q.change24hPct,
-            updatedAt: q.updatedAt,
-          },
-        ])
-      ),
+      tokenIcons,
+      livePrices,
       startedAt: this.startedAt,
       session,
       autonomous: this.buildAutonomousStatus(),
@@ -2818,6 +2842,7 @@ export class TradingAgent {
         : {}),
       userBlacklisted,
     };
+    return value;
   }
 
   /** Operator blacklist — blocks new entries; persisted to Neon when available. */
@@ -2842,7 +2867,11 @@ export interface AgentState {
   cycleCount: number;
   config: AgentConfig;
   portfolio: import("./utils/types.js").PortfolioSnapshot;
-  snapshots: import("./utils/types.js").PortfolioSnapshot[];
+  snapshots: Array<{
+    timestamp: number;
+    totalValueUsd: number;
+    maxDrawdownPct: number;
+  }>;
   trades: import("./utils/types.js").TradeResult[];
   risk: Record<string, unknown>;
   watchlist: string[];

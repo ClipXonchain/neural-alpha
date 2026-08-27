@@ -197,8 +197,10 @@ export interface LogEntry {
 }
 
 async function agentFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const timeout = init?.signal ?? AbortSignal.timeout(8_000);
   const res = await fetch(`${AGENT_BASE}${path}`, {
     ...init,
+    signal: timeout,
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
   if (!res.ok) {

@@ -5,7 +5,6 @@ import type { AgentState } from "@/lib/mock-data";
 import type { WalletSnapshot, LogEntry, Track1Snapshot } from "@/lib/agent-api";
 import { logEntryToActivity } from "@/lib/brain-narrative";
 import {
-  checkAgentConnection,
   fetchAgentState,
   fetchWallet,
   fetchLogs,
@@ -43,6 +42,7 @@ export function useAgentConnection() {
   const [agentConfig, setAgentConfig] = useState<Track1Snapshot["config"] | null>(null);
   const connectedRef = useRef(false);
   const walletRef = useRef<WalletSnapshot | null>(null);
+  const [boot, setBoot] = useState(0);
 
   const refreshWallet = useCallback(async () => {
     if (!connectedRef.current) return;
@@ -69,75 +69,70 @@ export function useAgentConnection() {
     let walletPoll: ReturnType<typeof setInterval> | undefined;
 
     (async () => {
-      const ok = await checkAgentConnection();
-      if (cancelled) return;
-      setConnected(ok);
-      connectedRef.current = ok;
+      try {
+        const [snap, logs] = await Promise.all([
+          fetchAgentState(),
+          fetchLogs().catch(() => [] as LogEntry[]),
+        ]);
+        if (cancelled) return;
+        setConnected(true);
+        connectedRef.current = true;
+        setState(mapTrack1ToDashboard(snap, logs));
+        setBridgeSource(snap.bridgeSource || "agent");
+        setAgentConfig(snap.config);
+        setError(null);
+        setLoading(false);
+        void refreshWallet();
 
-      if (ok) {
-        try {
-          const [snap, logs] = await Promise.all([
-            fetchAgentState(),
-            fetchLogs().catch(() => []),
-          ]);
-          if (cancelled) return;
-          setState(mapTrack1ToDashboard(snap, logs));
-          setBridgeSource(snap.bridgeSource || "agent");
-          setAgentConfig(snap.config);
-          await refreshWallet();
+        let pollCount = 0;
+        walletPoll = setInterval(() => {
+          pollCount++;
+          void refreshWallet();
+          if (pollCount >= 6 && walletPoll) {
+            clearInterval(walletPoll);
+            walletPoll = setInterval(() => { void refreshWallet(); }, 30000);
+          }
+        }, 5000);
 
-          // Keep the Binance Web3 holdings overlay fresh.
-          // Use a shorter initial interval to catch the first successful response
-          // after the agent finishes its initial sync, then switch to 30s.
-          let pollCount = 0;
-          walletPoll = setInterval(() => {
-            pollCount++;
-            void refreshWallet();
-            if (pollCount >= 6 && walletPoll) {
-              clearInterval(walletPoll);
-              walletPoll = setInterval(() => { void refreshWallet(); }, 30000);
-            }
-          }, 5000);
-
-          unsub = subscribeAgentEvents(
-            (liveSnap) => {
-              setState((prev) => {
-                const next = enrichStateWithWallet(
-                  mapTrack1ToDashboard(liveSnap, logs),
-                  walletRef.current?.binancePositions
-                );
-                if (prev && next.activity.length <= 1) {
-                  next.activity = prev.activity;
-                }
-                return next;
-              });
-              setBridgeSource(liveSnap.bridgeSource || "agent");
-              setAgentConfig(liveSnap.config);
-            },
-            (logEntry) => {
-              setState((prev) => {
-                if (!prev) return prev;
-                const newItem = logEntryToActivity(
-                  logEntry,
-                  `${logEntry.timestamp}-${Math.random().toString(36).slice(2, 6)}`
-                );
-                if (!newItem) return prev;
-                const activity = [newItem, ...prev.activity].slice(0, 120);
-                return { ...prev, activity };
-              });
-            }
-          );
-        } catch (e) {
-          if (cancelled) return;
-          setError(String(e));
-          setState(generateOfflineState());
-        }
-      } else {
+        unsub = subscribeAgentEvents(
+          (liveSnap) => {
+            setConnected(true);
+            connectedRef.current = true;
+            setError(null);
+            setState((prev) => {
+              const next = enrichStateWithWallet(
+                mapTrack1ToDashboard(liveSnap, logs),
+                walletRef.current?.binancePositions
+              );
+              if (prev && next.activity.length <= 1) {
+                next.activity = prev.activity;
+              }
+              return next;
+            });
+            setBridgeSource(liveSnap.bridgeSource || "agent");
+            setAgentConfig(liveSnap.config);
+          },
+          (logEntry) => {
+            setState((prev) => {
+              if (!prev) return prev;
+              const newItem = logEntryToActivity(
+                logEntry,
+                `${logEntry.timestamp}-${Math.random().toString(36).slice(2, 6)}`
+              );
+              if (!newItem) return prev;
+              const activity = [newItem, ...prev.activity].slice(0, 120);
+              return { ...prev, activity };
+            });
+          }
+        );
+      } catch (e) {
+        if (cancelled) return;
+        setConnected(false);
+        connectedRef.current = false;
+        setError(e instanceof Error ? e.message : offlineMessage());
         setState(generateOfflineState());
-        setError(offlineMessage());
+        setLoading(false);
       }
-
-      setLoading(false);
     })();
 
     return () => {
@@ -145,17 +140,18 @@ export function useAgentConnection() {
       unsub?.();
       if (walletPoll) clearInterval(walletPoll);
     };
-  }, [refreshWallet]);
+  }, [refreshWallet, boot]);
 
-  // Retry when the agent was down on first load (e.g. PM2 restart).
+  // Retry when the agent was down on first load (e.g. PM2 restart) — no full reload.
   useEffect(() => {
-    if (connected) return;
-    const retry = setInterval(async () => {
-      const ok = await checkAgentConnection();
-      if (ok) window.location.reload();
-    }, 10_000);
+    if (connected || loading) return;
+    const retry = setInterval(() => {
+      void fetchAgentState()
+        .then(() => setBoot((n) => n + 1))
+        .catch(() => undefined);
+    }, 5_000);
     return () => clearInterval(retry);
-  }, [connected]);
+  }, [connected, loading]);
 
   const handleStart = useCallback(async () => {
     if (connectedRef.current) {

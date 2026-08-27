@@ -24,6 +24,7 @@ const LONG_RUNNING_PATHS = new Set([
 ]);
 
 const UPSTREAM_TIMEOUT_MS = 180_000;
+const GET_TIMEOUT_MS = 8_000;
 
 function isReadonlyDeploy(req: NextRequest): boolean {
   const host = (req.headers.get("host") ?? "").split(":")[0].toLowerCase();
@@ -58,6 +59,40 @@ function corsHeaders(origin: string | null): Record<string, string> {
   return headers;
 }
 
+function upstreamSignal(req: NextRequest, agentPath: string): AbortSignal {
+  if (agentPath === "events") return req.signal;
+  const timeout = LONG_RUNNING_PATHS.has(agentPath)
+    ? AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
+    : AbortSignal.timeout(GET_TIMEOUT_MS);
+  if (typeof AbortSignal.any === "function") {
+    return AbortSignal.any([req.signal, timeout]);
+  }
+  return timeout;
+}
+
+/** Swallow mid-stream disconnects (agent restart) so they don't fill error logs. */
+function guardUpstreamStream(body: ReadableStream<Uint8Array> | null): ReadableStream<Uint8Array> | null {
+  if (!body) return null;
+  const reader = body.getReader();
+  return new ReadableStream({
+    async pull(controller) {
+      try {
+        const { done, value } = await reader.read();
+        if (done) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(value);
+      } catch {
+        controller.close();
+      }
+    },
+    cancel() {
+      void reader.cancel().catch(() => undefined);
+    },
+  });
+}
+
 async function proxyToAgent(req: NextRequest, ctx: RouteContext) {
   const { path } = await ctx.params;
   const agentPath = path.join("/");
@@ -81,9 +116,7 @@ async function proxyToAgent(req: NextRequest, ctx: RouteContext) {
   const init: RequestInit = {
     method: req.method,
     headers,
-    signal: LONG_RUNNING_PATHS.has(agentPath)
-      ? AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)
-      : req.signal,
+    signal: upstreamSignal(req, agentPath),
   };
 
   if (req.method !== "GET" && req.method !== "HEAD") {
@@ -97,7 +130,7 @@ async function proxyToAgent(req: NextRequest, ctx: RouteContext) {
     const res = await fetch(target, init);
 
     if (agentPath === "events") {
-      return new Response(res.body, {
+      return new Response(guardUpstreamStream(res.body), {
         status: res.status,
         headers: {
           "Content-Type": "text/event-stream",
@@ -113,7 +146,10 @@ async function proxyToAgent(req: NextRequest, ctx: RouteContext) {
     if (resType) outHeaders.set("Content-Type", resType);
     outHeaders.set("X-Content-Type-Options", "nosniff");
 
-    return new Response(res.body, { status: res.status, headers: outHeaders });
+    return new Response(guardUpstreamStream(res.body) ?? res.body, {
+      status: res.status,
+      headers: outHeaders,
+    });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     const timedOut = /abort|timeout/i.test(msg);

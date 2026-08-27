@@ -1,7 +1,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { gzipSync } from "node:zlib";
 import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import type { TradingAgent, AgentState } from "../agent.js";
+import type { TradingAgent } from "../agent.js";
 import { addLogListener, removeLogListener, type LogListener } from "../utils/logger.js";
 import { logger } from "../utils/logger.js";
 import type { LogEntry } from "../utils/types.js";
@@ -25,7 +26,11 @@ const ALLOWED_ORIGINS = (() => {
 // ─── Rate limiter (in-memory, per-IP) ──────────────────────────────
 const rateBuckets = new Map<string, { count: number; resetAt: number }>();
 const RATE_WINDOW_MS = 60_000;
-const RATE_MAX_REQUESTS = 120;
+const RATE_MAX_REQUESTS = 240;
+const STATE_JSON_TTL_MS = 800;
+const SSE_INTERVAL_MS = 3_000;
+const MAX_LOG_BUFFER = 150;
+const LOGS_RETURN = 50;
 
 function isRateLimited(ip: string): boolean {
   const now = Date.now();
@@ -63,16 +68,37 @@ function isAuthenticated(req: IncomingMessage): boolean {
 let agentRef: TradingAgent | null = null;
 const sseClients: Set<ServerResponse> = new Set();
 const recentLogs: LogEntry[] = [];
-const MAX_LOG_BUFFER = 500;
+
+function slimLog(entry: LogEntry): LogEntry {
+  const out: LogEntry = {
+    timestamp: entry.timestamp,
+    level: entry.level,
+    event: entry.event,
+    ...(entry.narrative ? { narrative: entry.narrative } : {}),
+    ...(entry.txHash ? { txHash: entry.txHash } : {}),
+  };
+  if (!entry.data) return out;
+  try {
+    if (JSON.stringify(entry.data).length <= 400) out.data = entry.data;
+  } catch {
+    /* drop oversized / circular data */
+  }
+  return out;
+}
 
 const logListener: LogListener = (entry) => {
-  recentLogs.push(entry);
+  const slim = slimLog(entry);
+  recentLogs.push(slim);
   if (recentLogs.length > MAX_LOG_BUFFER) recentLogs.shift();
-  broadcast("log", entry);
+  broadcast("log", slim);
 };
 
 function broadcast(event: string, data: unknown) {
-  const payload = `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+  broadcastRaw(event, JSON.stringify(data));
+}
+
+function broadcastRaw(event: string, jsonData: string) {
+  const payload = `event: ${event}\ndata: ${jsonData}\n\n`;
   for (const client of sseClients) {
     try {
       client.write(payload);
@@ -83,16 +109,26 @@ function broadcast(event: string, data: unknown) {
 }
 
 let stateInterval: ReturnType<typeof setInterval> | null = null;
+let stateJsonCache = { at: 0, json: "" };
+
+function getCachedStateJson(): string {
+  const now = Date.now();
+  if (stateJsonCache.json && now - stateJsonCache.at < STATE_JSON_TTL_MS) {
+    return stateJsonCache.json;
+  }
+  const json = JSON.stringify(agentRef!.getStateSnapshot());
+  stateJsonCache = { at: now, json };
+  return json;
+}
 
 function startStateBroadcast() {
   if (stateInterval) return;
   stateInterval = setInterval(() => {
     if (!agentRef || sseClients.size === 0) return;
     try {
-      const state = agentRef.getStateSnapshot();
-      broadcast("state", state);
+      broadcastRaw("state", getCachedStateJson());
     } catch { /* don't crash on state errors */ }
-  }, 1000);
+  }, SSE_INTERVAL_MS);
 }
 
 function getClientIp(req: IncomingMessage): string {
@@ -122,8 +158,20 @@ function securityHeaders(res: ServerResponse) {
 function json(req: IncomingMessage, res: ServerResponse, data: unknown, status = 200) {
   cors(req, res);
   securityHeaders(res);
-  res.writeHead(status, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(data));
+  const body = typeof data === "string" ? data : JSON.stringify(data);
+  const accept = String(req.headers["accept-encoding"] ?? "");
+  if (body.length > 512 && /\bgzip\b/i.test(accept)) {
+    const compressed = gzipSync(Buffer.from(body), { level: 5 });
+    res.writeHead(status, {
+      "Content-Type": "application/json; charset=utf-8",
+      "Content-Encoding": "gzip",
+      Vary: "Origin, Accept-Encoding",
+    });
+    res.end(compressed);
+    return;
+  }
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(body);
 }
 
 function safeErrorMessage(err: unknown): string {
@@ -181,12 +229,12 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
 
   if (url === "/api/state" && req.method === "GET") {
     if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
-    json(req, res, agentRef.getStateSnapshot());
+    json(req, res, getCachedStateJson());
     return true;
   }
 
   if (url === "/api/logs" && req.method === "GET") {
-    json(req, res, recentLogs.slice(-100));
+    json(req, res, recentLogs.slice(-LOGS_RETURN));
     return true;
   }
 
@@ -463,8 +511,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
 
     if (agentRef) {
       try {
-        const state = agentRef.getStateSnapshot();
-        res.write(`event: state\ndata: ${JSON.stringify(state)}\n\n`);
+        res.write(`event: state\ndata: ${getCachedStateJson()}\n\n`);
       } catch { /* ok */ }
     }
     return true;
@@ -484,8 +531,12 @@ export function startDashboard(agent: TradingAgent) {
   const server = createServer((req, res) => {
     const url = req.url || "/";
     const ip = getClientIp(req);
+    const local =
+      ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
+    const skipRate =
+      local || url === "/api/health" || url.startsWith("/api/events");
 
-    if (isRateLimited(ip)) {
+    if (!skipRate && isRateLimited(ip)) {
       securityHeaders(res);
       res.writeHead(429, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: "Too many requests" }));

@@ -376,10 +376,8 @@ export function getTokenMomentumMetrics(symbol: string): {
   return { momentum: mom, atrPct, volumeRatio };
 }
 
-export function getTokenDisplayMetrics(
-  symbol: string,
-  price?: number | null
-): {
+type DisplayMetrics = {
+  rsi: number | null;
   macdPct: number | null;
   bbPosition: number | null;
   vwapDev: number | null;
@@ -387,24 +385,43 @@ export function getTokenDisplayMetrics(
   gapPct: number | null;
   orbBreakoutPct: number | null;
   atrPct: number | null;
-} {
+};
+
+const DISPLAY_CACHE_MS = 8_000;
+const displayCache = new Map<string, { at: number; price: number; value: DisplayMetrics }>();
+
+export function getTokenDisplayMetrics(
+  symbol: string,
+  price?: number | null
+): DisplayMetrics {
+  const p = price ?? 0;
+  const hit = displayCache.get(symbol);
+  if (
+    hit &&
+    Date.now() - hit.at < DISPLAY_CACHE_MS &&
+    (p <= 0 || hit.price <= 0 || Math.abs(p - hit.price) / hit.price < 0.003)
+  ) {
+    return hit.value;
+  }
+
   const closes = getClosePrices(symbol);
   const tech = computeSignals(symbol, price ?? undefined);
-  const p = price ?? closes.at(-1) ?? null;
+  const last = price ?? closes.at(-1) ?? null;
 
   const macdPct =
-    tech.macd && p && p > 0 ? (tech.macd.histogram / p) * 100 : null;
+    tech.macd && last && last > 0 ? (tech.macd.histogram / last) * 100 : null;
 
   const bb = tech.bollingerBands;
   const bbPosition =
-    bb && p && bb.upper !== bb.lower
-      ? ((p - bb.lower) / (bb.upper - bb.lower)) * 100
+    bb && last && bb.upper !== bb.lower
+      ? ((last - bb.lower) / (bb.upper - bb.lower)) * 100
       : null;
 
   const vwapDev =
-    tech.vwap && p && tech.vwap > 0 ? ((p - tech.vwap) / tech.vwap) * 100 : null;
+    tech.vwap && last && tech.vwap > 0 ? ((last - tech.vwap) / tech.vwap) * 100 : null;
 
-  return {
+  const value: DisplayMetrics = {
+    rsi: tech.rsi !== null ? Math.round(tech.rsi * 10) / 10 : null,
     macdPct,
     bbPosition,
     vwapDev,
@@ -413,6 +430,8 @@ export function getTokenDisplayMetrics(
     orbBreakoutPct: tech.orb?.breakoutPct ?? null,
     atrPct: tech.atrPct,
   };
+  displayCache.set(symbol, { at: Date.now(), price: p, value });
+  return value;
 }
 
 export function computeIndexRegime(markets: MarketData[]): IndexRegime {
