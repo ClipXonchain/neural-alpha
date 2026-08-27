@@ -216,21 +216,14 @@ export class AgentStore {
     }
   }
 
-  /** Remove Binance aggregates only when a real 0x hash exists for the same symbol+side. */
+  /** Remove Binance Web3 aggregate rows (not real fills; PnL is unreliable). */
   async deleteBinanceAggregateTrades(walletAddress: string): Promise<number> {
     if (!this.pool) return 0;
     try {
       const { rowCount } = await this.pool.query(
         `DELETE FROM trades t
          WHERE t.tx_hash LIKE 'binance-web3-%'
-           AND LOWER(t.wallet_address) = $1
-           AND EXISTS (
-             SELECT 1 FROM trades r
-             WHERE LOWER(r.wallet_address) = $1
-               AND r.tx_hash ~ '^0x[0-9a-fA-F]{64}$'
-               AND UPPER(r.symbol) = UPPER(t.symbol)
-               AND r.side = t.side
-           )`,
+           AND LOWER(t.wallet_address) = $1`,
         [walletAddress.toLowerCase()]
       );
       return rowCount ?? 0;

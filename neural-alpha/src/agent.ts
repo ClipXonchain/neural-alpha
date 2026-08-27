@@ -56,8 +56,6 @@ import { fetchWalletTradeHistory } from "./integrations/trade-history.js";
 import { fetchRpcRecentTradeHistory } from "./integrations/bsc-rpc-trade-history.js";
 import {
   isOnChainTxHash as isRealTxHash,
-  realSymbolSideKeys,
-  symbolSideKey,
   tradeDedupeKey,
 } from "./utils/trade-dedupe.js";
 import { fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
@@ -1972,7 +1970,6 @@ export class TradingAgent {
     wallet: string
   ) {
     const realChainTrades = chainTrades.filter((t) => isRealTxHash(t.txHash));
-    const binanceTrades = chainTrades.filter((t) => t.txHash?.startsWith("binance-web3-"));
 
     const knownKeys = new Set([
       ...existing.map(tradeDedupeKey),
@@ -1994,25 +1991,14 @@ export class TradingAgent {
     if (store.enabled) {
       const dbPurged = await store.deleteBinanceAggregateTrades(wallet);
       if (purged > 0 || dbPurged > 0) {
-        logger.info("Replaced Binance aggregate trades with on-chain txs (per symbol+side)", {
+        logger.info("Dropped Binance Web3 aggregate trades (unreliable PnL)", {
           memory: purged,
           db: dbPurged,
         });
       }
     }
 
-    const covered = realSymbolSideKeys(this.portfolio.getTradeHistory());
-    const knownAfter = new Set(this.portfolio.getTradeHistory().map(tradeDedupeKey));
-    const fallbacks = binanceTrades.filter((t) => {
-      const key = symbolSideKey(t);
-      if (!key || covered.has(key)) return false;
-      return !knownAfter.has(tradeDedupeKey(t));
-    });
-    if (fallbacks.length > 0) {
-      this.portfolio.hydrateTradeHistory(fallbacks);
-    }
-
-    if (novel.length > 0 || refreshed.length > 0 || fallbacks.length > 0) {
+    if (novel.length > 0 || refreshed.length > 0) {
       this.portfolio.rebuildPositionsFromTrades();
     }
 
@@ -2020,17 +2006,16 @@ export class TradingAgent {
 
     if (store.enabled) {
       const toSave = new Map<string, import("./utils/types.js").TradeResult>();
-      for (const t of [...realChainTrades, ...fallbacks, ...annotated]) {
+      for (const t of [...realChainTrades, ...annotated]) {
         toSave.set(t.orderId, t);
       }
       await Promise.all([...toSave.values()].map((t) => store.saveChainTrade(t, wallet)));
     }
 
-    if (novel.length > 0 || refreshed.length > 0 || fallbacks.length > 0) {
+    if (novel.length > 0 || refreshed.length > 0) {
       logger.info("Trade history backfilled from chain", {
         imported: novel.length,
         refreshed: refreshed.length,
-        binanceFallback: fallbacks.length,
         annotatedPnl: annotated.length,
         wallet: wallet.slice(0, 10) + "…",
       });

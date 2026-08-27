@@ -233,7 +233,8 @@ function TradeRow({ trade, index }: { trade: Trade; index: number }) {
 
 export function TradeHistory({ trades }: { trades: Trade[] }) {
   const [showAll, setShowAll] = useState(false);
-  const displayTrades = showAll ? trades : trades.slice(0, 8);
+  const visible = trades.filter((t) => !t.txHash?.startsWith("binance-web3-"));
+  const displayTrades = showAll ? visible : visible.slice(0, 8);
 
   return (
     <motion.div
@@ -259,12 +260,12 @@ export function TradeHistory({ trades }: { trades: Trade[] }) {
           className="text-[10px] text-text-muted tabular-nums"
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          {trades.length} total
+          {visible.length} total
         </span>
       </div>
 
       {/* Summary stats */}
-      {trades.length > 0 && <TradeSummary trades={trades} />}
+      {visible.length > 0 && <TradeSummary trades={visible} />}
 
       {/* Trade list */}
       <div className="flex flex-col">
@@ -287,13 +288,13 @@ export function TradeHistory({ trades }: { trades: Trade[] }) {
       </div>
 
       {/* Show more/less */}
-      {trades.length > 8 && (
+      {visible.length > 8 && (
         <button
           onClick={() => setShowAll(!showAll)}
           className="w-full mt-3 py-2 rounded-lg text-[10px] font-semibold text-text-secondary hover:text-text-primary bg-surface-overlay/40 hover:bg-surface-overlay/70 transition-colors border border-border-dim"
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          {showAll ? `Show less` : `Show all ${trades.length} trades`}
+          {showAll ? `Show less` : `Show all ${visible.length} trades`}
         </button>
       )}
     </motion.div>

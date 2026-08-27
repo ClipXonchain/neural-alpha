@@ -6,8 +6,6 @@ import {
   classifyAssetTrade,
   dedupeAndCleanTradeResults,
   preferTradeRecord,
-  realSymbolSideKeys,
-  symbolSideKey,
   tradeDedupeKey,
 } from "../utils/trade-dedupe.js";
 
@@ -745,18 +743,13 @@ export class PortfolioTracker {
     return updated;
   }
 
-  /** Drop Binance aggregates only when a real 0x hash exists for the same symbol+side. */
+  /** Drop Binance Web3 aggregate rows — they are not real fills and their PnL is wrong. */
   purgeBinanceAggregateTrades(): number {
-    const covered = realSymbolSideKeys(this.tradeHistory);
     const before = this.tradeHistory.length;
     this.tradeHistory = this.tradeHistory.filter((t) => {
       if (!t.txHash?.startsWith("binance-web3-")) return true;
-      const key = symbolSideKey(t);
-      if (key && covered.has(key)) {
-        this.persistentTradeIds.delete(t.orderId);
-        return false;
-      }
-      return true;
+      this.persistentTradeIds.delete(t.orderId);
+      return false;
     });
     const removed = before - this.tradeHistory.length;
     if (removed > 0) this.rebuildDailyTradeCounts();

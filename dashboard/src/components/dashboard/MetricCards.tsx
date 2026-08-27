@@ -107,9 +107,8 @@ export function MetricCards({ state }: { state: AgentState }) {
       <MetricCard
         label="Portfolio Value"
         value={formatUsd(state.portfolioValue)}
-        subValue={`${formatUsd(state.cashBalance)} cash`}
         icon={<Wallet className="size-4" />}
-        trend={pnlTrend}
+        trend="neutral"
         accentColor="cyan"
         delay={0}
       />
@@ -119,7 +118,7 @@ export function MetricCards({ state }: { state: AgentState }) {
         subValue={
           state.initialNavUsd > 0
             ? `${formatPct(state.totalPnlPct)} · vs ${formatUsd(state.initialNavUsd)} deposited`
-            : `${formatPct(state.totalPnlPct)} · ${formatUsd(state.realizedPnl)} closed`
+            : undefined
         }
         icon={state.totalPnl >= 0 ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}
         trend={pnlTrend}
