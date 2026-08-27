@@ -19,6 +19,19 @@ function parseTradeAmount(raw?: string): number {
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
 
+function utcDayStartMs(now = Date.now()): number {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+function utcDateKey(now = Date.now()): string {
+  return new Date(now).toISOString().slice(0, 10);
+}
+
+function isSyntheticTradeHash(txHash?: string): boolean {
+  return Boolean(txHash?.startsWith("binance-web3-"));
+}
+
 export class PortfolioTracker {
   private initialValueUsd: number;
   private cashUsd: number;
@@ -44,7 +57,15 @@ export class PortfolioTracker {
   /** Latest NAV from the most recent snapshot (live prices). */
   private lastNavUsd = 0;
   /** DB peak/initial restored at startup — applied after wallet sync validates NAV. */
-  private pendingNavRestore: { peakNavUsd: number; initialNavUsd: number } | null = null;
+  private pendingNavRestore: {
+    peakNavUsd: number;
+    initialNavUsd: number;
+    dayStartNavUsd?: number;
+    dayStartUtcDate?: string;
+  } | null = null;
+  /** Frozen NAV at UTC midnight (yesterday's close) for Daily PnL. */
+  private dayStartNavUsd = 0;
+  private dayStartUtcDate = "";
   /** Cost basis restored from Neon when trade replay is incomplete. */
   private persistedEntries = new Map<string, { avgEntryPrice: number; peakPnlPct?: number }>();
 
@@ -101,12 +122,20 @@ export class PortfolioTracker {
     peakNavUsd: number;
     initialNavUsd: number;
     baselineInitialized: boolean;
+    dayStartNavUsd?: number;
+    dayStartUtcDate?: string;
   }) {
+    if (state.dayStartUtcDate === utcDateKey() && (state.dayStartNavUsd ?? 0) > 0) {
+      this.dayStartNavUsd = state.dayStartNavUsd!;
+      this.dayStartUtcDate = state.dayStartUtcDate;
+    }
     if (!state.baselineInitialized || state.peakNavUsd <= 0) return;
     if (!this.baselineInitialized) {
       this.pendingNavRestore = {
         peakNavUsd: state.peakNavUsd,
         initialNavUsd: state.initialNavUsd,
+        dayStartNavUsd: state.dayStartNavUsd,
+        dayStartUtcDate: state.dayStartUtcDate,
       };
       logger.info("Portfolio NAV restore deferred until wallet sync", {
         peakNavUsd: Math.round(state.peakNavUsd * 100) / 100,
@@ -127,8 +156,12 @@ export class PortfolioTracker {
    */
   applyPendingNavRestore(navUsd: number) {
     if (!this.pendingNavRestore || !Number.isFinite(navUsd) || navUsd <= 0) return;
-    const { peakNavUsd, initialNavUsd } = this.pendingNavRestore;
+    const { peakNavUsd, initialNavUsd, dayStartNavUsd, dayStartUtcDate } = this.pendingNavRestore;
     this.pendingNavRestore = null;
+    if (dayStartUtcDate === utcDateKey() && (dayStartNavUsd ?? 0) > 0) {
+      this.dayStartNavUsd = dayStartNavUsd!;
+      this.dayStartUtcDate = dayStartUtcDate;
+    }
 
     const peakRatio = peakNavUsd / navUsd;
     const initialRatio = initialNavUsd / navUsd;
@@ -168,24 +201,72 @@ export class PortfolioTracker {
     if (!this.baselineInitialized || !Number.isFinite(navUsd) || navUsd <= 0) return;
 
     const peakRatio = this.peakValueUsd / navUsd;
-    const initialRatio = this.initialValueUsd / navUsd;
-    const stale =
-      peakRatio > 1.25 ||
-      peakRatio < 0.5 ||
-      initialRatio > 3 ||
-      initialRatio < 0.25;
-
-    if (!stale) return;
+    const stalePeak = peakRatio > 1.25 || peakRatio < 0.5;
+    if (!stalePeak) return;
 
     const oldPeak = this.peakValueUsd;
-    const oldInitial = this.initialValueUsd;
-    this.initialValueUsd = navUsd;
-    this.peakValueUsd = navUsd;
-    logger.info("Portfolio NAV baseline realigned to wallet", {
+    this.peakValueUsd = Math.max(navUsd, this.initialValueUsd);
+    logger.info("Portfolio peak NAV realigned to wallet (deposit baseline kept)", {
       navUsd: Math.round(navUsd * 100) / 100,
       oldPeak: Math.round(oldPeak * 100) / 100,
-      oldInitial: Math.round(oldInitial * 100) / 100,
+      initialNavUsd: Math.round(this.initialValueUsd * 100) / 100,
     });
+  }
+
+  getDayStartNav(): number {
+    return this.dayStartNavUsd;
+  }
+
+  /** Seed Daily PnL mark from yesterday's last persisted NAV (UTC). */
+  setDayStartNav(navUsd: number, utcDate = utcDateKey()) {
+    if (!(navUsd > 0)) return;
+    if (this.dayStartUtcDate === utcDate && this.dayStartNavUsd > 0) return;
+    this.dayStartNavUsd = navUsd;
+    this.dayStartUtcDate = utcDate;
+    logger.info("Daily NAV mark set", {
+      dayStartNavUsd: Math.round(navUsd * 100) / 100,
+      utcDate,
+    });
+  }
+
+  /**
+   * Freeze yesterday's close as today's Daily baseline.
+   * Call on every live NAV observation so the mark rolls at UTC midnight
+   * and then stays fixed while current NAV ticks.
+   */
+  observeDayNav(navUsd: number, now = Date.now()) {
+    if (!(navUsd > 0)) return;
+    const today = utcDateKey(now);
+    if (this.dayStartUtcDate === today && this.dayStartNavUsd > 0) {
+      return;
+    }
+    if (this.dayStartUtcDate && this.dayStartUtcDate !== today && this.lastNavUsd > 0) {
+      this.dayStartNavUsd = this.lastNavUsd;
+      this.dayStartUtcDate = today;
+      logger.info("Daily NAV mark rolled from yesterday close", {
+        dayStartNavUsd: Math.round(this.dayStartNavUsd * 100) / 100,
+        utcDate: today,
+      });
+      return;
+    }
+    this.dayStartNavUsd = navUsd;
+    this.dayStartUtcDate = today;
+  }
+
+  exportNavState(): {
+    peakNavUsd: number;
+    initialNavUsd: number;
+    baselineInitialized: boolean;
+    dayStartNavUsd: number;
+    dayStartUtcDate: string;
+  } {
+    return {
+      peakNavUsd: this.peakValueUsd,
+      initialNavUsd: this.initialValueUsd,
+      baselineInitialized: this.baselineInitialized,
+      dayStartNavUsd: this.dayStartNavUsd,
+      dayStartUtcDate: this.dayStartUtcDate,
+    };
   }
 
   /** Merge confirmed trades loaded from Neon or on-chain backfill (survives restarts). */
@@ -569,7 +650,8 @@ export class PortfolioTracker {
     let realizedPnl = 0;
     let costClosed = 0;
     let dailyRealizedPnl = 0;
-    const dayStart = Date.now() - 86_400_000;
+    const dayStart = utcDayStartMs();
+    const cycleOpenAt = new Map<string, number>();
 
     const trades = [...this.tradeHistory]
       .filter((t) => t.success)
@@ -580,6 +662,7 @@ export class PortfolioTracker {
       const to = t.toToken.toUpperCase();
       const price = t.priceAtExecution > 0 ? t.priceAtExecution : 0;
       const side = classifyAssetTrade(from, to);
+      const synth = isSyntheticTradeHash(t.txHash);
 
       if (side === "buy") {
         const sym = to;
@@ -589,6 +672,7 @@ export class PortfolioTracker {
         }
         if (tokenQty <= 0 || price <= 0) continue;
         const cur = ledgers.get(sym) ?? { qty: 0, cost: 0 };
+        if (cur.qty <= 1e-12 && !synth) cycleOpenAt.set(sym, t.timestamp);
         cur.cost += price * tokenQty;
         cur.qty += tokenQty;
         ledgers.set(sym, cur);
@@ -622,7 +706,9 @@ export class PortfolioTracker {
       closedSells++;
       costClosed += cost;
       realizedPnl += pnl;
-      if (t.timestamp >= dayStart) dailyRealizedPnl += pnl;
+      const openedToday = (cycleOpenAt.get(from) ?? 0) >= dayStart;
+      if (t.timestamp >= dayStart && !synth && openedToday) dailyRealizedPnl += pnl;
+      if (ledger.qty <= 1e-12) cycleOpenAt.delete(from);
       sellPnlByOrderId.set(t.orderId, pnl);
       if (pnl >= 0) wins++;
       else losses++;
@@ -950,6 +1036,7 @@ export class PortfolioTracker {
     }
 
     const totalValueUsd = this.cashUsd + this.gasReserveUsd + positionsValueUsd;
+    this.observeDayNav(totalValueUsd);
     this.lastNavUsd = totalValueUsd;
 
     for (const p of positionSnapshots) {
@@ -970,18 +1057,32 @@ export class PortfolioTracker {
     const tradedCost = costOpen + closed.costClosed;
     const assetPnl = closed.realizedPnl + unrealizedPnl;
 
+    const deposit = this.baselineInitialized ? this.initialValueUsd : 0;
+    const totalPnl = deposit > 0 ? totalValueUsd - deposit : assetPnl;
+    const totalPnlPct =
+      deposit > 0
+        ? (totalPnl / deposit) * 100
+        : tradedCost > 0
+          ? (assetPnl / tradedCost) * 100
+          : 0;
+    const dailyPnl =
+      this.dayStartNavUsd > 0 ? totalValueUsd - this.dayStartNavUsd : closed.dailyRealizedPnl;
+    const dailyPnlPct =
+      this.dayStartNavUsd > 0 ? (dailyPnl / this.dayStartNavUsd) * 100 : 0;
+
     return {
       timestamp: Date.now(),
       totalValueUsd,
       cashUsd: this.cashUsd,
       positions: positionSnapshots,
-      dailyPnl: closed.dailyRealizedPnl,
-      totalPnl: assetPnl,
-      totalPnlPct: tradedCost > 0 ? (assetPnl / tradedCost) * 100 : 0,
+      dailyPnl,
+      totalPnl,
+      totalPnlPct,
       realizedPnl: closed.realizedPnl,
       ...(this.baselineInitialized
         ? { initialNavUsd: this.initialValueUsd }
         : {}),
+      ...(this.dayStartNavUsd > 0 ? { dayStartNavUsd: this.dayStartNavUsd } : {}),
       gasReserveUsd: this.gasReserveUsd,
       maxDrawdownPct: drawdownPct,
       tradeCount: this.tradeHistory.length,
@@ -999,6 +1100,7 @@ export class PortfolioTracker {
       totalPnlPct: snap.totalPnlPct,
       realizedPnl: snap.realizedPnl,
       ...(snap.initialNavUsd != null ? { initialNavUsd: snap.initialNavUsd } : {}),
+      ...(snap.dayStartNavUsd != null ? { dayStartNavUsd: snap.dayStartNavUsd } : {}),
       gasReserveUsd: snap.gasReserveUsd,
       maxDrawdownPct: snap.maxDrawdownPct,
       tradeCount: snap.tradeCount,

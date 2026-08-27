@@ -79,8 +79,10 @@ export interface AgentState {
   cycleCount: number;
   portfolioValue: number;
   cashBalance: number;
-  /** Competition / wallet baseline for lifetime PnL. */
+  /** Competition / wallet baseline for lifetime PnL (USDT deposited). */
   initialNavUsd: number;
+  /** Yesterday's UTC close NAV — Daily = current − this. */
+  dayStartNavUsd?: number;
   totalPnl: number;
   totalPnlPct: number;
   realizedPnl: number;
@@ -189,6 +191,7 @@ export function generateMockState(): AgentState {
     portfolioValue: latestValue,
     cashBalance: 412.35,
     initialNavUsd: 1000,
+    dayStartNavUsd: latestValue - 23.47,
     totalPnl: latestValue - 1000,
     totalPnlPct: ((latestValue - 1000) / 1000) * 100,
     realizedPnl: 18.62,
@@ -254,6 +257,7 @@ export function generateOfflineState(): AgentState {
     portfolioValue: 0,
     cashBalance: 0,
     initialNavUsd: 0,
+    dayStartNavUsd: 0,
     totalPnl: 0,
     totalPnlPct: 0,
     realizedPnl: 0,

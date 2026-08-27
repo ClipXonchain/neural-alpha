@@ -29,6 +29,116 @@ function looksLikeBstock(token: string): boolean {
   return /^[A-Z0-9]{2,12}B$/.test(token.trim().toUpperCase());
 }
 
+function utcDayStartMs(now = Date.now()): number {
+  const d = new Date(now);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+function navVsBasis(
+  nav: number,
+  basis: number
+): { pnl: number; pct: number } | null {
+  if (!(basis > 0) || !Number.isFinite(nav)) return null;
+  const pnl = nav - basis;
+  return { pnl, pct: (pnl / basis) * 100 };
+}
+
+function isSyntheticTradeHash(txHash?: string | null): boolean {
+  return Boolean(txHash?.startsWith("binance-web3-"));
+}
+
+function priorValueFromPct(value: number, pct: number): number {
+  const factor = 1 + pct / 100;
+  return factor > 0 ? value / factor : value;
+}
+
+/** USD change implied by a percent move on current notional. */
+function markFromPct(value: number, pct: number): number {
+  if (!(value > 0) || !Number.isFinite(pct)) return 0;
+  return value - priorValueFromPct(value, pct);
+}
+
+type DailyOpenRow = {
+  symbol: string;
+  value: number;
+  qty: number;
+  price: number;
+  entryPrice: number;
+  entryUnknown: boolean;
+  pct24h: number;
+};
+
+/**
+ * Daily PnL is today's economic move — not lifetime realized dumped onto today's sells.
+ *
+ * Closing a multi-day winner must not make Daily ≈ Total. Same-day round-trips
+ * keep FIFO PnL; overnight inventory uses the 24h mark. Binance Web3 summary
+ * rows (timestamped at lastTxTime) are ignored so aggregate buy/sell history
+ * cannot look like it all happened today.
+ */
+function computeDailyPnl(opts: {
+  nav: number;
+  trades: Trade[];
+  open: DailyOpenRow[];
+  pctBySymbol?: Map<string, number>;
+  now?: number;
+}): { dailyPnl: number; dailyPnlPct: number } {
+  const dayStart = utcDayStartMs(opts.now);
+  const pctOf = (sym: string) => {
+    const held = opts.open.find((p) => p.symbol.toUpperCase() === sym.toUpperCase());
+    if (held && Number.isFinite(held.pct24h)) return held.pct24h;
+    return opts.pctBySymbol?.get(sym.toUpperCase()) ?? 0;
+  };
+
+  const books = new Map<string, { qty: number; openAt: number }>();
+  let daily = 0;
+
+  const sorted = [...opts.trades].sort((a, b) => a.timestamp - b.timestamp);
+  for (const t of sorted) {
+    const sym = t.symbol.toUpperCase();
+    const synth = isSyntheticTradeHash(t.txHash);
+    const book = books.get(sym) ?? { qty: 0, openAt: 0 };
+
+    if (t.side === "buy") {
+      if (!synth && t.amount > 0) {
+        if (book.qty <= 1e-12) book.openAt = t.timestamp;
+        book.qty += t.amount;
+        books.set(sym, book);
+      }
+      continue;
+    }
+
+    if (t.timestamp >= dayStart && !synth) {
+      const openedToday = book.openAt >= dayStart && book.openAt > 0;
+      if (openedToday && t.pnl !== undefined) {
+        daily += t.pnl;
+      } else {
+        daily += markFromPct(t.total, pctOf(sym));
+      }
+    }
+
+    if (!synth && t.amount > 0) {
+      book.qty = Math.max(0, book.qty - t.amount);
+      if (book.qty <= 1e-12) book.openAt = 0;
+      books.set(sym, book);
+    }
+  }
+
+  for (const row of opts.open) {
+    const book = books.get(row.symbol.toUpperCase());
+    const openedToday = (book?.openAt ?? 0) >= dayStart && (book?.openAt ?? 0) > 0;
+    if (openedToday && !row.entryUnknown && row.entryPrice > 0) {
+      daily += (row.price - row.entryPrice) * row.qty;
+    } else {
+      daily += markFromPct(row.value, row.pct24h);
+    }
+  }
+
+  const startNav = opts.nav - daily;
+  const dailyPnlPct = startNav > 0 ? (daily / startNav) * 100 : 0;
+  return { dailyPnl: daily, dailyPnlPct };
+}
+
 /** Buy = funding → asset. Sell = asset → funding (including unknown quote / contract). */
 function classifyAssetTrade(fromToken: string, toToken: string): "buy" | "sell" | null {
   const fromFund = isFundingToken(fromToken);
@@ -156,13 +266,15 @@ function computeClosedTradeStats(
   let realizedPnl = 0;
   let costClosed = 0;
   let dailyRealizedPnl = 0;
-  const dayStart = Date.now() - 86_400_000;
+  const dayStart = utcDayStartMs();
+  const cycleOpenAt = new Map<string, number>();
 
   for (const t of confirmed) {
     const from = t.fromToken.toUpperCase();
     const to = t.toToken.toUpperCase();
     const price = t.priceAtExecution > 0 ? t.priceAtExecution : 0;
     const side = classifyAssetTrade(from, to);
+    const synth = isSyntheticTradeHash(t.txHash);
 
     if (side === "buy") {
       const sym = to;
@@ -170,6 +282,7 @@ function computeClosedTradeStats(
       if (tokenQty <= 0 && price > 0) tokenQty = parseTradeAmt(t.fromAmount) / price;
       if (tokenQty <= 0 || price <= 0) continue;
       const cur = ledgers.get(sym) ?? { qty: 0, cost: 0 };
+      if (cur.qty <= 1e-12 && !synth) cycleOpenAt.set(sym, t.timestamp);
       cur.cost += price * tokenQty;
       cur.qty += tokenQty;
       ledgers.set(sym, cur);
@@ -201,7 +314,9 @@ function computeClosedTradeStats(
     closedSells++;
     costClosed += cost;
     realizedPnl += pnl;
-    if (t.timestamp >= dayStart) dailyRealizedPnl += pnl;
+    const openedToday = (cycleOpenAt.get(from) ?? 0) >= dayStart;
+    if (t.timestamp >= dayStart && !synth && openedToday) dailyRealizedPnl += pnl;
+    if (ledger.qty <= 1e-12) cycleOpenAt.delete(from);
     sellPnlByOrderId.set(t.orderId, pnl);
     if (pnl >= 0) wins++;
     else losses++;
@@ -460,10 +575,6 @@ export function enrichStateWithWallet(
     pct24h: number;
   }> = [];
 
-  const priorValue = (value: number, pct: number) => {
-    const factor = 1 + pct / 100;
-    return factor > 0 ? value / factor : value;
-  };
   const prevBySymbol = new Map(state.positions.map((p) => [p.symbol, p]));
 
   for (const p of positions) {
@@ -555,46 +666,47 @@ export function enrichStateWithWallet(
     (sum, p) => sum + (p.entryUnknown ? 0 : p.pnl),
     0
   );
-  const costOpen = mapped.reduce(
-    (sum, p) => sum + (p.entryUnknown ? 0 : p.entryPrice * p.amount),
-    0
-  );
   const realizedPnl = roundNum(state.realizedPnl || 0, 2);
-  const costClosed = state.trades
-    .filter((t) => t.side === "sell" && t.pnl !== undefined)
-    .reduce((s, t) => s + (t.total - (t.pnl ?? 0)), 0);
-  const totalPnl = roundNum(realizedPnl + unrealizedPnl, 2);
-  const tradedCost = costOpen + Math.max(0, costClosed);
-  const totalPnlPct = tradedCost > 0 ? roundNum((totalPnl / tradedCost) * 100, 2) : 0;
+  const depositPnl = navVsBasis(nav, initialNav);
+  const totalPnl = depositPnl ? roundNum(depositPnl.pnl, 2) : roundNum(realizedPnl + unrealizedPnl, 2);
+  const totalPnlPct = depositPnl ? roundNum(depositPnl.pct, 2) : 0;
 
-  const dayStart = Date.now() - 86_400_000;
-  const firstBuyAt = new Map<string, number>();
-  for (const t of [...state.trades].sort((a, b) => a.timestamp - b.timestamp)) {
-    if (t.side === "buy" && !firstBuyAt.has(t.symbol.toUpperCase())) {
-      firstBuyAt.set(t.symbol.toUpperCase(), t.timestamp);
+  const dayStartNav = state.dayStartNavUsd ?? 0;
+  const vsYesterday = navVsBasis(nav, dayStartNav);
+  let dailyPnl: number;
+  let dailyPnlPct: number;
+  if (vsYesterday) {
+    dailyPnl = vsYesterday.pnl;
+    dailyPnlPct = vsYesterday.pct;
+  } else {
+    const pctBySymbol = new Map<string, number>();
+    for (const t of tokens) pctBySymbol.set(t.symbol, t.pct24h);
+    for (const s of state.signals) {
+      const key = s.symbol.toUpperCase();
+      if (pctBySymbol.has(key)) continue;
+      const pct = s.liveChange24h ?? s.change24h;
+      if (pct != null && Number.isFinite(pct)) pctBySymbol.set(key, pct);
     }
+    const reconstructed = computeDailyPnl({
+      nav,
+      trades: state.trades,
+      open: tokens.map((t) => {
+        const row = mapped.find((p) => p.symbol === t.symbol);
+        return {
+          symbol: t.symbol,
+          value: t.value,
+          qty: t.qty,
+          price: t.price,
+          entryPrice: row?.entryPrice ?? 0,
+          entryUnknown: Boolean(row?.entryUnknown),
+          pct24h: t.pct24h,
+        };
+      }),
+      pctBySymbol,
+    });
+    dailyPnl = reconstructed.dailyPnl;
+    dailyPnlPct = reconstructed.dailyPnlPct;
   }
-  const dailyRealized = state.trades
-    .filter((t) => t.side === "sell" && t.pnl !== undefined && t.timestamp >= dayStart)
-    .reduce((s, t) => s + (t.pnl ?? 0), 0);
-
-  let dailyMtm = 0;
-  let assetValue24hAgo = 0;
-  for (const t of tokens) {
-    const row = mapped.find((p) => p.symbol === t.symbol);
-    if (!row || row.entryUnknown) continue;
-    const openedAt = firstBuyAt.get(t.symbol) ?? 0;
-    if (openedAt <= 0) continue;
-    const mtm =
-      openedAt >= dayStart
-        ? (t.price - row.entryPrice) * t.qty
-        : t.value - priorValue(t.value, t.pct24h);
-    dailyMtm += mtm;
-    assetValue24hAgo += t.value - mtm;
-  }
-  const dailyPnl = dailyRealized + dailyMtm;
-  const dailyPnlPct =
-    assetValue24hAgo > 0 ? (dailyPnl / assetValue24hAgo) * 100 : 0;
 
   return {
     ...state,
@@ -608,6 +720,7 @@ export function enrichStateWithWallet(
     realizedPnl,
     unrealizedPnl: roundNum(unrealizedPnl, 2),
     initialNavUsd: roundNum(initialNav, 2),
+    dayStartNavUsd: roundNum(dayStartNav, 2),
     positions: mapped,
     equityCurve,
   };
@@ -636,19 +749,66 @@ export function mapTrack1ToDashboard(
   const assetPnl = closedStats.realizedPnl + unrealizedPnl;
   const tradedCost = costOpen + closedStats.costClosed;
   const assetPnlPct = tradedCost > 0 ? (assetPnl / tradedCost) * 100 : 0;
-  const dailyPnl = closedStats.dailyRealizedPnl;
-  const dailyPnlPct = tradedCost > 0 ? (dailyPnl / tradedCost) * 100 : 0;
+
+  const nav = snap.portfolio.totalValueUsd;
+  const initialNav = snap.portfolio.initialNavUsd ?? 0;
+  const dayStartNav = snap.portfolio.dayStartNavUsd ?? 0;
+  const depositPnl = navVsBasis(nav, initialNav);
+  const vsYesterday = navVsBasis(nav, dayStartNav);
+
+  const mappedTrades = mapTrades(snap, closedStats.sellPnlByOrderId);
+  const mappedPositions = snap.portfolio.positions
+    .filter((p) => p.amount * p.currentPrice >= MIN_POSITION_USD)
+    .map(mapPosition);
+
+  let dailyPnl: number;
+  let dailyPnlPct: number;
+  if (vsYesterday) {
+    dailyPnl = vsYesterday.pnl;
+    dailyPnlPct = vsYesterday.pct;
+  } else {
+    const pctBySymbol = new Map<string, number>();
+    for (const [sym, live] of Object.entries(snap.livePrices ?? {})) {
+      if (live?.change24hPct != null && Number.isFinite(live.change24hPct)) {
+        pctBySymbol.set(sym.toUpperCase(), live.change24hPct);
+      }
+    }
+    for (const [sym, metrics] of Object.entries(snap.tokenMetrics ?? {})) {
+      const key = sym.toUpperCase();
+      if (pctBySymbol.has(key)) continue;
+      if (metrics.momentum != null && Number.isFinite(metrics.momentum)) {
+        pctBySymbol.set(key, metrics.momentum);
+      }
+    }
+    const reconstructed = computeDailyPnl({
+      nav,
+      trades: mappedTrades,
+      open: mappedPositions.map((p) => ({
+        symbol: p.symbol,
+        value: p.amount * p.currentPrice,
+        qty: p.amount,
+        price: p.currentPrice,
+        entryPrice: p.entryPrice,
+        entryUnknown: Boolean(p.entryUnknown),
+        pct24h: pctBySymbol.get(p.symbol.toUpperCase()) ?? 0,
+      })),
+      pctBySymbol,
+    });
+    dailyPnl = reconstructed.dailyPnl;
+    dailyPnlPct = reconstructed.dailyPnlPct;
+  }
 
   const base: AgentState = {
     status: snap.running ? "running" : "paused",
     mode: snap.mode as "live" | "paper",
     uptime,
     cycleCount: snap.cycleCount,
-    portfolioValue: roundNum(snap.portfolio.totalValueUsd, 2),
+    portfolioValue: roundNum(nav, 2),
     cashBalance: roundNum(snap.portfolio.cashUsd, 2),
-    initialNavUsd: roundNum(snap.portfolio.initialNavUsd ?? 0, 2),
-    totalPnl: roundNum(assetPnl, 2),
-    totalPnlPct: roundNum(assetPnlPct, 2),
+    initialNavUsd: roundNum(initialNav, 2),
+    dayStartNavUsd: roundNum(dayStartNav, 2),
+    totalPnl: roundNum(depositPnl ? depositPnl.pnl : assetPnl, 2),
+    totalPnlPct: roundNum(depositPnl ? depositPnl.pct : assetPnlPct, 2),
     realizedPnl: roundNum(closedStats.realizedPnl, 2),
     unrealizedPnl: roundNum(unrealizedPnl, 2),
     gasReserveUsd: roundNum(snap.portfolio.gasReserveUsd ?? 0, 2),
@@ -672,10 +832,8 @@ export function mapTrack1ToDashboard(
     sessionActive: snap.session?.active ?? snap.autonomous?.session,
     sessionLabel: snap.session?.label ?? snap.autonomous?.sessionLabel,
     nyTimeLabel: snap.session?.nyTimeLabel ?? snap.autonomous?.nyTimeLabel,
-    positions: snap.portfolio.positions
-      .filter((p) => p.amount * p.currentPrice >= MIN_POSITION_USD)
-      .map(mapPosition),
-    trades: mapTrades(snap, closedStats.sellPnlByOrderId),
+    positions: mappedPositions,
+    trades: mappedTrades,
     signals: mapSignals(snap),
     activity: mapActivity(logs),
     equityCurve: mapEquityCurve(snap),

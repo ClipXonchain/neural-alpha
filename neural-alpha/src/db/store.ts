@@ -22,6 +22,8 @@ export interface NavPeakState {
   peakNavUsd: number;
   initialNavUsd: number;
   baselineInitialized: boolean;
+  dayStartNavUsd?: number;
+  dayStartUtcDate?: string;
 }
 
 /** Persisted cost basis per open symbol — survives agent restarts. */
@@ -377,6 +379,25 @@ export class AgentStore {
       return rows[0]?.value_json ?? null;
     } catch (err) {
       logger.warn("Failed to load NAV state from Neon", { error: String(err) });
+      return null;
+    }
+  }
+
+  /** Last recorded NAV strictly before `beforeMs` (used as yesterday's close). */
+  async loadLastNavBefore(beforeMs: number): Promise<number | null> {
+    if (!this.pool || !Number.isFinite(beforeMs) || beforeMs <= 0) return null;
+    try {
+      const { rows } = await this.pool.query<{ total_nav_usd: number }>(
+        `SELECT total_nav_usd FROM nav_snapshots
+         WHERE timestamp < $1 AND total_nav_usd > 0
+         ORDER BY timestamp DESC
+         LIMIT 1`,
+        [new Date(beforeMs).toISOString()]
+      );
+      const nav = rows[0]?.total_nav_usd;
+      return nav != null && nav > 0 ? nav : null;
+    } catch (err) {
+      logger.warn("Failed to load yesterday NAV from Neon", { error: String(err) });
       return null;
     }
   }

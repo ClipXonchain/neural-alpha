@@ -116,7 +116,11 @@ export function MetricCards({ state }: { state: AgentState }) {
       <MetricCard
         label="Total PnL"
         value={formatUsd(state.totalPnl)}
-        subValue={`${formatPct(state.totalPnlPct)} · ${formatUsd(state.realizedPnl)} closed`}
+        subValue={
+          state.initialNavUsd > 0
+            ? `${formatPct(state.totalPnlPct)} · vs ${formatUsd(state.initialNavUsd)} deposited`
+            : `${formatPct(state.totalPnlPct)} · ${formatUsd(state.realizedPnl)} closed`
+        }
         icon={state.totalPnl >= 0 ? <TrendingUp className="size-4" /> : <TrendingDown className="size-4" />}
         trend={pnlTrend}
         accentColor={state.totalPnl >= 0 ? "neon" : "danger"}
@@ -125,7 +129,7 @@ export function MetricCards({ state }: { state: AgentState }) {
       <MetricCard
         label="Daily PnL"
         value={formatUsd(state.dailyPnl)}
-        subValue={formatPct(state.dailyPnlPct)}
+        subValue={`${formatPct(state.dailyPnlPct)} · vs yesterday`}
         icon={<BarChart3 className="size-4" />}
         trend={dailyTrend}
         accentColor={state.dailyPnl >= 0 ? "neon" : "danger"}

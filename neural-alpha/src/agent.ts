@@ -1867,6 +1867,20 @@ export class TradingAgent {
       const navState = await store.loadNavState();
       if (navState) this.portfolio.restorePersistedNav(navState);
 
+      const todayUtc = new Date().toISOString().slice(0, 10);
+      if (this.portfolio.getDayStartNav() <= 0) {
+        const midnight = Date.UTC(
+          new Date().getUTCFullYear(),
+          new Date().getUTCMonth(),
+          new Date().getUTCDate()
+        );
+        const yesterdayNav = await store.loadLastNavBefore(midnight);
+        if (yesterdayNav && yesterdayNav > 0) {
+          this.portfolio.setDayStartNav(yesterdayNav, todayUtc);
+        }
+      }
+      await store.saveNavState(this.portfolio.exportNavState());
+
       const wallet = await this.resolveBootstrapWalletAddress();
       const bl = await store.loadUserBlacklist();
       restoreUserBlacklist(bl);
@@ -2084,11 +2098,7 @@ export class TradingAgent {
     if (!store.enabled) return;
     const peak = this.portfolio.getPeakNav();
     await store.saveNavSnapshot(snap, cycleId, this.config.mode, peak, this.computeCycleStats(snap));
-    await store.saveNavState({
-      peakNavUsd: peak,
-      initialNavUsd: this.portfolio.initialValue,
-      baselineInitialized: this.portfolio.hasBaseline,
-    });
+    await store.saveNavState(this.portfolio.exportNavState());
   }
 
   /**
@@ -2501,6 +2511,8 @@ export class TradingAgent {
     } else {
       this.portfolio.realignNavBaselineIfStale(navUsd);
     }
+    this.portfolio.observeDayNav(navUsd);
+    void getAgentStore().saveNavState(this.portfolio.exportNavState());
 
     logger.info("Wallet capital synced from chain", {
       usdt: stable.balance,

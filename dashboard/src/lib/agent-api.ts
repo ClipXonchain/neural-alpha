@@ -74,6 +74,7 @@ export interface Track1Snapshot {
     gasReserveUsd?: number;
     maxDrawdownPct: number;
     tradeCount: number;
+    dayStartNavUsd?: number;
     positions: Array<{
       symbol: string;
       amount: number;

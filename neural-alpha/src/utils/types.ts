@@ -125,6 +125,8 @@ export interface PortfolioSnapshot {
   realizedPnl: number;
   /** NAV baseline for lifetime PnL (set when wallet sync anchors capital). */
   initialNavUsd?: number;
+  /** Yesterday's close / UTC midnight NAV — Daily PnL = current − this. */
+  dayStartNavUsd?: number;
   gasReserveUsd?: number;
   maxDrawdownPct: number;
   tradeCount: number;
