@@ -5,7 +5,7 @@ export type CmcTapeRegime = "risk_on" | "risk_off" | "neutral";
 
 /**
  * Cheap CMC MCP overlay (~$0.01/call). Do NOT hit this on the 10s quote pulse.
- * Cache: global metrics ~20 min, macro events ~6 h.
+ * Cache: global metrics and macro events both refresh every 4 hours.
  *
  * Campaign-eligible tools only:
  *   get_global_metrics_latest  — risk-on / risk-off tape
@@ -28,8 +28,9 @@ export interface CmcMacroSnapshot {
   summary: string;
 }
 
-const GLOBAL_TTL_MS = parseInt(process.env.CMC_MACRO_REFRESH_MS || "2700000", 10) || 2_700_000;
-const EVENTS_TTL_MS = parseInt(process.env.CMC_EVENTS_REFRESH_MS || "21600000", 10) || 21_600_000;
+const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+const GLOBAL_TTL_MS = parseInt(process.env.CMC_MACRO_REFRESH_MS || String(FOUR_HOURS_MS), 10) || FOUR_HOURS_MS;
+const EVENTS_TTL_MS = parseInt(process.env.CMC_EVENTS_REFRESH_MS || String(FOUR_HOURS_MS), 10) || FOUR_HOURS_MS;
 
 const EVENT_RE =
   /\b(fomc|cpi|pce|nfp|nonfarm|payroll|powell|jackson hole|rate (cut|hike|decision)|fed(eral)? reserve|unemployment)\b/i;

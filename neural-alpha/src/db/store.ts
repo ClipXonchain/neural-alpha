@@ -5,7 +5,10 @@ import { Pool } from "@neondatabase/serverless";
 import type { PortfolioSnapshot, TradeOrder, TradeResult } from "../utils/types.js";
 import { isPaperTxHash } from "../execution/executor.js";
 import { logger } from "../utils/logger.js";
-import { dedupeAndCleanTradeResults } from "../utils/trade-dedupe.js";
+import {
+  classifyAssetTrade,
+  dedupeAndCleanTradeResults,
+} from "../utils/trade-dedupe.js";
 
 export interface ChainSyncRecord {
   holdings: Record<string, number>;
@@ -109,9 +112,20 @@ const ON_CHAIN_TX = /^0x[a-fA-F0-9]{64}$/;
 async function deleteOtherRowsForTxHash(
   pool: Pool,
   txHash: string | undefined,
-  keepOrderId: string
+  keepOrderId: string,
+  side?: string
 ): Promise<void> {
   if (!txHash || !ON_CHAIN_TX.test(txHash)) return;
+  if (side === "buy" || side === "sell") {
+    await pool.query(
+      `DELETE FROM trades
+       WHERE LOWER(tx_hash) = LOWER($1)
+         AND order_id <> $2
+         AND side = $3`,
+      [txHash, keepOrderId, side]
+    );
+    return;
+  }
   await pool.query(
     `DELETE FROM trades
      WHERE LOWER(tx_hash) = LOWER($1)
@@ -158,7 +172,7 @@ export class AgentStore {
     if (!this.pool) return;
     try {
       const status = tradeStatus(result, mode);
-      await deleteOtherRowsForTxHash(this.pool, result.txHash, result.orderId);
+      await deleteOtherRowsForTxHash(this.pool, result.txHash, result.orderId, order.side);
       await this.pool.query(
         `INSERT INTO trades (
           order_id, symbol, side, amount_usd,
@@ -200,14 +214,21 @@ export class AgentStore {
     }
   }
 
-  /** Remove Binance Web3 aggregate rows superseded by real on-chain txs. */
+  /** Remove Binance aggregates only when a real 0x hash exists for the same symbol+side. */
   async deleteBinanceAggregateTrades(walletAddress: string): Promise<number> {
     if (!this.pool) return 0;
     try {
       const { rowCount } = await this.pool.query(
-        `DELETE FROM trades
-         WHERE tx_hash LIKE 'binance-web3-%'
-           AND LOWER(wallet_address) = $1`,
+        `DELETE FROM trades t
+         WHERE t.tx_hash LIKE 'binance-web3-%'
+           AND LOWER(t.wallet_address) = $1
+           AND EXISTS (
+             SELECT 1 FROM trades r
+             WHERE LOWER(r.wallet_address) = $1
+               AND r.tx_hash ~ '^0x[0-9a-fA-F]{64}$'
+               AND UPPER(r.symbol) = UPPER(t.symbol)
+               AND r.side = t.side
+           )`,
         [walletAddress.toLowerCase()]
       );
       return rowCount ?? 0;
@@ -220,24 +241,21 @@ export class AgentStore {
   /** Persist a trade reconstructed from on-chain transfer history (idempotent). */
   async saveChainTrade(trade: TradeResult, walletAddress: string): Promise<void> {
     if (!this.pool || !trade.txHash) return;
-    const funding = new Set(["USDT", "USDC", "U", "USD1", "BNB", "BUSD", "DAI", "FDUSD"]);
-    const from = trade.fromToken.toUpperCase();
-    const to = trade.toToken.toUpperCase();
-    const isBuy = funding.has(from) && !funding.has(to);
-    const side = isBuy ? "buy" : "sell";
-    const symbol = isBuy ? trade.toToken : trade.fromToken;
+    const side = classifyAssetTrade(trade.fromToken, trade.toToken);
+    if (!side) return;
+    const symbol = side === "buy" ? trade.toToken : trade.fromToken;
     const fromAmt = parseFloat(trade.fromAmount) || 0;
     const toAmt = parseFloat(trade.toAmount ?? "") || 0;
-    const amountUsd = isBuy ? fromAmt : toAmt || fromAmt * (trade.priceAtExecution || 0);
+    const amountUsd = side === "buy" ? fromAmt : toAmt || fromAmt * (trade.priceAtExecution || 0);
 
     try {
-      await deleteOtherRowsForTxHash(this.pool, trade.txHash, trade.orderId);
+      await deleteOtherRowsForTxHash(this.pool, trade.txHash, trade.orderId, side);
       await this.pool.query(
         `INSERT INTO trades (
           order_id, symbol, side, amount_usd,
           from_token, to_token, from_amount, to_amount,
-          price_usd, tx_hash, status, confirmed_at, wallet_address
-        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'confirmed',$11,$12)
+          price_usd, tx_hash, status, confirmed_at, wallet_address, realized_pnl
+        ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'confirmed',$11,$12,$13)
         ON CONFLICT (order_id) DO UPDATE SET
           from_amount = EXCLUDED.from_amount,
           to_amount = EXCLUDED.to_amount,
@@ -245,7 +263,8 @@ export class AgentStore {
           price_usd = EXCLUDED.price_usd,
           tx_hash = EXCLUDED.tx_hash,
           confirmed_at = EXCLUDED.confirmed_at,
-          wallet_address = COALESCE(EXCLUDED.wallet_address, trades.wallet_address)`,
+          wallet_address = COALESCE(EXCLUDED.wallet_address, trades.wallet_address),
+          realized_pnl = COALESCE(EXCLUDED.realized_pnl, trades.realized_pnl)`,
         [
           trade.orderId,
           symbol.toUpperCase(),
@@ -259,6 +278,7 @@ export class AgentStore {
           trade.txHash,
           new Date(trade.timestamp).toISOString(),
           walletAddress.toLowerCase(),
+          trade.realizedPnl ?? null,
         ]
       );
     } catch (err) {

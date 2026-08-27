@@ -14,16 +14,29 @@ const GAS_SYMBOL = "BNB";
 const CASH_SYMBOLS = new Set(["USDT", "USDC", "U", "USD1", "BUSD", "DAI", "FDUSD", "TUSD"]);
 
 /** Funding-side tokens for buy/sell classification (matches agent portfolio). */
-const FUNDING_TOKENS = new Set([...CASH_SYMBOLS, "BNB"]);
+const FUNDING_TOKENS = new Set([...CASH_SYMBOLS, "BNB", "WBNB"]);
+const BSC_USDT_ADDRESS = "0x55d398326f99059ff775485246999027b3197955";
 
-/** Buy = funding → asset. Sell = asset → funding. Skip USDT↔BNB and asset↔asset. */
+function isFundingToken(token: string): boolean {
+  const t = token.trim();
+  if (!t) return false;
+  if (t.toLowerCase() === BSC_USDT_ADDRESS) return true;
+  return FUNDING_TOKENS.has(t.toUpperCase());
+}
+
+function looksLikeBstock(token: string): boolean {
+  if (isFundingToken(token)) return false;
+  return /^[A-Z0-9]{2,12}B$/.test(token.trim().toUpperCase());
+}
+
+/** Buy = funding → asset. Sell = asset → funding (including unknown quote / contract). */
 function classifyAssetTrade(fromToken: string, toToken: string): "buy" | "sell" | null {
-  const from = fromToken.toUpperCase();
-  const to = toToken.toUpperCase();
-  const fromFund = FUNDING_TOKENS.has(from);
-  const toFund = FUNDING_TOKENS.has(to);
+  const fromFund = isFundingToken(fromToken);
+  const toFund = isFundingToken(toToken);
   if (fromFund && !toFund) return "buy";
   if (!fromFund && toFund) return "sell";
+  if (looksLikeBstock(fromToken) && !looksLikeBstock(toToken)) return "sell";
+  if (!looksLikeBstock(fromToken) && looksLikeBstock(toToken)) return "buy";
   return null;
 }
 
@@ -337,9 +350,10 @@ function mapTrades(
   const seen = new Map<string, Track1Snapshot["trades"][number]>();
   for (const t of snap.trades.filter((x) => isConfirmedTrade(x, snap.mode))) {
     const hash = t.txHash?.toLowerCase();
+    const sideHint = classifyAssetTrade(t.fromToken, t.toToken);
     const key =
       hash && ON_CHAIN_TX_PATTERN.test(hash)
-        ? `hash:${hash}`
+        ? `hash:${hash}:${sideHint ?? t.orderId}`
         : hash?.startsWith("binance-web3-")
           ? `binance:${hash}`
           : `order:${t.orderId}`;
@@ -372,7 +386,10 @@ function mapTrades(
         : toAmt || (price > 0 ? tokenQty * price : 0);
 
       const inferredSellPnl = !isBuy ? sellPnls?.get(t.orderId) : undefined;
-      const sellPnl = !isBuy ? (inferredSellPnl ?? t.realizedPnl) : undefined;
+      const storedSellPnl = !isBuy ? t.realizedPnl : undefined;
+      const sellPnl = !isBuy
+        ? (inferredSellPnl ?? storedSellPnl)
+        : undefined;
 
       return [{
         id: t.orderId,

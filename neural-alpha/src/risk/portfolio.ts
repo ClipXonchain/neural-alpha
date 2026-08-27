@@ -3,27 +3,16 @@ import { MIN_GAS_RESERVE_USD, MIN_POSITION_VALUE_USD } from "../config.js";
 import { getLatestPrice } from "../data/market.js";
 import { logger } from "../utils/logger.js";
 import {
+  classifyAssetTrade,
   dedupeAndCleanTradeResults,
   preferTradeRecord,
+  realSymbolSideKeys,
+  symbolSideKey,
+  tradeDedupeKey,
 } from "../utils/trade-dedupe.js";
-
-const FUNDING_TOKENS = new Set([
-  "USDT", "USDC", "U", "USD1", "BNB", "BUSD", "DAI", "FDUSD", "TUSD",
-]);
 
 /** Cap in-memory NAV history so dashboard SSE cannot grow without bound. */
 const MAX_NAV_POINTS = 240;
-
-/** Buy = funding → asset. Sell = asset → funding. Skip USDT↔BNB and asset↔asset. */
-function classifyAssetTrade(fromToken: string, toToken: string): "buy" | "sell" | null {
-  const from = fromToken.toUpperCase();
-  const to = toToken.toUpperCase();
-  const fromFund = FUNDING_TOKENS.has(from);
-  const toFund = FUNDING_TOKENS.has(to);
-  if (fromFund && !toFund) return "buy";
-  if (!fromFund && toFund) return "sell";
-  return null;
-}
 
 function parseTradeAmount(raw?: string): number {
   const n = parseFloat(raw ?? "");
@@ -375,9 +364,7 @@ export class PortfolioTracker {
     let latest = 0;
     for (const t of this.tradeHistory) {
       if (!t.success) continue;
-      const from = t.fromToken.toUpperCase();
-      const to = t.toToken.toUpperCase();
-      if (FUNDING_TOKENS.has(from) && !FUNDING_TOKENS.has(to)) {
+      if (classifyAssetTrade(t.fromToken, t.toToken) === "buy") {
         latest = Math.max(latest, t.timestamp);
       }
     }
@@ -572,8 +559,10 @@ export class PortfolioTracker {
     realizedPnl: number;
     costClosed: number;
     dailyRealizedPnl: number;
+    sellPnlByOrderId: Map<string, number>;
   } {
     const ledgers = new Map<string, { qty: number; cost: number }>();
+    const sellPnlByOrderId = new Map<string, number>();
     let wins = 0;
     let losses = 0;
     let closedSells = 0;
@@ -634,21 +623,54 @@ export class PortfolioTracker {
       costClosed += cost;
       realizedPnl += pnl;
       if (t.timestamp >= dayStart) dailyRealizedPnl += pnl;
+      sellPnlByOrderId.set(t.orderId, pnl);
       if (pnl >= 0) wins++;
       else losses++;
     }
 
     const winRate = closedSells > 0 ? (wins / closedSells) * 100 : 0;
-    return { closedSells, wins, losses, winRate, realizedPnl, costClosed, dailyRealizedPnl };
+    return {
+      closedSells,
+      wins,
+      losses,
+      winRate,
+      realizedPnl,
+      costClosed,
+      dailyRealizedPnl,
+      sellPnlByOrderId,
+    };
   }
 
-  /** Drop Binance Web3 aggregate rows once real on-chain txs are available. */
+  /**
+   * Write FIFO realized PnL onto sell rows that are missing it (chain backfill).
+   * Returns trades whose `realizedPnl` changed so the caller can persist them.
+   */
+  annotateSellRealizedPnl(): TradeResult[] {
+    const { realizedPnl, sellPnlByOrderId } = this.getClosedTradeStats();
+    this.realizedPnlUsd = realizedPnl;
+    const updated: TradeResult[] = [];
+    for (const t of this.tradeHistory) {
+      const pnl = sellPnlByOrderId.get(t.orderId);
+      if (pnl === undefined) continue;
+      if (t.realizedPnl === pnl) continue;
+      t.realizedPnl = pnl;
+      updated.push(t);
+    }
+    return updated;
+  }
+
+  /** Drop Binance aggregates only when a real 0x hash exists for the same symbol+side. */
   purgeBinanceAggregateTrades(): number {
+    const covered = realSymbolSideKeys(this.tradeHistory);
     const before = this.tradeHistory.length;
     this.tradeHistory = this.tradeHistory.filter((t) => {
       if (!t.txHash?.startsWith("binance-web3-")) return true;
-      this.persistentTradeIds.delete(t.orderId);
-      return false;
+      const key = symbolSideKey(t);
+      if (key && covered.has(key)) {
+        this.persistentTradeIds.delete(t.orderId);
+        return false;
+      }
+      return true;
     });
     const removed = before - this.tradeHistory.length;
     if (removed > 0) this.rebuildDailyTradeCounts();
@@ -829,13 +851,11 @@ export class PortfolioTracker {
     return pnl;
   }
 
-  /** Merge or replace a confirmed on-chain trade (by tx hash). */
+  /** Merge or replace a confirmed on-chain trade (by tx hash + side). */
   upsertChainTrade(trade: import("../utils/types.js").TradeResult) {
     if (!trade.txHash) return;
-    const hash = trade.txHash.toLowerCase();
-    const idx = this.tradeHistory.findIndex(
-      (t) => t.txHash?.toLowerCase() === hash
-    );
+    const key = tradeDedupeKey(trade);
+    const idx = this.tradeHistory.findIndex((t) => tradeDedupeKey(t) === key);
     if (idx >= 0) {
       this.tradeHistory[idx] = preferTradeRecord(this.tradeHistory[idx]!, trade);
     } else if (!this.tradeHistory.some((t) => t.orderId === trade.orderId)) {

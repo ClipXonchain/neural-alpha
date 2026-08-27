@@ -3,7 +3,8 @@ import { BSC_TOKEN_ADDRESSES } from "./bsc-token-addresses.js";
 import { logger } from "../utils/logger.js";
 import type { TradeResult } from "../utils/types.js";
 import { fetchRawBinancePositions } from "./binance-web3-trade-history.js";
-import { getTokenDecimals, preloadDecimals, tokenAmountFromRaw } from "./bsc-token-decimals.js";
+import { preloadDecimals, tokenAmountFromRaw } from "./bsc-token-decimals.js";
+import { classifyAssetTrade } from "../utils/trade-dedupe.js";
 
 const DEFAULT_RPC_URLS = [
   "https://bsc-dataseed.binance.org/",
@@ -32,7 +33,7 @@ const BSC_BLOCK_TIME_MS =
 const TRANSFER_TOPIC =
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef";
 const NATIVE_GAS = new Set(["BNB"]);
-const STABLE_SET = new Set([...STABLECOINS, "BNB"]);
+const STABLE_SET = new Set([...STABLECOINS, "BNB", "WBNB"]);
 
 /** Binance Web3 lastTxTime is often ~9h ahead of on-chain block time. */
 const BINANCE_TX_TIME_OFFSET_MS =
@@ -318,7 +319,101 @@ async function buildScanRanges(
   return merged.sort((a, b) => b.to - a.to);
 }
 
-async function scanBlockRangeForSwaps(
+function padTopicAddress(addr: string): string {
+  return "0x" + addr.toLowerCase().replace(/^0x/, "").padStart(64, "0");
+}
+
+function tradeSeenKey(trade: TradeResult): string {
+  const side = classifyAssetTrade(trade.fromToken, trade.toToken) ?? "unk";
+  return `${(trade.txHash ?? "").toLowerCase()}:${side}`;
+}
+
+async function collectWalletSwapTxHashes(
+  wallet: string,
+  fromBlock: number,
+  toBlock: number
+): Promise<Map<string, number>> {
+  const pad = padTopicAddress(wallet);
+  const fromHex = `0x${fromBlock.toString(16)}`;
+  const toHex = `0x${toBlock.toString(16)}`;
+  const [asFrom, asTo] = await Promise.all([
+    rpcCall<RpcLog[]>("eth_getLogs", [
+      { fromBlock: fromHex, toBlock: toHex, topics: [TRANSFER_TOPIC, pad] },
+    ]),
+    rpcCall<RpcLog[]>("eth_getLogs", [
+      { fromBlock: fromHex, toBlock: toHex, topics: [TRANSFER_TOPIC, null, pad] },
+    ]),
+  ]);
+
+  const byTx = new Map<string, number>();
+  for (const log of [...(asFrom ?? []), ...(asTo ?? [])]) {
+    const hash = log.transactionHash;
+    if (!hash) continue;
+    const blockNumber = parseInt(log.blockNumber, 16);
+    if (!Number.isFinite(blockNumber)) continue;
+    const prev = byTx.get(hash);
+    if (prev === undefined || blockNumber < prev) byTx.set(hash, blockNumber);
+  }
+  return byTx;
+}
+
+async function ingestParsedSwaps(
+  wallet: string,
+  txHash: string,
+  blockTs: number,
+  acc: TradeResult[],
+  seenHash: Set<string>,
+  limit: number
+): Promise<void> {
+  for (const t of await parseSwapsFromTx(txHash, wallet, blockTs)) {
+    if (acc.length >= limit) return;
+    if (!t.txHash) continue;
+    const key = tradeSeenKey(t);
+    if (seenHash.has(key)) continue;
+    seenHash.add(key);
+    acc.push(t);
+  }
+}
+
+/**
+ * Discover swaps by ERC-20 Transfer logs involving the wallet (from OR to).
+ * Agentic Wallet / Binance Web3 sells are often submitted by a relayer, so
+ * `tx.from` is not the user wallet.
+ */
+async function scanRangeViaTransferLogs(
+  wallet: string,
+  fromBlock: number,
+  toBlock: number,
+  seenTx: Set<string>,
+  limit: number,
+  acc: TradeResult[],
+  seenHash: Set<string>
+): Promise<void> {
+  const byTx = await collectWalletSwapTxHashes(wallet, fromBlock, toBlock);
+  const uniqueBlocks = [...new Set(byTx.values())];
+  const tsByBlock = new Map<number, number>();
+  await Promise.all(
+    uniqueBlocks.map(async (block) => {
+      tsByBlock.set(block, await getBlockTimestamp(block));
+    })
+  );
+
+  const entries = [...byTx.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [hash, blockNumber] of entries) {
+    if (acc.length >= limit) return;
+    if (seenTx.has(hash)) continue;
+    seenTx.add(hash);
+    const blockTs = tsByBlock.get(blockNumber) ?? 0;
+    try {
+      await ingestParsedSwaps(wallet, hash, blockTs, acc, seenHash, limit);
+    } catch {
+      /* skip failed receipt fetches */
+    }
+  }
+}
+
+/** Fallback when getLogs is rate-limited: only origin-wallet txs (misses relayers). */
+async function scanRangeViaTxFrom(
   wallet: string,
   fromBlock: number,
   toBlock: number,
@@ -351,16 +446,37 @@ async function scanBlockRangeForSwaps(
         if (seenTx.has(tx.hash)) continue;
         seenTx.add(tx.hash);
         try {
-          for (const t of await parseSwapsFromTx(tx.hash, wallet, blockTs)) {
-            if (!t.txHash || seenHash.has(t.txHash)) continue;
-            seenHash.add(t.txHash);
-            acc.push(t);
-            if (acc.length >= limit) return;
-          }
+          await ingestParsedSwaps(wallet, tx.hash, blockTs, acc, seenHash, limit);
         } catch {
           /* skip failed receipt fetches */
         }
       }
+    }
+  }
+}
+
+async function scanBlockRangeForSwaps(
+  wallet: string,
+  fromBlock: number,
+  toBlock: number,
+  seenTx: Set<string>,
+  limit: number,
+  acc: TradeResult[],
+  seenHash: Set<string>
+): Promise<void> {
+  const logChunk = parseInt(process.env.BSC_GETLOGS_MAX_SPAN || "500", 10) || 500;
+
+  for (let end = toBlock; end >= fromBlock && acc.length < limit; end -= logChunk) {
+    const start = Math.max(fromBlock, end - logChunk + 1);
+    try {
+      await scanRangeViaTransferLogs(wallet, start, end, seenTx, limit, acc, seenHash);
+    } catch (err) {
+      logger.warn("BSC getLogs scan failed — falling back to tx.from filter", {
+        from: start,
+        to: end,
+        error: String(err),
+      });
+      await scanRangeViaTxFrom(wallet, start, end, seenTx, limit, acc, seenHash);
     }
   }
 }
@@ -390,7 +506,11 @@ async function scanWalletSwaps(
   }
 
   all.sort((a, b) => b.timestamp - a.timestamp);
-  return all.slice(0, limit);
+  if (all.length <= limit) return all;
+  const sells = all.filter((t) => classifyAssetTrade(t.fromToken, t.toToken) === "sell");
+  const rest = all.filter((t) => classifyAssetTrade(t.fromToken, t.toToken) !== "sell");
+  return [...sells.slice(0, limit), ...rest.slice(0, Math.max(0, limit - Math.min(sells.length, limit)))]
+    .sort((a, b) => b.timestamp - a.timestamp);
 }
 
 /**

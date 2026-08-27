@@ -87,17 +87,22 @@ function rowToActivityTrades(row: BinancePositionRow): TradeResult[] {
   }
 
   if (sellCnt > 0 && sellUsd > 0) {
-    const tokenQty = avgPrice > 0 ? sellUsd / avgPrice : qty;
+    const soldQty = avgPrice > 0 ? sellUsd / avgPrice : qty;
+    const boughtQty = avgPrice > 0 && buyUsd > 0 ? buyUsd / avgPrice : 0;
+    const costOfSold =
+      boughtQty > 0 ? buyUsd * (Math.min(soldQty, boughtQty) / boughtQty) : 0;
+    const pnl = costOfSold > 0 ? sellUsd - costOfSold : undefined;
     trades.push({
       orderId: `binance-sell-${symbol}-${Math.floor(tsBase)}`,
       success: true,
       txHash: `binance-web3-${symbol.toLowerCase()}-sell`,
       fromToken: symbol,
       toToken: "USDT",
-      fromAmount: tokenQty > 0 ? String(tokenQty) : String(sellUsd / (avgPrice || 1)),
+      fromAmount: soldQty > 0 ? String(soldQty) : String(sellUsd / (avgPrice || 1)),
       toAmount: String(sellUsd),
       priceAtExecution: avgPrice > 0 ? avgPrice : 0,
       timestamp: tsBase,
+      ...(pnl !== undefined ? { realizedPnl: pnl } : {}),
     });
   }
 

@@ -6,7 +6,6 @@ import {
   TrendingDown,
   Wallet,
   BarChart3,
-  ShieldAlert,
   ArrowUpRight,
   ArrowDownRight,
   Repeat,
@@ -104,7 +103,7 @@ export function MetricCards({ state }: { state: AgentState }) {
   const dailyTrend = state.dailyPnl >= 0 ? "up" : "down";
 
   return (
-    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+    <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
       <MetricCard
         label="Portfolio Value"
         value={formatUsd(state.portfolioValue)}
@@ -131,15 +130,6 @@ export function MetricCards({ state }: { state: AgentState }) {
         trend={dailyTrend}
         accentColor={state.dailyPnl >= 0 ? "neon" : "danger"}
         delay={0.1}
-      />
-      <MetricCard
-        label="Drawdown"
-        value={formatPct(state.currentDrawdownPct).replace("+", "")}
-        subValue={state.maxDrawdownLimit >= 100 ? "Limit off" : `Limit ${state.maxDrawdownLimit}%`}
-        icon={<ShieldAlert className="size-4" />}
-        trend={state.currentDrawdownPct > 15 ? "down" : "neutral"}
-        accentColor={state.currentDrawdownPct > 15 ? "danger" : "warning"}
-        delay={0.15}
       />
       <MetricCard
         label="Trades 24h"

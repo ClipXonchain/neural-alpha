@@ -18,7 +18,7 @@ const ADDRESS_TO_SYMBOL: Record<string, string> = (() => {
   return map;
 })();
 
-const STABLE_SET = new Set([...STABLECOINS, "BNB"]);
+const STABLE_SET = new Set([...STABLECOINS, "BNB", "WBNB"]);
 
 interface EtherscanTokenTx {
   hash: string;

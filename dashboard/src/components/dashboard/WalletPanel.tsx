@@ -7,7 +7,6 @@ import {
   Copy,
   Check,
   RefreshCw,
-  Shield,
   ExternalLink,
   ArrowDownToLine,
   Coins,
@@ -22,7 +21,6 @@ interface WalletPanelProps {
   mode: "live" | "paper";
   connected: boolean;
   onSync: () => Promise<{ usdtBalance: number; synced: boolean }>;
-  onRegister: () => Promise<Record<string, unknown>>;
   onSignin: () => Promise<{ urlForWeb?: string; qrCodeId?: string; pairingCode?: string; status?: string }>;
   onVerify: (qrCodeId: string) => Promise<Record<string, unknown>>;
   readOnly?: boolean;
@@ -33,14 +31,12 @@ export function WalletPanel({
   mode,
   connected,
   onSync,
-  onRegister,
   onSignin,
   onVerify,
   readOnly,
 }: WalletPanelProps) {
   const [copied, setCopied] = useState(false);
   const [syncing, setSyncing] = useState(false);
-  const [registering, setRegistering] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
   const [verifying, setVerifying] = useState(false);
   const [signin, setSignin] = useState<{
@@ -67,21 +63,6 @@ export function WalletPanel({
       setActionMsg(String(e));
     } finally {
       setSyncing(false);
-    }
-  };
-
-  const handleRegister = async () => {
-    setRegistering(true);
-    setActionMsg(null);
-    try {
-      const r = await onRegister();
-      const join = typeof r.joinUrl === "string" ? r.joinUrl : wallet?.campaign?.joinUrl;
-      if (join) window.open(join, "_blank", "noopener,noreferrer");
-      setActionMsg("Open Join Now on the campaign page and bind this Agentic Wallet. Trades before registration do not count.");
-    } catch (e) {
-      setActionMsg(String(e));
-    } finally {
-      setRegistering(false);
     }
   };
 
@@ -242,23 +223,17 @@ export function WalletPanel({
           <p className="text-[10px] text-text-muted uppercase tracking-wider mb-2">
             bStock PnL contest
           </p>
-          <div className="grid grid-cols-3 gap-2 text-center">
-            <div>
-              <p className="text-[9px] text-text-muted">Registered</p>
-              <p className="text-xs font-bold text-text-primary" style={{ fontFamily: "var(--font-mono)" }}>
-                {wallet.campaign.registered ? "yes" : "no"}
-              </p>
-            </div>
+          <div className="grid grid-cols-2 gap-2 text-center">
             <div>
               <p className="text-[9px] text-text-muted">CMC x402</p>
               <p className="text-xs font-bold text-text-primary" style={{ fontFamily: "var(--font-mono)" }}>
-                {wallet.campaign.cmcCalls}/{wallet.campaign.minCmcCalls}
+                {wallet.campaign.cmcCalls}
               </p>
             </div>
             <div>
               <p className="text-[9px] text-text-muted">Studio x402</p>
               <p className="text-xs font-bold text-text-primary" style={{ fontFamily: "var(--font-mono)" }}>
-                {wallet.campaign.studioCalls}/{wallet.campaign.minStudioCalls}
+                {wallet.campaign.studioCalls}
               </p>
             </div>
           </div>
@@ -297,18 +272,6 @@ export function WalletPanel({
           >
             <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
             Sync Balance
-          </button>
-        )}
-
-        {!readOnly && (
-          <button
-            onClick={handleRegister}
-            disabled={!connected || registering || wallet?.registered}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-cyan/10 text-cyan border border-cyan/20 hover:bg-cyan/20 disabled:opacity-40 transition-colors"
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            <Shield className="size-3.5" />
-            {wallet?.registered ? "Registered" : "Register Competition"}
           </button>
         )}
 

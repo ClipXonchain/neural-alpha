@@ -6,7 +6,6 @@ import { MetricCards } from "@/components/dashboard/MetricCards";
 import { PositionsTable } from "@/components/dashboard/PositionsTable";
 import { TradeHistory } from "@/components/dashboard/TradeHistory";
 import { SignalMonitor } from "@/components/dashboard/SignalMonitor";
-import { RiskPanel } from "@/components/dashboard/RiskPanel";
 import { ActivityFeed } from "@/components/dashboard/ActivityFeed";
 import { WalletPanel } from "@/components/dashboard/WalletPanel";
 import { AgentControls } from "@/components/dashboard/AgentControls";
@@ -59,7 +58,6 @@ export default function DashboardPage() {
     handleStop,
     handleSyncWallet,
     handleResync,
-    handleRegister,
     handleWalletSignin,
     handleWalletVerify,
     handleSaveConfig,
@@ -121,19 +119,15 @@ export default function DashboardPage() {
 
           <TradeHistory trades={state.trades} />
 
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <WalletPanel
-              wallet={wallet}
-              mode={state.mode}
-              connected={connected}
-              onSync={handleSyncWallet}
-              onRegister={handleRegister}
-              onSignin={handleWalletSignin}
-              onVerify={handleWalletVerify}
-              readOnly={readOnly}
-            />
-            <RiskPanel state={state} />
-          </div>
+          <WalletPanel
+            wallet={wallet}
+            mode={state.mode}
+            connected={connected}
+            onSync={handleSyncWallet}
+            onSignin={handleWalletSignin}
+            onVerify={handleWalletVerify}
+            readOnly={readOnly}
+          />
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <ActivityFeed activity={state.activity} />
