@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { cn, formatUsd, formatPct } from "@/lib/utils";
 import type { AgentState } from "@/lib/mock-data";
+import { BorderGlow } from "@/components/ui/BorderGlow";
 
 type Tone = "up" | "down" | "cyan" | "muted";
 
@@ -31,24 +32,32 @@ const TONE = {
     sub: "text-neon/70",
     chip: "bg-neon/10 text-neon",
     bar: "bg-neon",
+    glowColor: "154 82 58",
+    colors: ["#0ecb81", "#34d399", "#1e9ff2"],
   },
   down: {
     value: "text-danger",
     sub: "text-danger/70",
     chip: "bg-danger/10 text-danger",
     bar: "bg-danger",
+    glowColor: "351 91 62",
+    colors: ["#f6465d", "#fb7185", "#f0b90b"],
   },
   cyan: {
     value: "text-text-primary",
     sub: "text-text-muted",
     chip: "bg-cyan/10 text-cyan",
     bar: "bg-cyan",
+    glowColor: "203 89 53",
+    colors: ["#1e9ff2", "#38bdf8", "#0ecb81"],
   },
   muted: {
     value: "text-text-primary",
     sub: "text-text-muted",
     chip: "bg-surface-overlay text-text-muted",
     bar: "bg-border-glow",
+    glowColor: "210 12 55",
+    colors: ["#848e9c", "#1e9ff2", "#2b3139"],
   },
 } as const;
 
@@ -56,42 +65,55 @@ function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps)
   const t = TONE[tone];
 
   return (
-    <motion.div
-      initial={{ opacity: 0, y: 8 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.28, delay }}
-      className="glass-raised relative flex min-w-[160px] flex-1 items-center gap-3 overflow-hidden rounded-lg px-3 py-2.5"
+    <BorderGlow
+      className="min-w-[160px] flex-1"
+      borderRadius={8}
+      glowRadius={6}
+      glowIntensity={0.7}
+      coneSpread={22}
+      edgeSensitivity={24}
+      glowColor={t.glowColor}
+      backgroundColor="#14171c"
+      colors={[...t.colors]}
+      fillOpacity={0.28}
     >
-      <span className={cn("absolute inset-y-0 left-0 w-[2px]", t.bar)} />
-      <div
-        className={cn(
-          "flex size-8 shrink-0 items-center justify-center rounded-md",
-          t.chip
-        )}
+      <motion.div
+        initial={{ opacity: 0, y: 8 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.28, delay }}
+        className="relative flex h-full items-center gap-3 overflow-hidden rounded-[inherit] px-3 py-2.5"
       >
-        {icon}
-      </div>
-      <div className="min-w-0 leading-tight">
-        <p className="text-[9px] font-mono uppercase tracking-[0.14em] text-text-muted">
-          {label}
-        </p>
-        <p className="mt-0.5 flex items-baseline gap-1.5 min-w-0">
-          <span
-            className={cn("text-[15px] font-bold tabular-nums tracking-tight", t.value)}
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {value}
-          </span>
-          {sub && (
-            <span className={cn("flex items-center gap-0.5 truncate text-[10px] font-mono", t.sub)}>
-              {tone === "up" && <ArrowUpRight className="size-2.5 shrink-0" />}
-              {tone === "down" && <ArrowDownRight className="size-2.5 shrink-0" />}
-              {sub}
-            </span>
+        <span className={cn("absolute inset-y-0 left-0 w-[2px]", t.bar)} />
+        <div
+          className={cn(
+            "flex size-8 shrink-0 items-center justify-center rounded-md",
+            t.chip
           )}
-        </p>
-      </div>
-    </motion.div>
+        >
+          {icon}
+        </div>
+        <div className="min-w-0 leading-tight">
+          <p className="text-[9px] font-mono uppercase tracking-[0.14em] text-text-muted">
+            {label}
+          </p>
+          <p className="mt-0.5 flex items-baseline gap-1.5 min-w-0">
+            <span
+              className={cn("text-[15px] font-bold tabular-nums tracking-tight", t.value)}
+              style={{ fontFamily: "var(--font-mono)" }}
+            >
+              {value}
+            </span>
+            {sub && (
+              <span className={cn("flex items-center gap-0.5 truncate text-[10px] font-mono", t.sub)}>
+                {tone === "up" && <ArrowUpRight className="size-2.5 shrink-0" />}
+                {tone === "down" && <ArrowDownRight className="size-2.5 shrink-0" />}
+                {sub}
+              </span>
+            )}
+          </p>
+        </div>
+      </motion.div>
+    </BorderGlow>
   );
 }
 
@@ -102,7 +124,7 @@ export function MetricCards({ state }: { state: AgentState }) {
     state.closedTrades > 0 ? (state.winRate > 50 ? "up" : "down") : "muted";
 
   return (
-    <div className="flex gap-2 overflow-x-auto pb-0.5">
+    <div className="flex gap-2 overflow-x-auto">
       <Stat
         label="Portfolio"
         value={formatUsd(state.portfolioValue)}
