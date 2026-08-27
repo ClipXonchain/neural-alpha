@@ -1,0 +1,21 @@
+---
+description: Always push this repo to origin/agentic-wallet after user-requested commits
+alwaysApply: true
+---
+
+# Git: always push to `agentic-wallet`
+
+- Default git branch for this project is `agentic-wallet`. Create/switch work here, not `main`.
+- After creating a commit the user requested, also run `git push origin agentic-wallet` (or `git push -u origin agentic-wallet` if upstream is unset) unless they explicitly say not to push.
+- Never force-push. Never skip hooks. Never amend unless the user asks and amend safety rules are met.
+- Never push secrets: `.env`, `.env.local`, keystores, `credentials.json`, `wallet.json`, `.baw/`, or hardcoded keys.
+- The VPS deploys from `agentic-wallet` (`git pull` on that branch). A local-only commit is not deployed.
+
+```bash
+# ✅ after a requested commit
+git push origin agentic-wallet
+
+# ❌ never
+git push --force
+git push origin main
+```

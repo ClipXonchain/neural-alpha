@@ -59,8 +59,10 @@ Thumbs.db
 .cache/
 .eslintcache
 
-# Cursor local state
-.cursor/
+# Cursor local state (keep committed project rules)
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
 
 # PM2
 .pm2/
