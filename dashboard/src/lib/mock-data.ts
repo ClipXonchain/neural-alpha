@@ -113,7 +113,7 @@ export interface AgentState {
   trades: Trade[];
   signals: Signal[];
   activity: ActivityItem[];
-  equityCurve: Array<{ time: string; value: number; pnl: number }>;
+  equityCurve: Array<{ time: string; value: number; pnl: number; ts?: number }>;
   drawdownCurve: Array<{ time: string; drawdown: number }>;
   lastSignalRefreshAt?: number | null;
   signalRefreshSec?: number;

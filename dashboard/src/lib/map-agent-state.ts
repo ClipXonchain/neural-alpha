@@ -43,6 +43,27 @@ function navVsBasis(
   return { pnl, pct: (pnl / basis) * 100 };
 }
 
+/** Yesterday's close: last NAV before UTC midnight, else first mark today. */
+function resolveDayStartNav(
+  snapshots: Array<{ timestamp?: number; ts?: number; value?: number; totalValueUsd?: number }>,
+  explicit?: number,
+  now = Date.now()
+): number {
+  if (explicit && explicit > 0) return explicit;
+  const midnight = utcDayStartMs(now);
+  const points = snapshots
+    .map((s) => ({
+      ts: s.timestamp ?? s.ts ?? 0,
+      value: s.totalValueUsd ?? s.value ?? 0,
+    }))
+    .filter((s) => s.ts > 0 && s.value > 0)
+    .sort((a, b) => a.ts - b.ts);
+  const yesterday = [...points].reverse().find((s) => s.ts < midnight);
+  if (yesterday) return yesterday.value;
+  const firstToday = points.find((s) => s.ts >= midnight);
+  return firstToday?.value ?? 0;
+}
+
 function isSyntheticTradeHash(txHash?: string | null): boolean {
   return Boolean(txHash?.startsWith("binance-web3-"));
 }
@@ -535,6 +556,7 @@ function mapEquityCurve(snap: Track1Snapshot) {
     }),
     value: roundNum(s.totalValueUsd, 2),
     pnl: initial > 0 ? roundNum(s.totalValueUsd - initial, 2) : 0,
+    ts: s.timestamp,
   }));
 }
 
@@ -671,42 +693,13 @@ export function enrichStateWithWallet(
   const totalPnl = depositPnl ? roundNum(depositPnl.pnl, 2) : roundNum(realizedPnl + unrealizedPnl, 2);
   const totalPnlPct = depositPnl ? roundNum(depositPnl.pct, 2) : 0;
 
-  const dayStartNav = state.dayStartNavUsd ?? 0;
+  const dayStartNav =
+    state.dayStartNavUsd && state.dayStartNavUsd > 0
+      ? state.dayStartNavUsd
+      : resolveDayStartNav(state.equityCurve);
   const vsYesterday = navVsBasis(nav, dayStartNav);
-  let dailyPnl: number;
-  let dailyPnlPct: number;
-  if (vsYesterday) {
-    dailyPnl = vsYesterday.pnl;
-    dailyPnlPct = vsYesterday.pct;
-  } else {
-    const pctBySymbol = new Map<string, number>();
-    for (const t of tokens) pctBySymbol.set(t.symbol, t.pct24h);
-    for (const s of state.signals) {
-      const key = s.symbol.toUpperCase();
-      if (pctBySymbol.has(key)) continue;
-      const pct = s.liveChange24h ?? s.change24h;
-      if (pct != null && Number.isFinite(pct)) pctBySymbol.set(key, pct);
-    }
-    const reconstructed = computeDailyPnl({
-      nav,
-      trades: state.trades,
-      open: tokens.map((t) => {
-        const row = mapped.find((p) => p.symbol === t.symbol);
-        return {
-          symbol: t.symbol,
-          value: t.value,
-          qty: t.qty,
-          price: t.price,
-          entryPrice: row?.entryPrice ?? 0,
-          entryUnknown: Boolean(row?.entryUnknown),
-          pct24h: t.pct24h,
-        };
-      }),
-      pctBySymbol,
-    });
-    dailyPnl = reconstructed.dailyPnl;
-    dailyPnlPct = reconstructed.dailyPnlPct;
-  }
+  const dailyPnl = vsYesterday ? vsYesterday.pnl : 0;
+  const dailyPnlPct = vsYesterday ? vsYesterday.pct : 0;
 
   return {
     ...state,
@@ -752,7 +745,7 @@ export function mapTrack1ToDashboard(
 
   const nav = snap.portfolio.totalValueUsd;
   const initialNav = snap.portfolio.initialNavUsd ?? 0;
-  const dayStartNav = snap.portfolio.dayStartNavUsd ?? 0;
+  const dayStartNav = resolveDayStartNav(snap.snapshots, snap.portfolio.dayStartNavUsd);
   const depositPnl = navVsBasis(nav, initialNav);
   const vsYesterday = navVsBasis(nav, dayStartNav);
 
@@ -761,42 +754,8 @@ export function mapTrack1ToDashboard(
     .filter((p) => p.amount * p.currentPrice >= MIN_POSITION_USD)
     .map(mapPosition);
 
-  let dailyPnl: number;
-  let dailyPnlPct: number;
-  if (vsYesterday) {
-    dailyPnl = vsYesterday.pnl;
-    dailyPnlPct = vsYesterday.pct;
-  } else {
-    const pctBySymbol = new Map<string, number>();
-    for (const [sym, live] of Object.entries(snap.livePrices ?? {})) {
-      if (live?.change24hPct != null && Number.isFinite(live.change24hPct)) {
-        pctBySymbol.set(sym.toUpperCase(), live.change24hPct);
-      }
-    }
-    for (const [sym, metrics] of Object.entries(snap.tokenMetrics ?? {})) {
-      const key = sym.toUpperCase();
-      if (pctBySymbol.has(key)) continue;
-      if (metrics.momentum != null && Number.isFinite(metrics.momentum)) {
-        pctBySymbol.set(key, metrics.momentum);
-      }
-    }
-    const reconstructed = computeDailyPnl({
-      nav,
-      trades: mappedTrades,
-      open: mappedPositions.map((p) => ({
-        symbol: p.symbol,
-        value: p.amount * p.currentPrice,
-        qty: p.amount,
-        price: p.currentPrice,
-        entryPrice: p.entryPrice,
-        entryUnknown: Boolean(p.entryUnknown),
-        pct24h: pctBySymbol.get(p.symbol.toUpperCase()) ?? 0,
-      })),
-      pctBySymbol,
-    });
-    dailyPnl = reconstructed.dailyPnl;
-    dailyPnlPct = reconstructed.dailyPnlPct;
-  }
+  const dailyPnl = vsYesterday ? vsYesterday.pnl : 0;
+  const dailyPnlPct = vsYesterday ? vsYesterday.pct : 0;
 
   const base: AgentState = {
     status: snap.running ? "running" : "paused",
