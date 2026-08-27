@@ -32,7 +32,7 @@ function DashboardSkeleton() {
         {!readOnly && (
           <div className="h-16 rounded-xl bg-surface border border-border-dim animate-pulse" />
         )}
-        <div className="flex gap-2">
+        <div className="flex gap-2 py-1">
           {Array.from({ length: 5 }).map((_, i) => (
             <div key={i} className="h-[52px] flex-1 rounded-lg bg-surface border border-border-dim animate-pulse" />
           ))}
@@ -67,9 +67,95 @@ export default function DashboardPage() {
     handleSellPosition,
   } = useAgentConnection();
 
-  if (loading || !state) {
-    return <DashboardSkeleton />;
-  }
+  const home = loading || !state ? (
+    <DashboardSkeleton />
+  ) : (
+    <>
+      <Header
+        state={state}
+        onStart={handleStart}
+        onStop={handleStop}
+        connected={connected}
+        error={error}
+        readOnly={readOnly}
+      />
+
+      <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
+        {!connected && error && (
+          <div className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-2 text-xs font-mono text-warning">
+            {error}
+          </div>
+        )}
+
+        {!readOnly && <AutonomousPanel state={state} />}
+        <MetricCards state={state} />
+
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+          <EquityChart state={state} />
+          <AllocationChart state={state} onRefresh={readOnly ? undefined : handleResync} />
+        </div>
+
+        <PositionsTable
+          positions={state.positions}
+          readOnly={readOnly}
+          connected={connected}
+          onSell={readOnly ? undefined : handleSellPosition}
+        />
+
+        <SignalMonitor
+          signals={state.signals}
+          lastSignalRefreshAt={state.lastSignalRefreshAt}
+          signalRefreshSec={state.signalRefreshSec ?? 10}
+          session={state.sessionActive}
+          readOnly={readOnly}
+          onBlacklist={readOnly ? undefined : async (sym) => { await blacklistToken(sym); }}
+          onUnblacklist={readOnly ? undefined : async (sym) => { await unblacklistToken(sym); }}
+        />
+
+        <TradeHistory trades={state.trades} />
+
+        <WalletPanel
+          wallet={wallet}
+          mode={state.mode}
+          connected={connected}
+          onSync={handleSyncWallet}
+          onSignin={handleWalletSignin}
+          onVerify={handleWalletVerify}
+          readOnly={readOnly}
+        />
+
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <ActivityFeed activity={state.activity} />
+          {!readOnly && (
+            <AgentControls
+              connected={connected}
+              config={agentConfig ? {
+                mode: agentConfig.mode || state.mode,
+                maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 250,
+                slippageTolerance: agentConfig.slippageTolerance ?? 1,
+                minGasReserveUsd: agentConfig.minGasReserveUsd ?? 1.5,
+                maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 4,
+                baseCurrency: agentConfig.baseCurrency,
+                swapCurrencies: agentConfig.swapCurrencies,
+                stopLossPct: agentConfig.stopLossPct ?? state.stopLossPct ?? 8,
+                takeProfitPct: agentConfig.takeProfitPct ?? state.takeProfitPct ?? 14,
+              } : null}
+              onSave={handleSaveConfig}
+            />
+          )}
+        </div>
+
+        <footer className="flex flex-wrap items-center justify-between gap-2 py-4 border-t border-border-dim text-[10px] font-mono text-text-muted">
+          <span>Neural Alpha</span>
+          <div className="flex items-center gap-4">
+            <span>{connected ? "Live agent" : "Offline"}</span>
+            <span>bStock · BSC 56</span>
+            <span>Agentic Wallet</span>
+          </div>
+        </footer>
+      </main>
+    </>
+  );
 
   return (
     <div className="min-h-screen grid-bg scanlines relative">
@@ -79,89 +165,7 @@ export default function DashboardPage() {
       </div>
 
       <div className="relative z-10">
-        <Header
-          state={state}
-          onStart={handleStart}
-          onStop={handleStop}
-          connected={connected}
-          error={error}
-          readOnly={readOnly}
-        />
-
-        <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
-          {!connected && error && (
-            <div className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-2 text-xs font-mono text-warning">
-              {error}
-            </div>
-          )}
-
-          {!readOnly && <AutonomousPanel state={state} />}
-          <MetricCards state={state} />
-
-          <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
-            <EquityChart state={state} />
-            <AllocationChart state={state} onRefresh={readOnly ? undefined : handleResync} />
-          </div>
-
-          <PositionsTable
-            positions={state.positions}
-            readOnly={readOnly}
-            connected={connected}
-            onSell={readOnly ? undefined : handleSellPosition}
-          />
-
-          <SignalMonitor
-            signals={state.signals}
-            lastSignalRefreshAt={state.lastSignalRefreshAt}
-            signalRefreshSec={state.signalRefreshSec ?? 10}
-            session={state.sessionActive}
-            readOnly={readOnly}
-            onBlacklist={readOnly ? undefined : async (sym) => { await blacklistToken(sym); }}
-            onUnblacklist={readOnly ? undefined : async (sym) => { await unblacklistToken(sym); }}
-          />
-
-          <TradeHistory trades={state.trades} />
-
-          <WalletPanel
-            wallet={wallet}
-            mode={state.mode}
-            connected={connected}
-            onSync={handleSyncWallet}
-            onSignin={handleWalletSignin}
-            onVerify={handleWalletVerify}
-            readOnly={readOnly}
-          />
-
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-            <ActivityFeed activity={state.activity} />
-            {!readOnly && (
-              <AgentControls
-                connected={connected}
-                config={agentConfig ? {
-                  mode: agentConfig.mode || state.mode,
-                  maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 250,
-                  slippageTolerance: agentConfig.slippageTolerance ?? 1,
-                  minGasReserveUsd: agentConfig.minGasReserveUsd ?? 1.5,
-                  maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 4,
-                  baseCurrency: agentConfig.baseCurrency,
-                  swapCurrencies: agentConfig.swapCurrencies,
-                  stopLossPct: agentConfig.stopLossPct ?? state.stopLossPct ?? 8,
-                  takeProfitPct: agentConfig.takeProfitPct ?? state.takeProfitPct ?? 14,
-                } : null}
-                onSave={handleSaveConfig}
-              />
-            )}
-          </div>
-
-          <footer className="flex flex-wrap items-center justify-between gap-2 py-4 border-t border-border-dim text-[10px] font-mono text-text-muted">
-            <span>Neural Alpha</span>
-            <div className="flex items-center gap-4">
-              <span>{connected ? "Live agent" : "Offline"}</span>
-              <span>bStock · BSC 56</span>
-              <span>Agentic Wallet</span>
-            </div>
-          </footer>
-        </main>
+        {home}
       </div>
     </div>
   );
