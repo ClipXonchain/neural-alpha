@@ -32,7 +32,11 @@ function DashboardSkeleton() {
         {!readOnly && (
           <div className="h-16 rounded-xl bg-surface border border-border-dim animate-pulse" />
         )}
-        <div className="h-12 rounded-xl bg-surface border border-border-dim animate-pulse" />
+        <div className="flex gap-2">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <div key={i} className="h-[52px] flex-1 rounded-lg bg-surface border border-border-dim animate-pulse" />
+          ))}
+        </div>
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
           <div className="lg:col-span-3 h-[260px] rounded-xl bg-surface border border-border-dim animate-pulse" />
           <div className="lg:col-span-2 h-[260px] rounded-xl bg-surface border border-border-dim animate-pulse" />

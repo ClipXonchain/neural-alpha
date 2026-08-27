@@ -60,7 +60,7 @@ function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps)
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.28, delay }}
-      className="relative flex min-w-[160px] flex-1 items-center gap-3 overflow-hidden rounded-lg border border-border-dim bg-surface px-3 py-2.5"
+      className="glass-raised relative flex min-w-[160px] flex-1 items-center gap-3 overflow-hidden rounded-lg px-3 py-2.5"
     >
       <span className={cn("absolute inset-y-0 left-0 w-[2px]", t.bar)} />
       <div
