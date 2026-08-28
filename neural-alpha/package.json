@@ -8,7 +8,8 @@
     "build": "tsc",
     "start": "tsx --import ./src/load-env.ts src/index.ts",
     "dev": "tsx watch --import ./src/load-env.ts src/index.ts",
-    "register": "tsx src/register.ts"
+    "register": "tsx src/register.ts",
+    "test": "tsx --test src/integrations/campaign-x402-schedule.test.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.0",

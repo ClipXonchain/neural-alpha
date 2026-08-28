@@ -41,7 +41,7 @@ export function AutonomousPanel({ state }: { state: AgentState }) {
     pulseAgeSec > Math.max(20, (state.signalRefreshSec ?? 10) * 3);
 
   return (
-    <div className="glass-raised rounded-xl px-4 py-3 flex flex-wrap items-center gap-x-5 gap-y-2 text-[11px] font-mono">
+    <div className="glass-raised rounded-xl px-3 sm:px-4 py-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-[11px] font-mono min-w-0">
       <div className="flex items-center gap-2 min-w-0">
         <span
           className={cn(

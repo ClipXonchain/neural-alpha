@@ -64,16 +64,16 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
   const uptimeMin = Math.floor((state.uptime % 3600) / 60);
 
   return (
-    <header className="glass sticky top-0 z-50 flex items-center justify-between px-6 py-3">
-      <div className="flex items-center gap-4">
+    <header className="glass sticky top-0 z-50 flex items-center justify-between gap-2 px-3 sm:px-6 py-2.5 sm:py-3 pt-[max(0.625rem,env(safe-area-inset-top))]">
+      <div className="flex items-center gap-2 sm:gap-4 min-w-0">
         <motion.div
-          className="flex items-center gap-3"
+          className="flex items-center gap-2 sm:gap-3 min-w-0"
           initial={{ opacity: 0, x: -20 }}
           animate={{ opacity: 1, x: 0 }}
           transition={{ duration: 0.5 }}
         >
-          <div className="relative flex items-center justify-center size-9 rounded-lg bg-neon/10 border border-neon/20">
-            <Cpu className="size-5 text-neon" />
+          <div className="relative flex items-center justify-center size-8 sm:size-9 rounded-lg bg-neon/10 border border-neon/20 shrink-0">
+            <Cpu className="size-4 sm:size-5 text-neon" />
             {isRunning && (
               <motion.div
                 className="absolute inset-0 rounded-lg border border-neon/40"
@@ -82,9 +82,9 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
               />
             )}
           </div>
-          <div>
+          <div className="min-w-0">
             <h1
-              className="text-lg font-bold tracking-tight"
+              className="text-sm sm:text-lg font-bold tracking-tight truncate"
               style={{ fontFamily: "var(--font-display)" }}
             >
               NEURAL ALPHA
@@ -97,7 +97,7 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
           animate={{ opacity: 1, scale: 1 }}
           transition={{ delay: 0.2 }}
           className={cn(
-            "relative flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-mono font-medium",
+            "relative flex items-center gap-1.5 sm:gap-2 px-2 sm:px-3 py-1 sm:py-1.5 rounded-full text-[10px] sm:text-xs font-mono font-medium shrink-0",
             statusColor === "danger" && "bg-danger/10 text-danger border border-danger/20",
             statusColor === "warning" && "bg-warning/10 text-warning border border-warning/20",
             statusColor === "cyan" && "bg-cyan/10 text-cyan border border-cyan/20",
@@ -151,7 +151,7 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
         </div>
       </div>
 
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-2 sm:gap-3 shrink-0">
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
@@ -189,10 +189,12 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
 
         {readOnly ? (
           <span
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg glass-raised text-[11px] font-mono text-text-muted"
+            className="flex items-center gap-1.5 min-h-10 px-3 py-2 rounded-lg glass-raised text-[11px] font-mono text-text-muted"
             title="Public dashboard — monitoring only"
           >
-            <Eye className="size-3.5" /> MONITORING
+            <Eye className="size-3.5" />
+            <span className="sm:hidden">VIEW</span>
+            <span className="hidden sm:inline">MONITORING</span>
           </span>
         ) : (
           <motion.button
@@ -200,7 +202,7 @@ export function Header({ state, onStart, onStop, connected, readOnly }: HeaderPr
             whileTap={{ scale: 0.95 }}
             onClick={isRunning ? onStop : onStart}
             className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-lg font-mono text-xs font-semibold transition-all",
+              "flex items-center gap-2 min-h-10 px-3 sm:px-4 py-2 rounded-lg font-mono text-xs font-semibold transition-all",
               isRunning
                 ? "bg-warning/10 text-warning border border-warning/30 hover:bg-warning/20"
                 : "bg-neon/10 text-neon border border-neon/30 hover:bg-neon/20"

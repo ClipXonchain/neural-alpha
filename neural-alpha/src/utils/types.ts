@@ -180,6 +180,14 @@ export interface AgentConfig {
   failedSwapCooldownMs: number;
   /** Minimum wait after a successful buy before opening another name. */
   minBuyIntervalMs: number;
+  /** Paid CMC MCP x402 (campaign + macro overlay). Default on. */
+  cmcX402Enabled: boolean;
+  /** Paid Agent Studio stock-analysis x402. Default on. */
+  studioX402Enabled: boolean;
+  /** CMC x402 interval when portfolio slots are full (ms). */
+  cmcX402IntervalMs: number;
+  /** Studio x402 interval when portfolio slots are full (ms). */
+  studioX402IntervalMs: number;
   /** Dashboard / API: tokens blocklisted from scans and new buys. */
   excludedTokens?: string[];
   /** Dashboard / API: minimum USD price to consider tradable. */

@@ -248,28 +248,31 @@ export function SignalMonitor({
   ];
 
   return (
-    <div className="glass-raised overflow-hidden">
-      <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-border-dim">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <Radar className="size-4 text-cyan shrink-0" />
-          <h3
-            className="text-sm font-semibold tracking-wide uppercase"
-            style={{ fontFamily: "var(--font-display)" }}
-          >
-            Signal Monitor
-          </h3>
+    <div className="glass-raised overflow-hidden min-w-0 max-w-full">
+      <div className="flex flex-col gap-3 px-3 sm:px-4 py-3 border-b border-border-dim">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 min-w-0">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <Radar className="size-4 text-cyan shrink-0" />
+            <h3
+              className="text-sm font-semibold tracking-wide uppercase"
+              style={{ fontFamily: "var(--font-display)" }}
+            >
+              Signal Monitor
+            </h3>
+          </div>
           <span className="text-[11px] font-mono text-text-muted">
             {filtered.length} names · live {age} · every {cadence}
           </span>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 min-w-0">
+          <div className="flex gap-1.5 overflow-x-auto table-scroll pb-0.5 -mx-0.5 px-0.5">
           {tabs.map((t) => (
             <button
               key={t.id}
               type="button"
               onClick={() => setTab(t.id)}
               className={cn(
-                "text-[10px] font-mono px-2 py-1 rounded-md border",
+                "text-[10px] font-mono min-h-9 px-2.5 py-1.5 rounded-md border shrink-0",
                 tab === t.id
                   ? "border-cyan/40 text-cyan bg-cyan/10"
                   : "border-border-dim text-text-muted hover:text-text-secondary"
@@ -278,14 +281,15 @@ export function SignalMonitor({
               {t.label} {t.count}
             </button>
           ))}
-          <div className="relative">
+          </div>
+          <div className="relative shrink-0 sm:ml-auto">
             <Search className="absolute left-2 top-1/2 -translate-y-1/2 size-3 text-text-muted" />
             <input
               type="search"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder="NVDAB"
-              className="w-28 bg-surface border border-border-dim rounded-md py-1 pl-6 pr-6 text-[11px] font-mono focus:outline-none focus:border-cyan/40"
+              className="w-full sm:w-28 min-h-9 bg-surface border border-border-dim rounded-md py-1.5 pl-6 pr-6 text-[11px] font-mono focus:outline-none focus:border-cyan/40"
             />
             {query && (
               <button
@@ -302,7 +306,7 @@ export function SignalMonitor({
 
       <div
         className={cn(
-          "px-4 py-2.5 border-b border-border-dim flex flex-wrap items-start gap-x-4 gap-y-1",
+          "px-3 sm:px-4 py-2.5 border-b border-border-dim flex flex-wrap items-start gap-x-4 gap-y-1",
           session === "rth" && "bg-neon/[0.04]",
           session === "close" && "bg-cyan/[0.05]",
           session === "overnight" && "bg-warning/[0.05]"
@@ -319,7 +323,111 @@ export function SignalMonitor({
         </p>
       </div>
 
-      <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+      <div className="lg:hidden divide-y divide-border-dim/60 max-h-[560px] overflow-y-auto">
+        {filtered.length === 0 ? (
+          <p className="px-4 py-10 text-center text-[12px] font-mono text-text-muted">
+            {tab === "blocked" ? "No skipped names." : "Waiting for market pulse…"}
+          </p>
+        ) : (
+          filtered.map((signal) => {
+            const price =
+              signal.livePrice && signal.livePrice > 0 ? signal.livePrice : signal.price;
+            const chg = signal.liveChange24h ?? signal.change24h;
+            const edge = stockEdge(signal, asSession(signal.session ?? session));
+            const hasAi = !!signal.aiSummary;
+            const expanded = openAi === signal.symbol;
+            return (
+              <div key={signal.symbol} className={cn(signal.blacklisted && "opacity-50")}>
+                <button
+                  type="button"
+                  className="w-full text-left px-3 py-3 min-h-12 hover:bg-surface-overlay/50"
+                  onClick={() => hasAi && setOpenAi(expanded ? null : signal.symbol)}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <TokenLogo symbol={signal.symbol} icon={signal.icon} />
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[13px] font-semibold tracking-tight" style={{ fontFamily: "var(--font-mono)" }}>
+                            {signal.symbol}
+                          </span>
+                          <ActionBadge strength={signal.strength} />
+                        </div>
+                        <p className={cn("text-[10px] mt-0.5", toneClass(edge.tone))}>{edge.label}</p>
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0" style={{ fontFamily: "var(--font-mono)" }}>
+                      <p className={cn("text-[13px] tabular-nums font-semibold", signal.score >= 20 ? "text-neon" : signal.score <= -20 ? "text-danger" : "text-text-primary")}>
+                        {signal.score > 0 ? "+" : ""}
+                        {Math.round(signal.score)}
+                      </p>
+                      <p className={cn("text-[10px] tabular-nums", chg >= 0 ? "text-neon" : "text-danger")}>
+                        {formatPct(chg)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mt-2 grid grid-cols-3 gap-2 text-[10px] font-mono text-text-muted">
+                    <span>Px {formatTokenPrice(price)}</span>
+                    <span>RSI {fmt(signal.rsi, 0)}</span>
+                    <span>Conf {Math.round(signal.confidence * 100)}%</span>
+                  </div>
+                </button>
+                {hasAi && expanded && signal.aiSummary && (
+                  <p className="px-3 pb-3 text-[12px] text-text-secondary leading-relaxed">
+                    <span className="text-cyan font-mono text-[10px] uppercase tracking-wider mr-2">
+                      AI {signal.aiVerdict ?? "note"}
+                    </span>
+                    {signal.aiSummary}
+                  </p>
+                )}
+                {!readOnly && (
+                  <div className="px-3 pb-3">
+                    {signal.blacklisted ? (
+                      <button
+                        type="button"
+                        disabled={busySymbol === signal.symbol}
+                        onClick={() => {
+                          void (async () => {
+                            setBusySymbol(signal.symbol);
+                            try {
+                              await onUnblacklist?.(signal.symbol);
+                            } finally {
+                              setBusySymbol(null);
+                            }
+                          })();
+                        }}
+                        className="inline-flex items-center gap-1.5 min-h-9 px-2.5 text-[10px] text-text-muted hover:text-neon"
+                      >
+                        <Undo2 className="size-3" /> resume
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={busySymbol === signal.symbol}
+                        onClick={() => {
+                          void (async () => {
+                            setBusySymbol(signal.symbol);
+                            try {
+                              await onBlacklist?.(signal.symbol);
+                            } finally {
+                              setBusySymbol(null);
+                            }
+                          })();
+                        }}
+                        className="inline-flex items-center gap-1.5 min-h-9 px-2.5 text-[10px] text-text-muted hover:text-danger"
+                      >
+                        <Ban className="size-3" /> skip
+                      </button>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })
+        )}
+      </div>
+
+      <div className="hidden lg:block table-scroll max-h-[560px] overflow-y-auto">
         <table className="w-full min-w-[1280px] border-collapse">
           <thead className="sticky top-0 z-10 bg-surface-raised">
             <tr className="border-b border-border-dim">

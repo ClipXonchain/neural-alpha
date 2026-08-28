@@ -66,7 +66,7 @@ function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps)
 
   return (
     <BorderGlow
-      className="min-w-[160px] flex-1"
+      className="min-w-0 w-full"
       borderRadius={8}
       glowRadius={6}
       glowIntensity={0.7}
@@ -81,7 +81,7 @@ function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps)
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.28, delay }}
-        className="relative flex h-full items-center gap-3 overflow-hidden rounded-[inherit] px-3 py-2.5"
+        className="relative flex h-full min-h-[52px] items-center gap-2.5 sm:gap-3 overflow-hidden rounded-[inherit] px-2.5 sm:px-3 py-2.5"
       >
         <span className={cn("absolute inset-y-0 left-0 w-[2px]", t.bar)} />
         <div
@@ -98,7 +98,7 @@ function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps)
           </p>
           <p className="mt-0.5 flex items-baseline gap-1.5 min-w-0">
             <span
-              className={cn("text-[15px] font-bold tabular-nums tracking-tight", t.value)}
+              className={cn("text-[13px] sm:text-[15px] font-bold tabular-nums tracking-tight truncate", t.value)}
               style={{ fontFamily: "var(--font-mono)" }}
             >
               {value}
@@ -124,7 +124,7 @@ export function MetricCards({ state }: { state: AgentState }) {
     state.closedTrades > 0 ? (state.winRate > 50 ? "up" : "down") : "muted";
 
   return (
-    <div className="flex gap-2 overflow-x-auto">
+    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 min-w-0 [&>*:last-child]:col-span-2 sm:[&>*:last-child]:col-span-1">
       <Stat
         label="Portfolio"
         value={formatUsd(state.portfolioValue)}

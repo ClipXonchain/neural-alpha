@@ -1,11 +1,13 @@
 import { logger } from "../utils/logger.js";
 import { completeCmcCampaignCall } from "../integrations/campaign-x402.js";
+import { isCmcX402Enabled, parseX402Settings } from "../integrations/campaign-x402-schedule.js";
 
 export type CmcTapeRegime = "risk_on" | "risk_off" | "neutral";
 
 /**
  * Cheap CMC MCP overlay (~$0.01/call). Do NOT hit this on the 10s quote pulse.
- * Cache: global metrics and macro events both refresh every 4 hours.
+ * Interval: CMC_X402_INTERVAL_MS (fallback CMC_MACRO_REFRESH_MS, default 4h).
+ * Open portfolio slots force a global-metrics refresh immediately.
  *
  * Campaign-eligible tools only:
  *   get_global_metrics_latest  — risk-on / risk-off tape
@@ -29,8 +31,11 @@ export interface CmcMacroSnapshot {
 }
 
 const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
-const GLOBAL_TTL_MS = parseInt(process.env.CMC_MACRO_REFRESH_MS || String(FOUR_HOURS_MS), 10) || FOUR_HOURS_MS;
 const EVENTS_TTL_MS = parseInt(process.env.CMC_EVENTS_REFRESH_MS || String(FOUR_HOURS_MS), 10) || FOUR_HOURS_MS;
+
+function globalTtlMs(): number {
+  return parseX402Settings().cmcX402IntervalMs;
+}
 
 const EVENT_RE =
   /\b(fomc|cpi|pce|nfp|nonfarm|payroll|powell|jackson hole|rate (cut|hike|decision)|fed(eral)? reserve|unemployment)\b/i;
@@ -46,7 +51,7 @@ export function getCmcMacro(): CmcMacroSnapshot | null {
 }
 
 export function cmcMacroEnabled(): boolean {
-  return process.env.CMC_MACRO_ENABLED !== "false";
+  return isCmcX402Enabled();
 }
 
 export function blendEquityAndCmc(
@@ -203,9 +208,10 @@ async function paidJson(
   return parseJson(text);
 }
 
-async function doRefresh(): Promise<CmcMacroSnapshot | null> {
+async function doRefresh(force = false): Promise<CmcMacroSnapshot | null> {
   const now = Date.now();
-  const needGlobal = !cache || now - lastGlobalAt >= GLOBAL_TTL_MS;
+  const ttl = globalTtlMs();
+  const needGlobal = force || !cache || now - lastGlobalAt >= ttl;
   const needEvents = now - lastEventsAt >= EVENTS_TTL_MS;
 
   if (!needGlobal && !needEvents && cache) return cache;
@@ -247,11 +253,11 @@ async function doRefresh(): Promise<CmcMacroSnapshot | null> {
   return cache;
 }
 
-/** Refresh when TTL expired. Safe to call often — no-ops while the cache is fresh. */
-export async function refreshCmcMacro(): Promise<CmcMacroSnapshot | null> {
+/** Refresh when TTL expired. `force` bypasses the global-metrics interval (open-slot path). */
+export async function refreshCmcMacro(opts?: { force?: boolean }): Promise<CmcMacroSnapshot | null> {
   if (!cmcMacroEnabled()) return cache;
   if (inflight) return inflight;
-  inflight = doRefresh().finally(() => {
+  inflight = doRefresh(opts?.force === true).finally(() => {
     inflight = null;
   });
   return inflight;

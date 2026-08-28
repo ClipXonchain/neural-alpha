@@ -143,7 +143,7 @@ function BrainEntry({ item }: { item: ActivityItem }) {
         )}
 
         <span
-          className="text-[9px] text-text-muted mt-1 inline-block opacity-0 group-hover:opacity-100 transition-opacity"
+          className="text-[9px] text-text-muted mt-1 inline-block"
           style={{ fontFamily: "var(--font-mono)" }}
         >
           {timeAgo(item.timestamp)}
@@ -214,9 +214,9 @@ export function ActivityFeed({ activity }: { activity: ActivityItem[] }) {
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, delay: 0.5 }}
-      className="glass-raised rounded-xl p-5 flex flex-col"
+      className="glass-raised rounded-xl p-3 sm:p-5 flex flex-col min-w-0"
     >
-      <div className="flex items-center justify-between mb-1">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
         <div className="flex items-center gap-2.5">
           <div className="flex items-center justify-center size-7 rounded-lg bg-violet-500/12">
             <Brain className="size-3.5 text-violet-300" />
@@ -245,7 +245,7 @@ export function ActivityFeed({ activity }: { activity: ActivityItem[] }) {
             type="button"
             onClick={() => setPaused(!paused)}
             className={cn(
-              "flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-semibold transition-colors",
+              "flex items-center gap-1.5 min-h-9 px-2.5 py-1.5 rounded text-[10px] font-semibold transition-colors",
               paused
                 ? "bg-warning/10 text-warning border border-warning/20"
                 : "bg-surface-overlay text-text-secondary hover:text-text-primary border border-border-dim"
@@ -260,7 +260,7 @@ export function ActivityFeed({ activity }: { activity: ActivityItem[] }) {
             type="button"
             onClick={() => setShowFilters(!showFilters)}
             className={cn(
-              "flex items-center gap-1.5 px-2 py-1 rounded text-[10px] font-semibold transition-colors border",
+              "flex items-center gap-1.5 min-h-9 px-2.5 py-1.5 rounded text-[10px] font-semibold transition-colors border",
               showFilters
                 ? "bg-cyan/10 text-cyan border-cyan/20"
                 : "bg-surface-overlay text-text-secondary hover:text-text-primary border-border-dim"

@@ -8,6 +8,7 @@ import {
   recordStudioCall,
   type CampaignCallRecord,
 } from "./campaign.js";
+import { isCmcX402Enabled, isStudioX402Enabled } from "./campaign-x402-schedule.js";
 
 interface X402Option {
   index: number;
@@ -130,6 +131,11 @@ export async function completeCmcCampaignCall(
   tool: (typeof CMC_CAMPAIGN_TOOLS)[number] = "get_global_metrics_latest",
   args: Record<string, unknown> = {}
 ): Promise<{ text: string; record: CampaignCallRecord }> {
+  if (!isCmcX402Enabled()) {
+    logger.info("Skipping paid CMC x402 call — CMC_X402_ENABLED/CMC_MACRO_ENABLED is off");
+    throw new Error("CMC x402 disabled (CMC_X402_ENABLED=false)");
+  }
+
   const rpc = {
     jsonrpc: "2.0",
     id: Date.now(),
@@ -197,6 +203,11 @@ export interface StudioJob {
  * Does not block for the 2–5 minute report — persist jobId/jobToken and poll later.
  */
 export async function submitStudioAnalysis(tickers: string[]): Promise<StudioJob> {
+  if (!isStudioX402Enabled()) {
+    logger.info("Skipping paid Agent Studio x402 call — STUDIO_X402_ENABLED is off");
+    throw new Error("Studio x402 disabled (STUDIO_X402_ENABLED=false)");
+  }
+
   const symbols = [...new Set(tickers.map((s) => s.toUpperCase()).filter(Boolean))];
   if (symbols.length === 0) throw new Error("Agent Studio requires at least one ticker");
 

@@ -86,7 +86,7 @@ function SettingField({
           type="button"
           disabled={disabled || value <= min}
           onClick={() => onChange(clamp(value - step, min, max, step))}
-          className="flex size-8 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary disabled:opacity-30"
+          className="flex size-10 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary disabled:opacity-30"
           aria-label={`Decrease ${label}`}
         >
           <Minus className="size-3.5" />
@@ -126,7 +126,7 @@ function SettingField({
           type="button"
           disabled={disabled || value >= max}
           onClick={() => onChange(clamp(value + step, min, max, step))}
-          className="flex size-8 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary disabled:opacity-30"
+          className="flex size-10 shrink-0 items-center justify-center rounded-md text-text-muted hover:bg-surface-overlay hover:text-text-primary disabled:opacity-30"
           aria-label={`Increase ${label}`}
         >
           <Plus className="size-3.5" />
@@ -141,7 +141,7 @@ function SettingField({
               disabled={disabled}
               onClick={() => onChange(p)}
               className={cn(
-                "rounded-md px-2 py-0.5 text-[10px] tabular-nums border transition-colors",
+                "rounded-md min-h-9 min-w-9 px-2.5 py-1.5 text-[10px] tabular-nums border transition-colors",
                 value === p
                   ? "border-cyan/40 bg-cyan/10 text-cyan"
                   : "border-transparent bg-surface-overlay text-text-muted hover:text-text-secondary"
@@ -236,7 +236,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
   const quote = (config?.swapCurrencies || ["USDT"]).join("/");
 
   return (
-    <div className="glass-raised rounded-xl p-5">
+    <div className="glass-raised rounded-xl p-3 sm:p-5 min-w-0">
       <div className="mb-4 flex items-start justify-between gap-3">
         <div>
           <h3
@@ -386,7 +386,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
           onClick={handleSave}
           disabled={!connected || saving || !dirty}
           className={cn(
-            "flex items-center gap-2 rounded-lg px-4 py-2 text-[11px] font-semibold border transition-colors",
+            "flex items-center gap-2 rounded-lg min-h-10 px-4 py-2 text-[11px] font-semibold border transition-colors",
             dirty
               ? "border-neon/40 bg-neon/10 text-neon hover:bg-neon/15"
               : "border-border-dim text-text-muted cursor-not-allowed"

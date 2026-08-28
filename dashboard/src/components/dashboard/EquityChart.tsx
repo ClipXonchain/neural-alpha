@@ -20,12 +20,9 @@ function CustomTooltip({ active, payload, label }: any) {
   return (
     <div className="glass-raised rounded-lg px-3 py-2 text-xs font-mono border border-neon/20">
       <p className="text-text-secondary mb-1">{label}</p>
+      <p className="text-[9px] uppercase tracking-wider text-text-muted">Total value</p>
       <p className="text-text-primary font-semibold">
         {formatUsd(payload[0].value)}
-      </p>
-      <p className={payload[0].payload.pnl >= 0 ? "text-neon" : "text-danger"}>
-        PnL: {payload[0].payload.pnl >= 0 ? "+" : ""}
-        {formatUsd(payload[0].payload.pnl)}
       </p>
     </div>
   );
@@ -50,7 +47,7 @@ export function EquityChart({ state }: { state: AgentState }) {
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
-      className="glass-raised rounded-xl p-5 col-span-full lg:col-span-3"
+      className="glass-raised rounded-xl p-3 sm:p-5 col-span-full lg:col-span-3 min-w-0"
     >
       <div className="flex items-center gap-2 mb-4">
           <TrendingUp className="size-4 text-cyan" />
@@ -62,7 +59,7 @@ export function EquityChart({ state }: { state: AgentState }) {
           </h3>
         </div>
 
-      <div className="h-[280px]">
+      <div className="h-[200px] sm:h-[280px]">
         {data.length === 0 ? (
           <div className="h-full flex items-center justify-center text-[11px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
             No NAV history yet
@@ -86,6 +83,7 @@ export function EquityChart({ state }: { state: AgentState }) {
               interval={data.length > 8 ? Math.floor(data.length / 8) : 0}
             />
             <YAxis
+              width={42}
               domain={[minValue, maxValue]}
               tick={{ fontSize: 10, fill: "#848e9c", fontFamily: "IBM Plex Mono" }}
               axisLine={false}

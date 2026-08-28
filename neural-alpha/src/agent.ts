@@ -69,6 +69,10 @@ import {
 } from "./integrations/binance-web3-market.js";
 import { campaignQualification, loadCampaignState } from "./integrations/campaign.js";
 import {
+  lastSettledCallAt,
+  shouldFireX402,
+} from "./integrations/campaign-x402-schedule.js";
+import {
   startAgenticSignin,
   verifyAgenticSignin,
 } from "./integrations/agentic-wallet-bridge.js";
@@ -185,6 +189,11 @@ export class TradingAgent {
   private tokenIcons = new Map<string, string>();
   private livePrices = new Map<string, BinanceLiveQuote>();
   private lastMarketData: MarketData[] = [];
+  /** Last paid CMC campaign x402 attempt (seeded from campaign-state.json). */
+  private lastCmcX402At = 0;
+  /** Last paid Agent Studio x402 attempt. */
+  private lastStudioX402At = 0;
+  private x402Inflight: Promise<void> | null = null;
 
   constructor(mcp: McpBridge, initialCashUsd = 1000, bridgeSource = "unknown") {
     this.config = loadConfig();
@@ -196,6 +205,10 @@ export class TradingAgent {
     this.bridgeSource = bridgeSource;
     this.watchlist = buildDefaultWatchlist();
 
+    const camp = loadCampaignState();
+    this.lastCmcX402At = lastSettledCallAt(camp.cmcCalls);
+    this.lastStudioX402At = lastSettledCallAt(camp.studioCalls);
+
     logger.info("Trading agent initialized", {
       mode: this.config.mode,
       initialCash: initialCashUsd,
@@ -206,6 +219,10 @@ export class TradingAgent {
       signalRefresh: this.config.signalRefreshMs,
       protectiveExitCheck: this.config.protectiveExitCheckMs,
       autoExitEnabled: this.config.autoExitEnabled,
+      cmcX402Enabled: this.config.cmcX402Enabled,
+      studioX402Enabled: this.config.studioX402Enabled,
+      cmcX402IntervalMs: this.config.cmcX402IntervalMs,
+      studioX402IntervalMs: this.config.studioX402IntervalMs,
     });
   }
 
@@ -323,6 +340,9 @@ export class TradingAgent {
     if (this.config.mode === "live") {
       await this.reconcileLivePortfolio();
     }
+
+    // Open slots: paid CMC/Studio x402 now (cooldown only). Full book: interval cadence.
+    await this.fireCampaignX402IfNeeded("cycle");
 
     // Step 1: Refresh market data + signals (full scan on cycle 1 and every N cycles).
     const fullScan =
@@ -721,10 +741,6 @@ export class TradingAgent {
     try {
       this.applySessionSizing();
       await this.fetchNewsIfStale();
-      if (fullScan || this.cycleInProgress) {
-        const cmc = await refreshCmcMacro();
-        if (cmc) brainCmcMacro(cmc.summary, cmc.sizeScale, cmc.eventRisk);
-      }
       const markets = fullScan
         ? await this.collectMarketData(true)
         : this.lastMarketData.map((m) => ({ ...m }));
@@ -1267,6 +1283,9 @@ export class TradingAgent {
       applyTradeToPortfolio(order, result, this.portfolio);
       await this.persistTrade(order, result);
       brainTradeExecuted(order.side, order.symbol, order.amountUsd, result.txHash);
+      if (order.side === "sell") {
+        void this.fireCampaignX402IfNeeded("sell");
+      }
       return result;
     }
 
@@ -1360,6 +1379,9 @@ export class TradingAgent {
           logger.warn("Post-trade wallet sync failed", { error: String(err) });
         }
         this.scheduleTradeHistoryBackfill([], { force: true });
+        if (order.side === "sell") {
+          void this.fireCampaignX402IfNeeded("sell");
+        }
       }
 
       await this.persistTrade(order, result, swapResult);
@@ -2545,18 +2567,113 @@ export class TradingAgent {
   async runCampaignAiTasks(opts: { cmc?: boolean; studio?: boolean; tickers?: string[] } = {}) {
     const out: Record<string, unknown> = {};
     if (opts.cmc !== false) {
-      const { text, record } = await completeCmcCampaignCall("get_global_metrics_latest");
-      out.cmc = { tool: record.tool, preview: text.slice(0, 1500) };
+      if (!this.config.cmcX402Enabled) {
+        logger.info("Skipping paid CMC x402 call — CMC_X402_ENABLED/CMC_MACRO_ENABLED is off");
+        out.cmc = { skipped: true, reason: "CMC_X402_ENABLED=false" };
+      } else {
+        const { text, record } = await completeCmcCampaignCall("get_global_metrics_latest");
+        out.cmc = { tool: record.tool, preview: text.slice(0, 1500) };
+      }
     }
     if (opts.studio !== false) {
-      const tickers =
-        opts.tickers && opts.tickers.length > 0
-          ? opts.tickers
-          : this.watchlist.slice(0, 3).map((s) => tickerFromBstock(s));
-      const job = await submitStudioAnalysis(tickers);
-      out.studio = job;
+      if (!this.config.studioX402Enabled) {
+        logger.info("Skipping paid Agent Studio x402 call — STUDIO_X402_ENABLED is off");
+        out.studio = { skipped: true, reason: "STUDIO_X402_ENABLED=false" };
+      } else {
+        const tickers =
+          opts.tickers && opts.tickers.length > 0
+            ? opts.tickers
+            : this.studioResearchTickers();
+        const job = await submitStudioAnalysis(tickers);
+        out.studio = job;
+      }
     }
     return { ...out, qualification: campaignQualification() };
+  }
+
+  /** Material positions below max names — a free slot to fill. */
+  private slotsOpen(): boolean {
+    return this.portfolio.countMaterialPositions() < this.config.maxPortfolioTokens;
+  }
+
+  private studioResearchTickers(): string[] {
+    const held = this.portfolio.getMaterialPositionSymbols();
+    const candidates = this.watchlist.filter((s) => !held.has(s));
+    const source = (candidates.length > 0 ? candidates : this.watchlist).slice(0, 3);
+    return [...new Set(source.map((s) => tickerFromBstock(s)))].filter(Boolean);
+  }
+
+  /**
+   * Paid CMC / Studio x402. Open slots fire immediately (15s cooldown).
+   * Full book waits for CMC_X402_INTERVAL_MS / STUDIO_X402_INTERVAL_MS.
+   */
+  private fireCampaignX402IfNeeded(reason: "cycle" | "sell"): Promise<void> {
+    if (this.x402Inflight) return this.x402Inflight;
+    this.x402Inflight = this.doFireCampaignX402(reason).finally(() => {
+      this.x402Inflight = null;
+    });
+    return this.x402Inflight;
+  }
+
+  private async doFireCampaignX402(reason: "cycle" | "sell"): Promise<void> {
+    const slotsOpen = this.slotsOpen();
+    const now = Date.now();
+    const cmcDue = shouldFireX402({
+      enabled: this.config.cmcX402Enabled,
+      slotsOpen,
+      lastFiredAt: this.lastCmcX402At,
+      intervalMs: this.config.cmcX402IntervalMs,
+      now,
+    });
+    const studioDue = shouldFireX402({
+      enabled: this.config.studioX402Enabled,
+      slotsOpen,
+      lastFiredAt: this.lastStudioX402At,
+      intervalMs: this.config.studioX402IntervalMs,
+      now,
+    });
+    if (!cmcDue && !studioDue) return;
+
+    logger.info("Campaign x402 research", {
+      reason,
+      slotsOpen,
+      positionCount: this.portfolio.countMaterialPositions(),
+      maxPortfolioTokens: this.config.maxPortfolioTokens,
+      cmc: cmcDue,
+      studio: studioDue,
+    });
+
+    if (cmcDue) {
+      this.lastCmcX402At = now;
+      try {
+        const cmc = await refreshCmcMacro({ force: slotsOpen });
+        if (cmc) {
+          this.lastCmcX402At = Math.max(this.lastCmcX402At, cmc.at);
+          brainCmcMacro(cmc.summary, cmc.sizeScale, cmc.eventRisk);
+        }
+      } catch (err) {
+        logger.warn("CMC x402 research failed", { error: String(err), reason });
+      }
+    }
+
+    if (studioDue) {
+      const tickers = this.studioResearchTickers();
+      if (tickers.length === 0) {
+        logger.info("Studio x402 skipped — no tickers on watchlist");
+      } else {
+        this.lastStudioX402At = Date.now();
+        try {
+          const job = await submitStudioAnalysis(tickers);
+          logger.info("Studio x402 submitted", {
+            reason,
+            jobId: job.jobId,
+            symbols: job.symbols,
+          });
+        } catch (err) {
+          logger.warn("Studio x402 research failed", { error: String(err), reason });
+        }
+      }
+    }
   }
 
   async pollCampaignStudioJob(): Promise<Record<string, unknown> | null> {

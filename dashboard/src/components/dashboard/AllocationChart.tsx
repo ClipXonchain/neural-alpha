@@ -109,7 +109,7 @@ export function AllocationChart({
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, delay: 0.35 }}
-      className="glass-raised rounded-xl p-5 col-span-full lg:col-span-2"
+      className="glass-raised rounded-xl p-3 sm:p-5 col-span-full lg:col-span-2 min-w-0"
     >
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
@@ -132,7 +132,7 @@ export function AllocationChart({
               disabled={refreshing}
               title="Hard refresh — re-sync on-chain holdings"
               className={cn(
-                "flex items-center justify-center size-7 rounded-md transition-colors",
+                "flex items-center justify-center size-9 rounded-md transition-colors",
                 "bg-surface-overlay/60 text-text-muted hover:text-cyan hover:bg-cyan/10",
                 "disabled:opacity-50 disabled:cursor-not-allowed"
               )}
@@ -144,7 +144,7 @@ export function AllocationChart({
       </div>
 
       {hasData ? (
-        <div className="flex items-start gap-4">
+        <div className="flex flex-col items-center sm:flex-row sm:items-start gap-4">
           <div className="h-[190px] w-[190px] shrink-0 relative">
             <ResponsiveContainer width="100%" height="100%">
               <PieChart>
@@ -183,7 +183,7 @@ export function AllocationChart({
             </div>
           </div>
 
-          <div className="flex-1 min-w-0 max-h-[190px] overflow-y-auto space-y-2 pr-1">
+          <div className="w-full sm:flex-1 min-w-0 max-h-[190px] overflow-y-auto space-y-2 pr-1">
             {slices.map((s, i) => (
               <div key={s.name} className="flex items-center gap-2 text-xs">
                 <span

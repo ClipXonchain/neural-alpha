@@ -1,9 +1,16 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Neural Alpha — Trading Dashboard",
   description: "Neural Alpha — autonomous bStock trading agent monitor",
+};
+
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover",
+  themeColor: "#050608",
 };
 
 export default function RootLayout({

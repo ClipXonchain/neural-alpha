@@ -109,7 +109,7 @@ export function WalletPanel({
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, delay: 0.25 }}
-      className="glass-raised rounded-xl p-5"
+      className="glass-raised rounded-xl p-3 sm:p-5 min-w-0"
     >
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2.5">
@@ -148,23 +148,23 @@ export function WalletPanel({
           Agent Wallet (BSC)
         </p>
         {wallet?.address ? (
-          <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center justify-between gap-2 min-w-0">
             <code
-              className="text-xs text-text-primary truncate"
+              className="text-[11px] sm:text-xs text-text-primary break-all min-w-0"
               style={{ fontFamily: "var(--font-mono)" }}
             >
               {wallet.address}
             </code>
             <button
               onClick={copyAddress}
-              className="shrink-0 flex items-center gap-1 text-[10px] text-cyan hover:text-neon transition-colors"
+              className="shrink-0 flex items-center gap-1 min-h-9 px-2 text-[10px] text-cyan hover:text-neon transition-colors"
             >
               {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
               {copied ? "Copied" : "Copy"}
             </button>
           </div>
         ) : (
-          <p className="text-xs text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
+          <p className="text-xs text-text-muted break-words" style={{ fontFamily: "var(--font-mono)" }}>
             Sign in with `baw auth signin` (Binance App QR) to bind wallet
           </p>
         )}
@@ -246,7 +246,7 @@ export function WalletPanel({
           <button
             onClick={handleSignin}
             disabled={!connected || signingIn}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-warning/10 text-warning border border-warning/20 hover:bg-warning/20 disabled:opacity-40 transition-colors"
+            className="flex items-center gap-1.5 min-h-10 px-3 py-2 rounded-lg text-xs font-semibold bg-warning/10 text-warning border border-warning/20 hover:bg-warning/20 disabled:opacity-40 transition-colors"
             style={{ fontFamily: "var(--font-mono)" }}
           >
             {signingIn ? "Starting…" : "Sign in (QR)"}
@@ -257,7 +257,7 @@ export function WalletPanel({
           <button
             onClick={handleVerify}
             disabled={verifying}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-neon/10 text-neon border border-neon/20 hover:bg-neon/20 disabled:opacity-40 transition-colors"
+            className="flex items-center gap-1.5 min-h-10 px-3 py-2 rounded-lg text-xs font-semibold bg-neon/10 text-neon border border-neon/20 hover:bg-neon/20 disabled:opacity-40 transition-colors"
             style={{ fontFamily: "var(--font-mono)" }}
           >
             {verifying ? "Waiting for App…" : "I've confirmed"}
@@ -267,7 +267,7 @@ export function WalletPanel({
           <button
             onClick={handleSync}
             disabled={!connected || syncing}
-            className="flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold bg-neon/10 text-neon border border-neon/20 hover:bg-neon/20 disabled:opacity-40 transition-colors"
+            className="flex items-center gap-1.5 min-h-10 px-3 py-2 rounded-lg text-xs font-semibold bg-neon/10 text-neon border border-neon/20 hover:bg-neon/20 disabled:opacity-40 transition-colors"
             style={{ fontFamily: "var(--font-mono)" }}
           >
             <RefreshCw className={cn("size-3.5", syncing && "animate-spin")} />
@@ -365,7 +365,7 @@ function TokenHoldings({ positions }: { positions?: BinancePosition[] }) {
                   {Math.abs(p.percentChange24h).toFixed(1)}%
                 </span>
                 <span
-                  className="text-[11px] text-text-primary tabular-nums font-semibold w-12 text-right"
+                  className="text-[11px] text-text-primary tabular-nums font-semibold min-w-[4.5rem] text-right"
                   style={{ fontFamily: "var(--font-mono)" }}
                 >
                   {formatUsd(p.valueUsd)}

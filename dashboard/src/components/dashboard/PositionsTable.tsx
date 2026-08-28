@@ -3,7 +3,7 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Layers, Loader2, ArrowDownRight } from "lucide-react";
-import { cn, formatUsd, formatPct, formatTradePrice, formatTokenQty } from "@/lib/utils";
+import { cn, formatUsd, formatTradePrice, formatTokenQty } from "@/lib/utils";
 import type { Position } from "@/lib/mock-data";
 
 function tokenHue(symbol: string): string {
@@ -116,6 +116,56 @@ function ExitLevels({ pos }: { pos: Position }) {
   );
 }
 
+function SellButton({
+  pos,
+  valueUsd,
+  connected,
+  selling,
+  blocked,
+  fullWidth,
+  onSell,
+}: {
+  pos: Position;
+  valueUsd: number;
+  connected: boolean;
+  selling: boolean;
+  blocked: boolean;
+  fullWidth?: boolean;
+  onSell: (symbol: string, amount: number) => void;
+}) {
+  const valueLabel = valueUsd > 0 ? formatUsd(valueUsd) : null;
+  return (
+    <button
+      type="button"
+      disabled={!connected || blocked}
+      onClick={() => onSell(pos.symbol, pos.amount)}
+      title={
+        connected
+          ? `Sell all ${pos.symbol}${valueLabel ? ` · ${valueLabel}` : ""} (1% slippage)`
+          : "Agent offline"
+      }
+      className={cn(
+        "inline-flex items-center justify-center gap-1.5 min-h-10 px-3 py-2 rounded-md text-[10px] font-semibold uppercase tracking-wide transition-colors border",
+        fullWidth && "w-full",
+        selling
+          ? "bg-danger/15 text-danger border-danger/25 cursor-wait"
+          : connected && !blocked
+            ? "bg-danger/10 text-danger border-danger/20 hover:bg-danger/20"
+            : "bg-surface-overlay/40 text-text-muted border-border-dim cursor-not-allowed opacity-50"
+      )}
+      style={{ fontFamily: "var(--font-mono)" }}
+    >
+      {selling ? (
+        <Loader2 className="size-3 animate-spin" />
+      ) : (
+        <ArrowDownRight className="size-3" />
+      )}
+      <span>Sell</span>
+      {valueLabel && <span className="tabular-nums normal-case">{valueLabel}</span>}
+    </button>
+  );
+}
+
 interface PositionsTableProps {
   positions: Position[];
   /** Hide sell actions on public/read-only deployments. */
@@ -164,7 +214,7 @@ export function PositionsTable({
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.5, delay: 0.4 }}
-      className="glass-raised rounded-xl p-5"
+      className="glass-raised rounded-xl p-3 sm:p-5 min-w-0"
     >
       <div className="flex items-center justify-between mb-4">
         <div className="flex items-center gap-2">
@@ -185,7 +235,6 @@ export function PositionsTable({
         <p className="mb-3 text-[10px] font-mono text-danger">{sellError}</p>
       )}
 
-      {/* Allocation bar */}
       <div className="flex h-2 rounded-full overflow-hidden mb-4 gap-0.5">
         {positions.map((pos) => (
           <motion.div
@@ -199,166 +248,189 @@ export function PositionsTable({
         ))}
       </div>
 
-      <div className="overflow-x-auto">
-        <table className="w-full text-xs font-mono">
-          <thead>
-            <tr className="text-text-muted text-[10px] uppercase tracking-wider">
-              <th className="text-left pb-3 pr-4">Token</th>
-              <th className="text-right pb-3 pr-4" title="Live USD value · token quantity below">
-                Value
-              </th>
-              <th className="text-right pb-3 pr-4" title="Fixed at buy execution — not live price">
-                Entry
-              </th>
-              <th className="text-right pb-3 pr-4">Current</th>
-              <th className="text-right pb-3 pr-4">PnL</th>
-              <th className="text-right pb-3 pr-4">SL / TP</th>
-              <th className="text-right pb-3 pr-4">Weight</th>
-              {showActions && <th className="text-right pb-3 w-20">Action</th>}
-            </tr>
-          </thead>
-          <tbody>
-            <AnimatePresence>
-              {positions.map((pos) => {
-                const valueUsd = positionValueUsd(pos);
-                return (
-                <motion.tr
+      {positions.length === 0 ? (
+        <p className="py-8 text-center text-xs font-mono text-text-muted">No open positions</p>
+      ) : (
+        <>
+          <div className="md:hidden flex flex-col gap-2">
+            {positions.map((pos) => {
+              const valueUsd = positionValueUsd(pos);
+              return (
+                <div
                   key={pos.symbol}
-                  initial={{ opacity: 0, x: -10 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  transition={{ duration: 0.15 }}
-                  className="border-t border-border-dim hover:bg-surface-overlay/50 transition-colors"
+                  className="rounded-lg border border-border-dim bg-surface-overlay/30 p-3"
                 >
-                  <td className="py-3 pr-4">
-                    <div className="flex items-center gap-2">
+                  <div className="flex items-start justify-between gap-3 mb-3">
+                    <div className="flex items-center gap-2 min-w-0">
                       <div
-                        className="size-2 rounded-full"
-                        style={{
-                          backgroundColor:
-                            tokenHue(pos.symbol),
-                        }}
+                        className="size-2 rounded-full shrink-0"
+                        style={{ backgroundColor: tokenHue(pos.symbol) }}
                       />
-                      <span className="font-semibold text-text-primary">
-                        {pos.symbol}
-                      </span>
-                    </div>
-                  </td>
-                  <td
-                    className="text-right py-3 pr-4"
-                    title={`${formatTokenQty(pos.amount)} ${pos.symbol}`}
-                  >
-                    <div className="flex flex-col items-end">
-                      <span className="font-semibold text-text-primary tabular-nums">
-                        {valueUsd > 0 ? formatUsd(valueUsd) : "—"}
-                      </span>
-                      <span className="text-[10px] text-text-muted tabular-nums">
-                        {formatTokenQty(pos.amount)} {pos.symbol}
-                      </span>
-                    </div>
-                  </td>
-                  <td
-                    className="text-right py-3 pr-4 text-text-secondary tabular-nums"
-                    title={
-                      pos.entryUnknown
-                        ? "Entry pending — resync agent or wait for trade history"
-                        : pos.entryFromTrades
-                          ? "Entry from confirmed buy trades"
-                          : "Entry price"
-                    }
-                  >
-                    {pos.entryUnknown ? (
-                      <span className="text-text-muted">—</span>
-                    ) : (
-                      formatTradePrice(pos.entryPrice)
-                    )}
-                  </td>
-                  <td className="text-right py-3 pr-4 text-text-primary tabular-nums">
-                    {formatTradePrice(pos.currentPrice)}
-                  </td>
-                  <td className="text-right py-3 pr-4">
-                    {pos.entryUnknown ? (
-                      <span className="text-[11px] text-text-muted">—</span>
-                    ) : (
-                    <div className="flex flex-col items-end">
-                      <span
-                        className={cn(
-                          "font-semibold tabular-nums",
-                          pos.pnl >= 0 ? "text-neon" : "text-danger"
-                        )}
-                      >
-                        {pos.pnl >= 0 ? "+" : ""}
-                        {formatUsd(pos.pnl)}
-                      </span>
-                      <span
-                        className={cn(
-                          "text-[10px] tabular-nums",
-                          pos.pnlPct >= 0 ? "text-neon/60" : "text-danger/60"
-                        )}
-                      >
-                        {formatPct(pos.pnlPct)}
-                      </span>
-                    </div>
-                    )}
-                  </td>
-                  <td className="text-right py-3 pr-4">
-                    <ExitLevels pos={pos} />
-                  </td>
-                  <td className="text-right py-3 pr-4">
-                    <div className="flex items-center justify-end gap-2">
-                      <div className="w-12 h-1.5 rounded-full bg-surface-overlay overflow-hidden">
-                        <motion.div
-                          className="h-full rounded-full"
-                          initial={{ width: 0 }}
-                          animate={{ width: `${pos.weight}%` }}
-                          transition={{ duration: 0.3 }}
-                          style={{
-                            backgroundColor:
-                              tokenHue(pos.symbol),
-                          }}
-                        />
+                      <div className="min-w-0">
+                        <p className="text-sm font-semibold text-text-primary truncate">
+                          {pos.symbol}
+                        </p>
+                        <p className="text-[10px] font-mono text-text-muted tabular-nums">
+                          {formatTokenQty(pos.amount)} · {pos.weight.toFixed(1)}%
+                        </p>
                       </div>
-                      <span className="text-text-secondary tabular-nums w-9 text-right">
-                        {pos.weight.toFixed(1)}%
-                      </span>
                     </div>
-                  </td>
+                    <div className="text-right shrink-0">
+                      <p className="text-[9px] uppercase tracking-wider text-text-muted font-mono">
+                        Total value
+                      </p>
+                      <p className="text-base font-bold text-text-primary tabular-nums font-mono">
+                        {valueUsd > 0 ? formatUsd(valueUsd) : "—"}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 text-[11px] font-mono mb-3">
+                    <div>
+                      <p className="text-[9px] uppercase text-text-muted">Entry</p>
+                      <p className="tabular-nums text-text-secondary">
+                        {pos.entryUnknown ? "—" : formatTradePrice(pos.entryPrice)}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[9px] uppercase text-text-muted">Current</p>
+                      <p className="tabular-nums text-text-primary">
+                        {formatTradePrice(pos.currentPrice)}
+                      </p>
+                    </div>
+                  </div>
+                  <div className="mb-3">
+                    <ExitLevels pos={pos} />
+                  </div>
                   {showActions && (
-                    <td className="text-right py-3">
-                      <button
-                        type="button"
-                        disabled={!connected || sellingSymbol !== null}
-                        onClick={() => void handleSell(pos.symbol, pos.amount)}
-                        title={
-                          connected
-                            ? `Sell all ${pos.symbol} (1% slippage)`
-                            : "Agent offline"
-                        }
-                        className={cn(
-                          "inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-[10px] font-semibold uppercase tracking-wide transition-colors border",
-                          sellingSymbol === pos.symbol
-                            ? "bg-danger/15 text-danger border-danger/25 cursor-wait"
-                            : connected && !sellingSymbol
-                              ? "bg-danger/10 text-danger border-danger/20 hover:bg-danger/20"
-                              : "bg-surface-overlay/40 text-text-muted border-border-dim cursor-not-allowed opacity-50"
-                        )}
-                        style={{ fontFamily: "var(--font-mono)" }}
-                      >
-                        {sellingSymbol === pos.symbol ? (
-                          <Loader2 className="size-3 animate-spin" />
-                        ) : (
-                          <ArrowDownRight className="size-3" />
-                        )}
-                        Sell
-                      </button>
-                    </td>
+                    <SellButton
+                      pos={pos}
+                      valueUsd={valueUsd}
+                      connected={connected}
+                      selling={sellingSymbol === pos.symbol}
+                      blocked={sellingSymbol !== null}
+                      fullWidth
+                      onSell={handleSell}
+                    />
                   )}
-                </motion.tr>
-                );
-              })}
-            </AnimatePresence>
-          </tbody>
-        </table>
-      </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="hidden md:block table-scroll">
+            <table className="w-full text-xs font-mono">
+              <thead>
+                <tr className="text-text-muted text-[10px] uppercase tracking-wider">
+                  <th className="text-left pb-3 pr-4">Token</th>
+                  <th className="text-right pb-3 pr-4" title="Live USD value · token quantity below">
+                    Total value
+                  </th>
+                  <th className="text-right pb-3 pr-4" title="Fixed at buy execution — not live price">
+                    Entry
+                  </th>
+                  <th className="text-right pb-3 pr-4">Current</th>
+                  <th className="text-right pb-3 pr-4">SL / TP</th>
+                  <th className="text-right pb-3 pr-4">Weight</th>
+                  {showActions && <th className="text-right pb-3">Action</th>}
+                </tr>
+              </thead>
+              <tbody>
+                <AnimatePresence>
+                  {positions.map((pos) => {
+                    const valueUsd = positionValueUsd(pos);
+                    return (
+                    <motion.tr
+                      key={pos.symbol}
+                      initial={{ opacity: 0 }}
+                      animate={{ opacity: 1 }}
+                      transition={{ duration: 0.15 }}
+                      className="border-t border-border-dim hover:bg-surface-overlay/50 transition-colors"
+                    >
+                      <td className="py-3 pr-4">
+                        <div className="flex items-center gap-2">
+                          <div
+                            className="size-2 rounded-full"
+                            style={{ backgroundColor: tokenHue(pos.symbol) }}
+                          />
+                          <span className="font-semibold text-text-primary">
+                            {pos.symbol}
+                          </span>
+                        </div>
+                      </td>
+                      <td
+                        className="text-right py-3 pr-4"
+                        title={`${formatTokenQty(pos.amount)} ${pos.symbol}`}
+                      >
+                        <div className="flex flex-col items-end">
+                          <span className="font-semibold text-text-primary tabular-nums">
+                            {valueUsd > 0 ? formatUsd(valueUsd) : "—"}
+                          </span>
+                          <span className="text-[10px] text-text-muted tabular-nums">
+                            {formatTokenQty(pos.amount)} {pos.symbol}
+                          </span>
+                        </div>
+                      </td>
+                      <td
+                        className="text-right py-3 pr-4 text-text-secondary tabular-nums"
+                        title={
+                          pos.entryUnknown
+                            ? "Entry pending — resync agent or wait for trade history"
+                            : pos.entryFromTrades
+                              ? "Entry from confirmed buy trades"
+                              : "Entry price"
+                        }
+                      >
+                        {pos.entryUnknown ? (
+                          <span className="text-text-muted">—</span>
+                        ) : (
+                          formatTradePrice(pos.entryPrice)
+                        )}
+                      </td>
+                      <td className="text-right py-3 pr-4 text-text-primary tabular-nums">
+                        {formatTradePrice(pos.currentPrice)}
+                      </td>
+                      <td className="text-right py-3 pr-4">
+                        <div className="flex justify-end">
+                          <ExitLevels pos={pos} />
+                        </div>
+                      </td>
+                      <td className="text-right py-3 pr-4">
+                        <div className="flex items-center justify-end gap-2">
+                          <div className="w-12 h-1.5 rounded-full bg-surface-overlay overflow-hidden">
+                            <motion.div
+                              className="h-full rounded-full"
+                              initial={{ width: 0 }}
+                              animate={{ width: `${pos.weight}%` }}
+                              transition={{ duration: 0.3 }}
+                              style={{ backgroundColor: tokenHue(pos.symbol) }}
+                            />
+                          </div>
+                          <span className="text-text-secondary tabular-nums w-9 text-right">
+                            {pos.weight.toFixed(1)}%
+                          </span>
+                        </div>
+                      </td>
+                      {showActions && (
+                        <td className="text-right py-3">
+                          <SellButton
+                            pos={pos}
+                            valueUsd={valueUsd}
+                            connected={connected}
+                            selling={sellingSymbol === pos.symbol}
+                            blocked={sellingSymbol !== null}
+                            onSell={handleSell}
+                          />
+                        </td>
+                      )}
+                    </motion.tr>
+                    );
+                  })}
+                </AnimatePresence>
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </motion.div>
   );
 }

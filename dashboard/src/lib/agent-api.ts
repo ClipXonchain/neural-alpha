@@ -61,6 +61,10 @@ export interface Track1Snapshot {
     minBuyConfidence?: number;
     minTradablePriceUsd?: number;
     excludedTokens?: string[];
+    cmcX402Enabled?: boolean;
+    studioX402Enabled?: boolean;
+    cmcX402IntervalMs?: number;
+    studioX402IntervalMs?: number;
   };
   portfolio: {
     timestamp: number;

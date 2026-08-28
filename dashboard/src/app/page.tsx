@@ -28,16 +28,16 @@ function DashboardSkeleton() {
   return (
     <div className="min-h-screen bg-void">
       <div className="h-[57px] border-b border-border-dim bg-surface" />
-      <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
+      <main className="w-full min-w-0 px-3 sm:px-4 md:px-6 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto">
         {!readOnly && (
           <div className="h-16 rounded-xl bg-surface border border-border-dim animate-pulse" />
         )}
-        <div className="flex gap-2 py-1">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 py-1">
           {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-[52px] flex-1 rounded-lg bg-surface border border-border-dim animate-pulse" />
+            <div key={i} className="h-[52px] rounded-lg bg-surface border border-border-dim animate-pulse" />
           ))}
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 min-w-0">
           <div className="lg:col-span-3 h-[260px] rounded-xl bg-surface border border-border-dim animate-pulse" />
           <div className="lg:col-span-2 h-[260px] rounded-xl bg-surface border border-border-dim animate-pulse" />
         </div>
@@ -80,7 +80,7 @@ export default function DashboardPage() {
         readOnly={readOnly}
       />
 
-      <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
+      <main className="w-full min-w-0 px-3 sm:px-4 md:px-6 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto">
         {!connected && error && (
           <div className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-2 text-xs font-mono text-warning">
             {error}
@@ -90,7 +90,7 @@ export default function DashboardPage() {
         {!readOnly && <AutonomousPanel state={state} />}
         <MetricCards state={state} />
 
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 min-w-0">
           <EquityChart state={state} />
           <AllocationChart state={state} onRefresh={readOnly ? undefined : handleResync} />
         </div>
@@ -145,7 +145,7 @@ export default function DashboardPage() {
           )}
         </div>
 
-        <footer className="flex flex-wrap items-center justify-between gap-2 py-4 border-t border-border-dim text-[10px] font-mono text-text-muted">
+        <footer className="flex flex-wrap items-center justify-between gap-2 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-border-dim text-[10px] font-mono text-text-muted">
           <span>Neural Alpha</span>
           <div className="flex items-center gap-4">
             <span>{connected ? "Live agent" : "Offline"}</span>
@@ -164,7 +164,7 @@ export default function DashboardPage() {
         <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] rounded-full bg-cyan/[0.02] blur-[120px]" />
       </div>
 
-      <div className="relative z-10">
+      <div className="relative z-10 min-w-0 overflow-x-clip">
         {home}
       </div>
     </div>

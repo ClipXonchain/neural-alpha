@@ -2,11 +2,11 @@ export default function Loading() {
   return (
     <div className="min-h-screen bg-void">
       <div className="h-[57px] border-b border-border-dim bg-surface" />
-      <main className="px-4 md:px-6 py-4 flex flex-col gap-4 max-w-[1600px] mx-auto">
+      <main className="w-full min-w-0 px-3 sm:px-4 md:px-6 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto">
         <div className="h-16 rounded-xl bg-surface border border-border-dim animate-pulse" />
-        <div className="flex gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2">
           {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-[52px] flex-1 rounded-lg bg-surface border border-border-dim animate-pulse" />
+            <div key={i} className="h-[52px] rounded-lg bg-surface border border-border-dim animate-pulse" />
           ))}
         </div>
         <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">

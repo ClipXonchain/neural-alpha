@@ -3,6 +3,7 @@ import { getSessionProfile, resolveStrategyName } from "./strategy/presets.js";
 import { getSessionClock } from "./strategy/session.js";
 import { isUserBlacklisted } from "./risk/token-blacklist.js";
 import { getEligibleBstockSymbols, isEligibleBstock } from "./integrations/bstock.js";
+import { parseX402Settings } from "./integrations/campaign-x402-schedule.js";
 
 /** Fallback watchlist used before the type=3 bootstrap completes. */
 const BSTOCK_FALLBACK = [
@@ -161,6 +162,7 @@ export function loadConfig(): AgentConfig {
     autoExitEnabled: process.env.AUTO_EXIT_ENABLED !== "false",
     failedSwapCooldownMs: parseInt(process.env.FAILED_SWAP_COOLDOWN_MS || "1800000", 10),
     minBuyIntervalMs: parseInt(process.env.MIN_BUY_INTERVAL_MS || "600000", 10),
+    ...parseX402Settings(),
   };
 }
 
