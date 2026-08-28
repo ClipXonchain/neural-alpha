@@ -139,13 +139,29 @@ export function hasBscSwapAddress(symbol: string): boolean {
 }
 
 const addressCache = new Map<string, string>();
+const addressToSymbol = new Map<string, string>();
+
+function indexAddress(symbol: string, address: string): string | undefined {
+  const addr = normalizeAddress(address);
+  if (!addr) return undefined;
+  const upper = symbol.toUpperCase();
+  addressCache.set(upper, addr);
+  addressToSymbol.set(addr.toLowerCase(), upper);
+  return addr;
+}
+
+for (const [sym, addr] of Object.entries(BSC_TOKEN_ADDRESSES)) {
+  indexAddress(sym, addr);
+}
+
+/** Reverse lookup: BEP-20 contract → ticker (static map + runtime bStock cache). */
+export function symbolForKnownAddress(address: string): string | undefined {
+  return addressToSymbol.get(address.trim().toLowerCase());
+}
 
 /** Register a runtime-resolved BEP-20 address (bStock type=3, CMC, etc.). */
 export function cacheBscTokenAddress(symbol: string, address: string): string | undefined {
-  const addr = normalizeAddress(address);
-  if (!addr) return undefined;
-  addressCache.set(symbol.toUpperCase(), addr);
-  return addr;
+  return indexAddress(symbol, address);
 }
 
 function normalizeAddress(addr: string): string | undefined {

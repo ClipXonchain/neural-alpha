@@ -205,7 +205,11 @@ function isConfirmedTrade(
   mode: string
 ): boolean {
   if (!t.success || !t.txHash) return false;
-  if (t.txHash.startsWith("binance-web3-")) return false;
+  // Sell summaries stay until a real 0x hash exists for that symbol.
+  // Buy aggregates are dropped — agent-recorded buys already have hashes.
+  if (t.txHash.startsWith("binance-web3-")) {
+    return classifyAssetTrade(t.fromToken, t.toToken) === "sell";
+  }
   if (mode === "paper") {
     return t.txHash.startsWith("paper-") || ON_CHAIN_TX_PATTERN.test(t.txHash);
   }

@@ -227,6 +227,17 @@ export function getBstockAddress(symbol: string): string | undefined {
   return getBstock(symbol)?.contractAddress ?? paymentTokenAddress(symbol);
 }
 
+export function getBstockSymbolByAddress(address: string): string | undefined {
+  const lower = address.trim().toLowerCase();
+  if (!isEvmAddress(lower)) return undefined;
+  const token = universe.find((t) => t.contractAddress.toLowerCase() === lower);
+  if (token) return token.symbol;
+  for (const [sym, addr] of Object.entries(PAYMENT_TOKEN_ADDRESSES)) {
+    if (addr.toLowerCase() === lower && sym !== "BNB") return sym;
+  }
+  return undefined;
+}
+
 export function getEligibleBstockSymbols(): string[] {
   if (eligibleSymbols && eligibleSymbols.size > 0) return [...eligibleSymbols];
   return universe.filter((t) => !t.leveraged).map((t) => t.symbol);

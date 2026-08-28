@@ -55,6 +55,7 @@ import { fetchBscTokenBalances, scanWalletViaCliSubprocess } from "./integration
 import { fetchWalletTradeHistory } from "./integrations/trade-history.js";
 import { fetchRpcRecentTradeHistory } from "./integrations/bsc-rpc-trade-history.js";
 import {
+  classifyAssetTrade,
   isOnChainTxHash as isRealTxHash,
   tradeDedupeKey,
 } from "./utils/trade-dedupe.js";
@@ -1982,7 +1983,11 @@ export class TradingAgent {
       await this.mergeNovelChainTrades(recentTrades, existing, wallet);
     }
 
-    const chainTrades = await fetchWalletTradeHistory(wallet, 50);
+    const extraHints = [...existing, ...this.portfolio.getTradeHistory()]
+      .filter((t) => t.success && t.timestamp > 0)
+      .map((t) => ({ lastTx: t.timestamp, activity: 1 }));
+
+    const chainTrades = await fetchWalletTradeHistory(wallet, 50, extraHints);
     await this.mergeNovelChainTrades(chainTrades, existing, wallet);
   }
 
@@ -1992,6 +1997,11 @@ export class TradingAgent {
     wallet: string
   ) {
     const realChainTrades = chainTrades.filter((t) => isRealTxHash(t.txHash));
+    const aggregateSells = chainTrades.filter(
+      (t) =>
+        Boolean(t.txHash?.startsWith("binance-web3-")) &&
+        classifyAssetTrade(t.fromToken, t.toToken) === "sell"
+    );
 
     const knownKeys = new Set([
       ...existing.map(tradeDedupeKey),
@@ -2006,6 +2016,9 @@ export class TradingAgent {
     }
     if (novel.length > 0) {
       this.portfolio.hydrateTradeHistory(novel);
+    }
+    if (aggregateSells.length > 0) {
+      this.portfolio.hydrateTradeHistory(aggregateSells);
     }
 
     const purged = this.portfolio.purgeBinanceAggregateTrades();
@@ -2028,7 +2041,7 @@ export class TradingAgent {
 
     if (store.enabled) {
       const toSave = new Map<string, import("./utils/types.js").TradeResult>();
-      for (const t of [...realChainTrades, ...annotated]) {
+      for (const t of [...realChainTrades, ...aggregateSells, ...annotated]) {
         toSave.set(t.orderId, t);
       }
       await Promise.all([...toSave.values()].map((t) => store.saveChainTrade(t, wallet)));

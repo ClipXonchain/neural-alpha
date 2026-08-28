@@ -216,14 +216,21 @@ export class AgentStore {
     }
   }
 
-  /** Remove Binance Web3 aggregate rows (not real fills; PnL is unreliable). */
+  /** Remove Binance Web3 summaries that a real on-chain tx has replaced. */
   async deleteBinanceAggregateTrades(walletAddress: string): Promise<number> {
     if (!this.pool) return 0;
     try {
       const { rowCount } = await this.pool.query(
         `DELETE FROM trades t
          WHERE t.tx_hash LIKE 'binance-web3-%'
-           AND LOWER(t.wallet_address) = $1`,
+           AND LOWER(t.wallet_address) = $1
+           AND EXISTS (
+             SELECT 1 FROM trades r
+             WHERE LOWER(r.wallet_address) = $1
+               AND r.tx_hash ~* '^0x[0-9a-fA-F]{40,}$'
+               AND r.side = t.side
+               AND UPPER(r.symbol) = UPPER(t.symbol)
+           )`,
         [walletAddress.toLowerCase()]
       );
       return rowCount ?? 0;

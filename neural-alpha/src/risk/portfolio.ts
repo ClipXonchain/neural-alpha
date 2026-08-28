@@ -5,6 +5,7 @@ import { logger } from "../utils/logger.js";
 import {
   classifyAssetTrade,
   dedupeAndCleanTradeResults,
+  dropBinanceAggregateDuplicates,
   preferTradeRecord,
   tradeDedupeKey,
 } from "../utils/trade-dedupe.js";
@@ -743,16 +744,14 @@ export class PortfolioTracker {
     return updated;
   }
 
-  /** Drop Binance Web3 aggregate rows — they are not real fills and their PnL is wrong. */
+  /** Drop Binance Web3 summary rows only when a real 0x hash exists for that symbol+side. */
   purgeBinanceAggregateTrades(): number {
     const before = this.tradeHistory.length;
-    this.tradeHistory = this.tradeHistory.filter((t) => {
-      if (!t.txHash?.startsWith("binance-web3-")) return true;
-      this.persistentTradeIds.delete(t.orderId);
-      return false;
-    });
+    this.tradeHistory = dropBinanceAggregateDuplicates(this.tradeHistory);
     const removed = before - this.tradeHistory.length;
-    if (removed > 0) this.rebuildDailyTradeCounts();
+    if (removed > 0) {
+      this.rebuildDailyTradeCounts();
+    }
     return removed;
   }
 

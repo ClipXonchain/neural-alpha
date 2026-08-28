@@ -7,6 +7,8 @@ import {
   ExternalLink,
   ArrowUpRight,
   ArrowDownRight,
+  TrendingUp,
+  TrendingDown,
   CheckCircle2,
   Clock,
 } from "lucide-react";
@@ -21,7 +23,10 @@ function TradeSummary({ trades }: { trades: Trade[] }) {
   const totalTrades = trades.length;
   const buys = trades.filter((t) => t.side === "buy");
   const sells = trades.filter((t) => t.side === "sell");
-  const sellValue = sells.reduce((sum, t) => sum + t.total, 0);
+  const tradesWithPnl = trades.filter((t) => t.pnl !== undefined);
+  const totalPnl = tradesWithPnl.reduce((sum, t) => sum + (t.pnl ?? 0), 0);
+  const wins = tradesWithPnl.filter((t) => (t.pnl ?? 0) >= 0).length;
+  const winRate = tradesWithPnl.length > 0 ? (wins / tradesWithPnl.length) * 100 : 0;
   const totalVolume = trades.reduce((sum, t) => sum + t.total, 0);
 
   return (
@@ -48,16 +53,17 @@ function TradeSummary({ trades }: { trades: Trade[] }) {
           className="text-[9px] text-text-muted uppercase tracking-wider mb-1"
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          Sell value
+          Realized PnL
         </p>
         <p
-          className="text-sm font-bold text-text-primary tabular-nums"
+          className={cn(
+            "text-sm font-bold tabular-nums",
+            totalPnl >= 0 ? "text-neon" : "text-danger"
+          )}
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          {formatUsd(sellValue)}
-        </p>
-        <p className="text-[9px] text-text-muted mt-0.5" style={{ fontFamily: "var(--font-mono)" }}>
-          {sells.length} sell{sells.length === 1 ? "" : "s"}
+          {totalPnl >= 0 ? "+" : ""}
+          {formatUsd(totalPnl)}
         </p>
       </div>
       <div className="rounded-lg bg-surface-overlay/40 p-2.5 text-center">
@@ -65,16 +71,19 @@ function TradeSummary({ trades }: { trades: Trade[] }) {
           className="text-[9px] text-text-muted uppercase tracking-wider mb-1"
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          Buy value
+          Win Rate
         </p>
         <p
-          className="text-sm font-bold text-text-primary tabular-nums"
+          className={cn(
+            "text-sm font-bold tabular-nums",
+            winRate >= 50 ? "text-neon" : "text-warning"
+          )}
           style={{ fontFamily: "var(--font-mono)" }}
         >
-          {formatUsd(buys.reduce((sum, t) => sum + t.total, 0))}
+          {winRate.toFixed(0)}%
         </p>
         <p className="text-[9px] text-text-muted mt-0.5" style={{ fontFamily: "var(--font-mono)" }}>
-          {buys.length} buy{buys.length === 1 ? "" : "s"}
+          {wins}/{tradesWithPnl.length} closed
         </p>
       </div>
       <div className="rounded-lg bg-surface-overlay/40 p-2.5 text-center">
@@ -153,6 +162,8 @@ function TradeTx({ trade }: { trade: Trade }) {
 
 function TradeRow({ trade }: { trade: Trade }) {
   const isBuy = trade.side === "buy";
+  const hasPnl = trade.pnl !== undefined;
+  const isProfit = (trade.pnl ?? 0) >= 0;
 
   return (
     <motion.div
@@ -198,6 +209,23 @@ function TradeRow({ trade }: { trade: Trade }) {
             >
               {trade.symbol}
             </span>
+            {hasPnl && (
+              <span
+                className={cn(
+                  "text-[10px] font-semibold px-1.5 py-0.5 rounded inline-flex items-center gap-0.5",
+                  isProfit ? "bg-neon/10 text-neon" : "bg-danger/10 text-danger"
+                )}
+                style={{ fontFamily: "var(--font-mono)" }}
+              >
+                {isProfit ? (
+                  <TrendingUp className="size-2.5" />
+                ) : (
+                  <TrendingDown className="size-2.5" />
+                )}
+                {isProfit ? "+" : ""}
+                {formatUsd(trade.pnl!)}
+              </span>
+            )}
           </div>
           <div
             className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-text-muted mt-0.5"
@@ -238,7 +266,11 @@ function TradeRow({ trade }: { trade: Trade }) {
 
 export function TradeHistory({ trades }: { trades: Trade[] }) {
   const [showAll, setShowAll] = useState(false);
-  const visible = trades.filter((t) => !isBinanceAggregateHash(t.txHash));
+  // Hide Binance Web3 buy summaries when a real 0x hash exists; keep sell
+  // aggregates so closed positions still appear until chain backfill lands.
+  const visible = trades.filter(
+    (t) => !isBinanceAggregateHash(t.txHash) || t.side === "sell"
+  );
   const displayTrades = showAll ? visible : visible.slice(0, 8);
 
   return (

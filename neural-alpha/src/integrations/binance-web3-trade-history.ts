@@ -11,7 +11,7 @@ const DEFAULT_HEADERS = {
   "User-Agent": "binance-web3/1.1 (NeuralAlpha)",
 };
 
-const STABLES = new Set(["USDT", "USDC", "BUSD", "DAI", "FDUSD", "BNB"]);
+const STABLES = new Set(["USDT", "USDC", "BUSD", "DAI", "FDUSD", "BNB", "U", "USD1"]);
 
 interface BinancePositionRow {
   symbol?: string;

@@ -3,7 +3,7 @@
 import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Layers, Loader2, ArrowDownRight } from "lucide-react";
-import { cn, formatUsd, formatTradePrice, formatTokenQty } from "@/lib/utils";
+import { cn, formatUsd, formatPct, formatTradePrice, formatTokenQty } from "@/lib/utils";
 import type { Position } from "@/lib/mock-data";
 
 function tokenHue(symbol: string): string {
@@ -112,6 +112,33 @@ function ExitLevels({ pos }: { pos: Position }) {
         <span>{formatTradePrice(pos.stopLossPrice)}</span>
         <span>{formatTradePrice(pos.takeProfitPrice)}</span>
       </div>
+    </div>
+  );
+}
+
+function PositionPnl({ pos }: { pos: Position }) {
+  if (pos.entryUnknown) {
+    return <span className="text-[11px] text-text-muted">—</span>;
+  }
+  return (
+    <div className="flex flex-col items-end">
+      <span
+        className={cn(
+          "font-semibold tabular-nums",
+          pos.pnl >= 0 ? "text-neon" : "text-danger"
+        )}
+      >
+        {pos.pnl >= 0 ? "+" : ""}
+        {formatUsd(pos.pnl)}
+      </span>
+      <span
+        className={cn(
+          "text-[10px] tabular-nums",
+          pos.pnlPct >= 0 ? "text-neon/60" : "text-danger/60"
+        )}
+      >
+        {formatPct(pos.pnlPct)}
+      </span>
     </div>
   );
 }
@@ -284,18 +311,22 @@ export function PositionsTable({
                       </p>
                     </div>
                   </div>
-                  <div className="grid grid-cols-2 gap-2 text-[11px] font-mono mb-3">
+                  <div className="grid grid-cols-3 gap-2 text-[11px] font-mono mb-3">
                     <div>
                       <p className="text-[9px] uppercase text-text-muted">Entry</p>
                       <p className="tabular-nums text-text-secondary">
                         {pos.entryUnknown ? "—" : formatTradePrice(pos.entryPrice)}
                       </p>
                     </div>
-                    <div className="text-right">
+                    <div>
                       <p className="text-[9px] uppercase text-text-muted">Current</p>
                       <p className="tabular-nums text-text-primary">
                         {formatTradePrice(pos.currentPrice)}
                       </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-[9px] uppercase text-text-muted">PnL</p>
+                      <PositionPnl pos={pos} />
                     </div>
                   </div>
                   <div className="mb-3">
@@ -329,6 +360,7 @@ export function PositionsTable({
                     Entry
                   </th>
                   <th className="text-right pb-3 pr-4">Current</th>
+                  <th className="text-right pb-3 pr-4">PnL</th>
                   <th className="text-right pb-3 pr-4">SL / TP</th>
                   <th className="text-right pb-3 pr-4">Weight</th>
                   {showActions && <th className="text-right pb-3">Action</th>}
@@ -388,6 +420,9 @@ export function PositionsTable({
                       </td>
                       <td className="text-right py-3 pr-4 text-text-primary tabular-nums">
                         {formatTradePrice(pos.currentPrice)}
+                      </td>
+                      <td className="text-right py-3 pr-4">
+                        <PositionPnl pos={pos} />
                       </td>
                       <td className="text-right py-3 pr-4">
                         <div className="flex justify-end">

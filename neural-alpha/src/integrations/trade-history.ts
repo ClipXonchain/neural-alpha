@@ -47,13 +47,14 @@ function mergeByDedupeKey(primary: TradeResult[], secondary: TradeResult[]): Tra
  */
 export async function fetchWalletTradeHistory(
   walletAddress: string,
-  limit = 50
+  limit = 50,
+  extraHints: Array<{ lastTx: number; activity: number }> = []
 ): Promise<TradeResult[]> {
   const recent = await fetchRpcRecentTradeHistory(walletAddress, limit);
 
   const bsc = await fetchBscScanTradeHistory(walletAddress, limit);
   const rpc =
-    bsc.length >= limit ? [] : await fetchRpcTradeHistory(walletAddress, limit);
+    bsc.length >= limit ? [] : await fetchRpcTradeHistory(walletAddress, limit, extraHints);
 
   let merged = mergeByDedupeKey(mergeByDedupeKey(recent, bsc), rpc);
 

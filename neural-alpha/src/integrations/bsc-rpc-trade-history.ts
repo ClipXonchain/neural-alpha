@@ -1,5 +1,6 @@
 import { BSC_USDT_ADDRESS, STABLECOINS } from "../config.js";
-import { BSC_TOKEN_ADDRESSES } from "./bsc-token-addresses.js";
+import { BSC_TOKEN_ADDRESSES, symbolForKnownAddress } from "./bsc-token-addresses.js";
+import { getBstockSymbolByAddress } from "./bstock.js";
 import { logger } from "../utils/logger.js";
 import type { TradeResult } from "../utils/types.js";
 import { fetchRawBinancePositions } from "./binance-web3-trade-history.js";
@@ -77,7 +78,12 @@ function isStable(symbol: string): boolean {
 }
 
 function symbolForContract(address: string): string {
-  return ADDRESS_TO_SYMBOL[address.toLowerCase()] ?? "UNKNOWN";
+  return (
+    symbolForKnownAddress(address) ??
+    getBstockSymbolByAddress(address) ??
+    ADDRESS_TO_SYMBOL[address.toLowerCase()] ??
+    "UNKNOWN"
+  );
 }
 
 async function rpcCall<T>(method: string, params: unknown[]): Promise<T> {
@@ -225,7 +231,7 @@ async function parseSwapsFromTx(
   if (stableOut.length > 0 && tokenIn.length > 0) {
     const spent = stableOut.sort((a, b) => b.amount - a.amount)[0];
     const received = tokenIn.sort((a, b) => b.amount - a.amount)[0];
-    if (received.symbol !== "UNKNOWN") {
+    if (received && received.symbol !== "UNKNOWN") {
       trades.push({
         orderId: `chain-${txHash.slice(2, 12)}-buy-${received.symbol}`,
         success: true,
@@ -243,7 +249,7 @@ async function parseSwapsFromTx(
   if (tokenOut.length > 0 && stableIn.length > 0) {
     const sold = tokenOut.sort((a, b) => b.amount - a.amount)[0];
     const received = stableIn.sort((a, b) => b.amount - a.amount)[0];
-    if (sold.symbol !== "UNKNOWN") {
+    if (sold && sold.symbol !== "UNKNOWN") {
       trades.push({
         orderId: `chain-${txHash.slice(2, 12)}-sell-${sold.symbol}`,
         success: true,
@@ -546,18 +552,22 @@ export async function fetchRpcRecentTradeHistory(
  */
 export async function fetchRpcTradeHistory(
   walletAddress: string,
-  limit = 50
+  limit = 50,
+  extraHints: Array<{ lastTx: number; activity: number }> = []
 ): Promise<TradeResult[]> {
   if (!/^0x[0-9a-fA-F]{40}$/.test(walletAddress)) return [];
 
   try {
     const positions = await fetchRawBinancePositions(walletAddress);
-    const hints = positions
-      .map((p) => ({
-        lastTx: parseNum(p.lastTxTime),
-        activity: parseNum(p.buyCnt) + parseNum(p.sellCnt),
-      }))
-      .filter((h) => h.lastTx > 0 && h.activity > 0);
+    const hints = [
+      ...positions
+        .map((p) => ({
+          lastTx: parseNum(p.lastTxTime),
+          activity: parseNum(p.buyCnt) + parseNum(p.sellCnt),
+        }))
+        .filter((h) => h.lastTx > 0 && h.activity > 0),
+      ...extraHints.filter((h) => h.lastTx > 0),
+    ];
 
     if (hints.length === 0) return [];
 

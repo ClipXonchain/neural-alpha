@@ -1,5 +1,6 @@
 import { BSC_USDT_ADDRESS, STABLECOINS } from "../config.js";
-import { BSC_TOKEN_ADDRESSES } from "./bsc-token-addresses.js";
+import { BSC_TOKEN_ADDRESSES, symbolForKnownAddress } from "./bsc-token-addresses.js";
+import { getBstockSymbolByAddress } from "./bstock.js";
 import { logger } from "../utils/logger.js";
 import type { TradeResult } from "../utils/types.js";
 
@@ -47,7 +48,11 @@ function parseTokenAmount(value: string, decimals: number): number {
 }
 
 function resolveSymbol(row: EtherscanTokenTx): string {
-  const fromMap = ADDRESS_TO_SYMBOL[row.contractAddress?.toLowerCase() ?? ""];
+  const contract = row.contractAddress?.toLowerCase() ?? "";
+  const fromMap =
+    symbolForKnownAddress(contract) ??
+    getBstockSymbolByAddress(contract) ??
+    ADDRESS_TO_SYMBOL[contract];
   if (fromMap) return fromMap;
   const sym = String(row.tokenSymbol ?? "").toUpperCase().trim();
   return sym || "UNKNOWN";
