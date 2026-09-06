@@ -488,6 +488,7 @@ export class TradingAgent {
       stopLossPct: this.config.stopLossPct,
       takeProfitPct: this.config.takeProfitPct,
       trailingActivatePct: this.config.trailingActivatePct,
+      trailingGivebackPct: this.config.trailingGivebackPct,
     });
     await this.persistCycleSnapshot(cycleId, snapshot);
 
@@ -1560,6 +1561,10 @@ export class TradingAgent {
         (this.config as unknown as Record<string, unknown>)[key] = partial[key];
         changed[key] = partial[key];
       }
+    }
+    if (partial.takeProfitPct !== undefined && partial.trailingActivatePct === undefined) {
+      this.config.trailingActivatePct = this.config.takeProfitPct;
+      changed.trailingActivatePct = this.config.takeProfitPct;
     }
     if (partial.minGasReserveUsd !== undefined) {
       this.portfolio.setMinGasReserveUsd(Number(partial.minGasReserveUsd));
@@ -2857,6 +2862,7 @@ export class TradingAgent {
       stopLossPct: this.config.stopLossPct,
       takeProfitPct: this.config.takeProfitPct,
       trailingActivatePct: this.config.trailingActivatePct,
+      trailingGivebackPct: this.config.trailingGivebackPct,
     });
     const snapshots = this.portfolio.getChartPoints();
 

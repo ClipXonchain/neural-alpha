@@ -49,12 +49,25 @@ function ExitLevels({ pos }: { pos: Position }) {
   }
 
   const slHit = slDist <= 0;
-  const tpHit = tpDist <= 0;
+  const trailArmed = Boolean(pos.trailingArmed) || tpDist <= 0;
+  const trailDist = pos.distanceToTrailPct;
+  const trailHit = trailArmed && trailDist != null && trailDist <= 0;
   const slNear = !slHit && slDist <= 2;
   const inProfit = pos.currentPrice >= pos.entryPrice;
   const markerPct = exitMarkerPct(pos);
   const fillLeft = Math.min(50, markerPct);
   const fillWidth = Math.abs(markerPct - 50);
+  const rightPrice = trailArmed && pos.trailStopPrice != null ? pos.trailStopPrice : pos.takeProfitPrice;
+  const rightLabel = trailArmed
+    ? trailHit
+      ? "TRAIL HIT"
+      : trailDist != null
+        ? `TRAIL ${trailDist.toFixed(1)}%`
+        : "TRAIL"
+    : `TP ${tpDist.toFixed(1)}%`;
+  const rightTitle = trailArmed
+    ? `Trail stop @ ${formatTradePrice(rightPrice)}${pos.peakPnlPct != null ? ` · peak +${pos.peakPnlPct.toFixed(1)}%` : ""}`
+    : `Arm trail @ ${formatTradePrice(pos.takeProfitPrice)} · ${tpDist.toFixed(1)}% to arm`;
 
   return (
     <div className="flex flex-col gap-1 min-w-[108px]">
@@ -71,11 +84,11 @@ function ExitLevels({ pos }: { pos: Position }) {
         <span
           className={cn(
             "tabular-nums font-semibold",
-            tpHit ? "text-neon" : "text-text-muted"
+            trailHit ? "text-warning" : trailArmed ? "text-neon" : "text-text-muted"
           )}
-          title={`Target @ ${formatTradePrice(pos.takeProfitPrice)} · ${tpDist.toFixed(1)}% of price left`}
+          title={rightTitle}
         >
-          TP {tpHit ? "HIT" : `${tpDist.toFixed(1)}%`}
+          {rightLabel}
         </span>
       </div>
       <div
@@ -110,7 +123,7 @@ function ExitLevels({ pos }: { pos: Position }) {
       </div>
       <div className="flex justify-between text-[8px] text-text-muted tabular-nums">
         <span>{formatTradePrice(pos.stopLossPrice)}</span>
-        <span>{formatTradePrice(pos.takeProfitPrice)}</span>
+        <span>{formatTradePrice(rightPrice)}</span>
       </div>
     </div>
   );

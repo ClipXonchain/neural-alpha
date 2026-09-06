@@ -10,9 +10,12 @@ export interface Position {
   weight: number;
   stopLossPrice?: number;
   takeProfitPrice?: number;
+  trailStopPrice?: number;
   distanceToStopPct?: number;
   distanceToTakeProfitPct?: number;
+  distanceToTrailPct?: number;
   peakPnlPct?: number;
+  trailingArmed?: boolean;
   entryFromTrades?: boolean;
   /** Entry not yet resolved from trades — position still shown from wallet. */
   entryUnknown?: boolean;

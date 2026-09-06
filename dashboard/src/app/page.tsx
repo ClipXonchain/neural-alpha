@@ -139,6 +139,7 @@ export default function DashboardPage() {
                 swapCurrencies: agentConfig.swapCurrencies,
                 stopLossPct: agentConfig.stopLossPct ?? state.stopLossPct ?? 8,
                 takeProfitPct: agentConfig.takeProfitPct ?? state.takeProfitPct ?? 14,
+                trailingGivebackPct: agentConfig.trailingGivebackPct ?? state.trailingGivebackPct ?? 1,
               } : null}
               onSave={handleSaveConfig}
             />

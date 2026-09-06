@@ -89,9 +89,12 @@ export interface Track1Snapshot {
       weight: number;
       stopLossPrice?: number;
       takeProfitPrice?: number;
+      trailStopPrice?: number;
       distanceToStopPct?: number;
       distanceToTakeProfitPct?: number;
+      distanceToTrailPct?: number;
       peakPnlPct?: number;
+      trailingArmed?: boolean;
       entryFromTrades?: boolean;
     }>;
   };

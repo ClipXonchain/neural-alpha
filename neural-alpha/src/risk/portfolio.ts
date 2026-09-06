@@ -13,6 +13,27 @@ import {
 /** Cap in-memory NAV history so dashboard SSE cannot grow without bound. */
 const MAX_NAV_POINTS = 240;
 
+/** TP % arms the trail. Falls back to the legacy activate field. */
+export function resolveTrailArmPct(takeProfitPct: number, trailingActivatePct?: number): number {
+  if (takeProfitPct > 0) return takeProfitPct;
+  return trailingActivatePct && trailingActivatePct > 0 ? trailingActivatePct : 0;
+}
+
+/** Drop from peak *price* that sells after TP arms. Default 1%. */
+export function resolveTrailGivebackPct(trailingGivebackPct?: number): number {
+  return trailingGivebackPct && trailingGivebackPct > 0 ? trailingGivebackPct : 1;
+}
+
+/** Peak price implied by entry + peak PnL %, then give back `givebackPct` of that price. */
+export function trailStopFromPeak(
+  entry: number,
+  peakPnlPct: number,
+  givebackPct: number
+): number {
+  const peakPrice = entry * (1 + peakPnlPct / 100);
+  return peakPrice * (1 - givebackPct / 100);
+}
+
 function parseTradeAmount(raw?: string): number {
   const n = parseFloat(raw ?? "");
   return Number.isFinite(n) && n > 0 ? n : 0;
@@ -959,6 +980,7 @@ export class PortfolioTracker {
       stopLossPct: number;
       takeProfitPct: number;
       trailingActivatePct?: number;
+      trailingGivebackPct?: number;
     }
   ): PortfolioSnapshot {
     const snap = this.buildSnapshot(currentPrices, exitRules);
@@ -974,6 +996,7 @@ export class PortfolioTracker {
       stopLossPct: number;
       takeProfitPct: number;
       trailingActivatePct?: number;
+      trailingGivebackPct?: number;
     }
   ): PortfolioSnapshot {
     return this.buildSnapshot(currentPrices, exitRules);
@@ -985,12 +1008,15 @@ export class PortfolioTracker {
       stopLossPct: number;
       takeProfitPct: number;
       trailingActivatePct?: number;
+      trailingGivebackPct?: number;
     }
   ): PortfolioSnapshot {
     const positionSnapshots: PortfolioPosition[] = [];
     let positionsValueUsd = 0;
     const slPct = exitRules?.stopLossPct ?? 0;
     const tpPct = exitRules?.takeProfitPct ?? 0;
+    const armPct = resolveTrailArmPct(tpPct, exitRules?.trailingActivatePct);
+    const givebackPct = resolveTrailGivebackPct(exitRules?.trailingGivebackPct);
 
     for (const [symbol, pos] of this.positions) {
       const currentPrice = currentPrices.get(symbol) || pos.avgEntryPrice;
@@ -1015,10 +1041,19 @@ export class PortfolioTracker {
 
       if (exitRules && entry > 0) {
         snap.stopLossPrice = entry * (1 - Math.abs(slPct) / 100);
-        snap.takeProfitPrice = entry * (1 + tpPct / 100);
+        snap.takeProfitPrice = entry * (1 + armPct / 100);
         snap.distanceToStopPct = pnlPct + Math.abs(slPct);
-        snap.distanceToTakeProfitPct = tpPct - pnlPct;
+        snap.distanceToTakeProfitPct = armPct - pnlPct;
         if (peak !== undefined) snap.peakPnlPct = peak;
+        const armed = armPct > 0 && (peak ?? pnlPct) >= armPct;
+        snap.trailingArmed = armed;
+        if (armed) {
+          const peakPnl = peak ?? pnlPct;
+          const trailStop = trailStopFromPeak(entry, peakPnl, givebackPct);
+          snap.trailStopPrice = trailStop;
+          snap.distanceToTrailPct =
+            currentPrice > 0 ? ((currentPrice - trailStop) / currentPrice) * 100 : 0;
+        }
       }
       if (entryFromTrades && entryFromTrades > 0) {
         snap.entryFromTrades = Math.abs(entryFromTrades - entry) / entryFromTrades < 0.001;
@@ -1165,16 +1200,12 @@ export class PortfolioTracker {
   }
 
   /**
-   * Unified, safety-first exit engine. Evaluates every open position against
-   * three protective rules and returns the exits that should fire this cycle:
-   *
-   *   1. Hard stop-loss   — cut losers early so no single trade craters NAV.
-   *   2. Take-profit      — bank strong gains before they mean-revert.
-   *   3. Trailing stop    — once in solid profit, exit if price gives back
-   *                         a set amount from its peak (locks momentum gains).
-   *
-   * Cutting losers fast + trailing winners is the core mechanism that keeps
-   * drawdown low while still capturing upside.
+   * Protective exits:
+   *   1. Hard stop-loss — cut losers at −SL% from entry.
+   *   2. Trailing TP — when peak PnL reaches takeProfitPct, arm a trail.
+   *      Hold while price makes new highs. Sell only after a drop of
+   *      trailingGivebackPct (default 1%) from the hold's peak *price*.
+   *      Hitting TP does not sell; it only arms the trail.
    */
   getRiskManagedExits(
     currentPrices: Map<string, number>,
@@ -1186,6 +1217,8 @@ export class PortfolioTracker {
     }
   ): RiskExit[] {
     const exits: RiskExit[] = [];
+    const armPct = resolveTrailArmPct(params.takeProfitPct, params.trailingActivatePct);
+    const givebackPct = resolveTrailGivebackPct(params.trailingGivebackPct);
 
     for (const [symbol, pos] of this.positions) {
       const entry = this.resolveEntryPrice(symbol, pos.avgEntryPrice);
@@ -1210,7 +1243,6 @@ export class PortfolioTracker {
       const peak = Number.isFinite(prevPeak) ? Math.max(prevPeak as number, pnlPct) : pnlPct;
       this.peakPnlPct.set(symbol, peak);
 
-      // 1. Hard stop-loss — highest priority, protects against deep losses.
       if (pnlPct <= -Math.abs(params.stopLossPct)) {
         exits.push({
           symbol,
@@ -1221,30 +1253,20 @@ export class PortfolioTracker {
         continue;
       }
 
-      // 2. Take-profit — bank outsized gains.
-      if (pnlPct >= params.takeProfitPct) {
-        exits.push({
-          symbol,
-          kind: "take_profit",
-          pnlPct,
-          reason: `Take-profit hit: +${pnlPct.toFixed(1)}% ≥ +${params.takeProfitPct}%`,
-        });
-        continue;
-      }
-
-      // 3. Trailing stop — hidden from the desk UI. Off when activate/giveback are 0.
-      if (
-        params.trailingActivatePct > 0 &&
-        params.trailingGivebackPct > 0 &&
-        peak >= params.trailingActivatePct &&
-        peak - pnlPct >= params.trailingGivebackPct
-      ) {
-        exits.push({
-          symbol,
-          kind: "trailing_stop",
-          pnlPct,
-          reason: `Trailing stop: gave back ${(peak - pnlPct).toFixed(1)}pts from peak +${peak.toFixed(1)}%`,
-        });
+      if (armPct > 0 && peak >= armPct) {
+        const trailStop = trailStopFromPeak(entry, peak, givebackPct);
+        if (currentPrice <= trailStop) {
+          const peakPrice = entry * (1 + peak / 100);
+          const dropPct = peakPrice > 0 ? ((peakPrice - currentPrice) / peakPrice) * 100 : 0;
+          exits.push({
+            symbol,
+            kind: "trailing_stop",
+            pnlPct,
+            reason:
+              `Trailing TP: armed at +${armPct}% · peak +${peak.toFixed(1)}%` +
+              ` · dropped ${dropPct.toFixed(2)}% from peak (≥ ${givebackPct}%)`,
+          });
+        }
       }
     }
 

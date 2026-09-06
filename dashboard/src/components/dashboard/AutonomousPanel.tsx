@@ -71,7 +71,7 @@ export function AutonomousPanel({ state }: { state: AgentState }) {
       <span className="text-text-muted">{auto.tradesLast24h} trades / 24h</span>
       <span className="text-text-muted">
         {auto.autoExitEnabled
-          ? `SL ${state.stopLossPct ?? 8}% · TP ${state.takeProfitPct ?? 14}%`
+          ? `SL ${state.stopLossPct ?? 8}% · arm +${state.takeProfitPct ?? 14}% · trail ${state.trailingGivebackPct ?? 1}%`
           : "exits off"}
       </span>
       {auto.blockReason && auto.phase !== "idle" && (

@@ -146,7 +146,7 @@ export function loadConfig(): AgentConfig {
     maxDrawdownPct,
     drawdownLimitEnabled: !disableDrawdownLimit && maxDrawdownPct < 100,
     signalRefreshMs: parseInt(process.env.SIGNAL_REFRESH_MS || "10000", 10),
-    protectiveExitCheckMs: parseInt(process.env.PROTECTIVE_EXIT_CHECK_MS || "60000", 10),
+    protectiveExitCheckMs: parseInt(process.env.PROTECTIVE_EXIT_CHECK_MS || "10000", 10),
     slippageTolerance: num(process.env.SLIPPAGE_TOLERANCE, 1),
     minGasReserveUsd: num(process.env.MIN_GAS_RESERVE_USD, 1.5),
     baseCurrency: "USDT",
@@ -156,8 +156,11 @@ export function loadConfig(): AgentConfig {
     rebalanceThresholdPct: 10,
     stopLossPct: num(process.env.STOP_LOSS_PCT, r.stopLossPct),
     takeProfitPct: num(process.env.TAKE_PROFIT_PCT, r.takeProfitPct),
-    trailingActivatePct: num(process.env.TRAILING_ACTIVATE_PCT, r.trailingActivatePct),
-    trailingGivebackPct: num(process.env.TRAILING_GIVEBACK_PCT, r.trailingGivebackPct),
+    trailingActivatePct: num(
+      process.env.TRAILING_ACTIVATE_PCT,
+      num(process.env.TAKE_PROFIT_PCT, r.takeProfitPct)
+    ),
+    trailingGivebackPct: num(process.env.TRAILING_GIVEBACK_PCT, 1),
     minBuyConfidence: num(process.env.MIN_BUY_CONFIDENCE, r.minBuyConfidence),
     autoExitEnabled: process.env.AUTO_EXIT_ENABLED !== "false",
     failedSwapCooldownMs: parseInt(process.env.FAILED_SWAP_COOLDOWN_MS || "1800000", 10),

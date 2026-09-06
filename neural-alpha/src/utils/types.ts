@@ -104,12 +104,18 @@ export interface PortfolioPosition {
   /** Fixed exit levels derived from entry + strategy config. */
   stopLossPrice?: number;
   takeProfitPrice?: number;
+  /** Live trail stop once TP has armed (peak price × (1 − giveback)). */
+  trailStopPrice?: number;
   /** Percentage points until stop-loss fires (≤0 = at or past SL). */
   distanceToStopPct?: number;
-  /** Percentage points until take-profit fires (≤0 = at or past TP). */
+  /** Percentage points until take-profit *arms the trail* (≤0 = armed). */
   distanceToTakeProfitPct?: number;
+  /** % of current price above the trail stop (≤0 = trail would sell). */
+  distanceToTrailPct?: number;
   /** Best unrealized PnL % seen this hold (trailing-stop reference). */
   peakPnlPct?: number;
+  /** True once peak PnL has reached takeProfitPct. */
+  trailingArmed?: boolean;
   /** Whether avg entry was reconstructed from confirmed buy trades. */
   entryFromTrades?: boolean;
 }
@@ -166,11 +172,11 @@ export interface AgentConfig {
   rebalanceThresholdPct: number;
   /** Hard stop-loss: exit a position once it falls this % below entry. */
   stopLossPct: number;
-  /** Take-profit: lock gains once a position rises this % above entry. */
+  /** Trail-arm: once unrealized gain reaches this %, start trailing from peak. */
   takeProfitPct: number;
-  /** Trailing stop activates once unrealized gain exceeds this %. */
+  /** Legacy alias for takeProfitPct (trail arms at the same level). */
   trailingActivatePct: number;
-  /** Once active, exit if price gives back this many % points from peak gain. */
+  /** After arm, sell if price drops this % from the hold's peak price. Default 1. */
   trailingGivebackPct: number;
   /** Min confidence (0-1) required to open a new position. */
   minBuyConfidence: number;

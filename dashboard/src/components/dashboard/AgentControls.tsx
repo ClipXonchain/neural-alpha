@@ -14,6 +14,7 @@ export interface DeskConfig {
   swapCurrencies?: string[];
   stopLossPct?: number;
   takeProfitPct?: number;
+  trailingGivebackPct?: number;
 }
 
 function snap(value: number, step: number): number {
@@ -170,6 +171,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
   const [maxPositions, setMaxPositions] = useState(4);
   const [stopLoss, setStopLoss] = useState(8);
   const [takeProfit, setTakeProfit] = useState(14);
+  const [trailGiveback, setTrailGiveback] = useState(1);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(null);
   const [dirty, setDirty] = useState(false);
@@ -181,6 +183,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
     setMaxPositions(next.maxPortfolioTokens);
     if (next.stopLossPct != null) setStopLoss(next.stopLossPct);
     if (next.takeProfitPct != null) setTakeProfit(next.takeProfitPct);
+    if (next.trailingGivebackPct != null) setTrailGiveback(next.trailingGivebackPct);
   }, []);
 
   useEffect(() => {
@@ -215,10 +218,10 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
         slippageTolerance: clamp(slippage, 0.1, 10, 0.1),
         minGasReserveUsd: clamp(gasReserve, 0.5, 50, 0.5),
         stopLossPct: clamp(stopLoss, 1, 40, 0.5),
-        takeProfitPct: clamp(takeProfit, 1, 80, 0.5),
+        takeProfitPct: clamp(takeProfit, 1, 200, 0.5),
+        trailingActivatePct: clamp(takeProfit, 1, 200, 0.5),
+        trailingGivebackPct: clamp(trailGiveback, 0.1, 10, 0.1),
         autoExitEnabled: true,
-        trailingActivatePct: 0,
-        trailingGivebackPct: 0,
       });
       if (result.ok) {
         setMessage({ text: "Live — applies on next check", ok: true });
@@ -246,7 +249,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
             Trade settings
           </h3>
           <p className="mt-0.5 text-[11px] text-text-muted">
-            Size, count, slippage, gas, stop and take-profit. Applies immediately.
+            Size, count, slippage, gas, stop and trailing take-profit. Applies immediately.
           </p>
         </div>
         <span
@@ -258,7 +261,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
       </div>
 
       <div className="mb-4 rounded-lg border border-border-dim bg-void/40 px-3 py-2 text-[11px] text-text-secondary tabular-nums">
-        Each buy ≤ ${maxPos} · up to {maxPositions} names · cut −{stopLoss}% · take +{takeProfit}%
+        Each buy ≤ ${maxPos} · up to {maxPositions} names · cut −{stopLoss}% · arm trail +{takeProfit}% · sell −{trailGiveback}% off peak
       </div>
 
       <section className="mb-4">
@@ -319,17 +322,32 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
             accent="danger"
           />
           <SettingField
-            label="Take-profit"
-            hint="lock gain"
+            label="Arm trail"
+            hint="TP starts trail"
             value={takeProfit}
             onChange={markDirty(setTakeProfit)}
             min={1}
-            max={80}
+            max={200}
             step={0.5}
             disabled={!connected}
             unit="%"
-            presets={[10, 14, 20]}
+            presets={[10, 20, 100]}
             accent="neon"
+          />
+        </div>
+        <div className="mt-3">
+          <SettingField
+            label="Trail drop"
+            hint="sell this % below peak"
+            value={trailGiveback}
+            onChange={markDirty(setTrailGiveback)}
+            min={0.1}
+            max={10}
+            step={0.1}
+            disabled={!connected}
+            unit="%"
+            presets={[0.5, 1, 2]}
+            accent="cyan"
           />
         </div>
         <div className="mt-3">
@@ -344,7 +362,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
           <div className="mt-1 flex justify-between text-[9px] uppercase tracking-wide text-text-muted">
             <span className="text-danger/80">−{stopLoss}%</span>
             <span>entry</span>
-            <span className="text-neon/80">+{takeProfit}%</span>
+            <span className="text-neon/80">arm +{takeProfit}% · trail {trailGiveback}%</span>
           </div>
         </div>
       </section>

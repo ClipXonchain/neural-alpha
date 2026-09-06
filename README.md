@@ -267,7 +267,8 @@ All variables are documented in `.env.example`. Key ones:
 | `MAX_POSITION_SIZE_USD` | `100` | Max **buy** size (USD). Sells are not capped — a position that grew past this can still exit in full. |
 | `MAX_DAILY_TRADES` | `10` | Daily autonomous trade cap (set in `.env`; dashboard reads from agent config) |
 | `STOP_LOSS_PCT` | `8` | Stop-loss threshold (%) |
-| `TAKE_PROFIT_PCT` | `15` | Take-profit threshold (%) |
+| `TAKE_PROFIT_PCT` | `15` | Arms the trailing TP (does not sell at this print) |
+| `TRAILING_GIVEBACK_PCT` | `1` | After arm, sell if price drops this % from the hold's peak |
 | `MIN_BUY_CONFIDENCE` | `0.55` | Minimum signal confidence to buy |
 | `AUTO_EXIT_ENABLED` | `false` | Enable autonomous stop-loss/take-profit exits |
 | `OPENAI_API_KEY` | — | Enables AI assistant + signal analysis |

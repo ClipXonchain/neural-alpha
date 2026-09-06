@@ -90,8 +90,8 @@ export const SESSION_PROFILES: Record<SessionName, SessionProfile> = {
       minBuyConfidence: 0.5,
       stopLossPct: 6,
       takeProfitPct: 12,
-      trailingActivatePct: 5,
-      trailingGivebackPct: 2.5,
+      trailingActivatePct: 12,
+      trailingGivebackPct: 1,
     },
   },
 
@@ -125,8 +125,8 @@ export const SESSION_PROFILES: Record<SessionName, SessionProfile> = {
       minBuyConfidence: 0.48,
       stopLossPct: 8,
       takeProfitPct: 16,
-      trailingActivatePct: 6,
-      trailingGivebackPct: 3,
+      trailingActivatePct: 16,
+      trailingGivebackPct: 1,
     },
   },
 
@@ -160,8 +160,8 @@ export const SESSION_PROFILES: Record<SessionName, SessionProfile> = {
       minBuyConfidence: 0.52,
       stopLossPct: 10,
       takeProfitPct: 14,
-      trailingActivatePct: 7,
-      trailingGivebackPct: 3.5,
+      trailingActivatePct: 14,
+      trailingGivebackPct: 1,
     },
   },
 };

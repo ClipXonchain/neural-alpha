@@ -248,13 +248,20 @@ function mapPosition(
     ...(p.takeProfitPrice != null
       ? { takeProfitPrice: roundTokenPrice(p.takeProfitPrice) }
       : {}),
+    ...(p.trailStopPrice != null
+      ? { trailStopPrice: roundTokenPrice(p.trailStopPrice) }
+      : {}),
     ...(p.distanceToStopPct != null
       ? { distanceToStopPct: roundNum(p.distanceToStopPct, 1) }
       : {}),
     ...(p.distanceToTakeProfitPct != null
       ? { distanceToTakeProfitPct: roundNum(p.distanceToTakeProfitPct, 1) }
       : {}),
+    ...(p.distanceToTrailPct != null
+      ? { distanceToTrailPct: roundNum(p.distanceToTrailPct, 1) }
+      : {}),
     ...(p.peakPnlPct != null ? { peakPnlPct: roundNum(p.peakPnlPct, 1) } : {}),
+    ...(p.trailingArmed ? { trailingArmed: true } : {}),
     ...(p.entryFromTrades ? { entryFromTrades: true } : {}),
     entryUnknown,
   };
@@ -389,7 +396,8 @@ function exitLevelsFromEntry(
   current: number,
   stopLossPct: number,
   takeProfitPct: number,
-  peakPnlPct?: number
+  peakPnlPct?: number,
+  givebackPct = 1
 ): {
   stopLossPrice: number;
   takeProfitPrice: number;
@@ -397,16 +405,33 @@ function exitLevelsFromEntry(
   distanceToTakeProfitPct: number;
   pnlPct: number;
   peakPnlPct?: number;
+  trailingArmed?: boolean;
+  trailStopPrice?: number;
+  distanceToTrailPct?: number;
 } | null {
   if (entry <= 0) return null;
   const pnlPct = ((current - entry) / entry) * 100;
+  const peak = Math.max(peakPnlPct ?? pnlPct, pnlPct);
+  const armed = takeProfitPct > 0 && peak >= takeProfitPct;
+  const peakPrice = entry * (1 + peak / 100);
+  const trailStop = peakPrice * (1 - givebackPct / 100);
   return {
     stopLossPrice: roundTokenPrice(entry * (1 - stopLossPct / 100)),
     takeProfitPrice: roundTokenPrice(entry * (1 + takeProfitPct / 100)),
     distanceToStopPct: roundNum(pnlPct + stopLossPct, 1),
     distanceToTakeProfitPct: roundNum(takeProfitPct - pnlPct, 1),
     pnlPct: roundNum(pnlPct, 2),
-    ...(peakPnlPct != null ? { peakPnlPct: roundNum(peakPnlPct, 1) } : {}),
+    ...(peakPnlPct != null ? { peakPnlPct: roundNum(peak, 1) } : {}),
+    ...(armed
+      ? {
+          trailingArmed: true,
+          trailStopPrice: roundTokenPrice(trailStop),
+          distanceToTrailPct: roundNum(
+            current > 0 ? ((current - trailStop) / current) * 100 : 0,
+            1
+          ),
+        }
+      : {}),
   };
 }
 
@@ -644,7 +669,8 @@ export function enrichStateWithWallet(
         t.price,
         state.stopLossPct ?? 8,
         state.takeProfitPct ?? 15,
-        prev?.peakPnlPct
+        prev?.peakPnlPct,
+        state.trailingGivebackPct ?? 1
       );
 
       return {
@@ -662,6 +688,13 @@ export function enrichStateWithWallet(
               distanceToStopPct: exits.distanceToStopPct,
               distanceToTakeProfitPct: exits.distanceToTakeProfitPct,
               peakPnlPct: exits.peakPnlPct,
+              ...(exits.trailingArmed
+                ? {
+                    trailingArmed: true,
+                    trailStopPrice: exits.trailStopPrice,
+                    distanceToTrailPct: exits.distanceToTrailPct,
+                  }
+                : {}),
             }
           : {}),
         entryFromTrades: !entryUnknown && (prev?.entryFromTrades || fromTrades != null),
