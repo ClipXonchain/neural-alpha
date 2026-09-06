@@ -245,13 +245,13 @@ if [[ "${MODE}" == "live" ]]; then
   echo "▸ Live mode — Binance Agentic Wallet..."
   if ! command -v baw &>/dev/null; then
     echo "  ⚠ baw CLI not on PATH. Install: npm i -g @binance/agentic-wallet"
-    echo "    Then: baw auth signin   (confirm in Binance App)"
+    echo "    Then: bash deploy/baw-connect.sh"
   else
     echo "  ✓ baw: $(baw --version 2>/dev/null || echo found)"
     if baw wallet status --json >/dev/null 2>&1; then
       echo "  ✓ baw wallet status ok"
     else
-      echo "  ⚠ baw not signed in. After deploy: baw auth signin && pm2 restart neural-agent"
+      echo "  ⚠ baw not signed in. After deploy: bash deploy/baw-connect.sh"
     fi
   fi
 fi

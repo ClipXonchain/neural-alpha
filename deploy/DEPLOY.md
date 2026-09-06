@@ -86,15 +86,32 @@ The script sets `READONLY=true` and `NEXT_PUBLIC_READONLY=true` on the VPS (bake
 
 ### Binance Agentic Wallet on VPS (live)
 
-Session is local to the user that runs PM2 (`root` on this box).
+Session lives on the OS user that runs PM2 (`root` on this box). A VPS has no
+browser, and the public dashboard is read-only, so do **not** use interactive
+`baw auth signin` (it tries to open a browser and each run creates a new code).
+
+**Easiest — pair on your laptop, copy the session:**
 
 ```bash
-npm i -g @binance/agentic-wallet
+# Mac / PC (has a browser)
 baw auth signin
 baw wallet status --json    # CONNECTED
-baw wallet address --json
-pm2 restart neural-agent
+
+# Copy the session to the VPS as the same user that runs PM2
+scp -r ~/.baw root@YOUR_VPS:~/.baw
+ssh root@YOUR_VPS 'baw wallet status --json && pm2 restart neural-agent'
 ```
+
+**On the VPS only — one command, confirm in the Binance App:**
+
+```bash
+bash deploy/baw-connect.sh
+```
+
+That starts **one** pairing session, prints the pairing code + `urlForWeb`,
+waits for you to confirm in the app, then restarts `neural-agent`.
+
+Do not run `baw auth signin` again while it is waiting — that invalidates the code.
 
 ## What `deploy/setup.sh` does
 

@@ -642,7 +642,7 @@ baw wallet address --json
 baw wallet balance --binanceChainId 56 --json
 ```
 
-If status is `UNCONNECTED`, run `baw auth signin` and confirm in the Binance App.
+If status is `UNCONNECTED` on a laptop, run `baw auth signin` and confirm in the Binance App. On a VPS use `bash deploy/baw-connect.sh` (or copy `~/.baw` from a machine that is already signed in).
 
 ---
 
