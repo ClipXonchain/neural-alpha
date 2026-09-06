@@ -220,7 +220,7 @@ export function brainAgentStarted(mode: string, tradeIntervalMs: number, signalR
 
 export function brainLoopsStarted(protectiveSec: number, autoExit: boolean) {
   if (!autoExit || protectiveSec <= 0) return;
-  brain(`Protective exits armed — checking SL/TP every ${protectiveSec}s.`);
+  brain(`Protective exits armed — checking SL and trailing TP every ${protectiveSec}s.`);
 }
 
 export function brainRefreshLoopStarted(intervalMs: number) {

@@ -64,10 +64,10 @@ function ExitLevels({ pos }: { pos: Position }) {
       : trailDist != null
         ? `TRAIL ${trailDist.toFixed(1)}%`
         : "TRAIL"
-    : `TP ${tpDist.toFixed(1)}%`;
+    : `ARM ${tpDist.toFixed(1)}%`;
   const rightTitle = trailArmed
-    ? `Trail stop @ ${formatTradePrice(rightPrice)}${pos.peakPnlPct != null ? ` · peak +${pos.peakPnlPct.toFixed(1)}%` : ""}`
-    : `Arm trail @ ${formatTradePrice(pos.takeProfitPrice)} · ${tpDist.toFixed(1)}% to arm`;
+    ? `Trail stop @ ${formatTradePrice(rightPrice)}${pos.peakPnlPct != null ? ` · peak +${pos.peakPnlPct.toFixed(1)}%` : ""} · sell if price drops the trail % from peak`
+    : `Trail arms at ${formatTradePrice(pos.takeProfitPrice)} · ${tpDist.toFixed(1)}% to go · then hold until a 1% drop from peak`;
 
   return (
     <div className="flex flex-col gap-1 min-w-[108px]">
@@ -374,7 +374,12 @@ export function PositionsTable({
                   </th>
                   <th className="text-right pb-3 pr-4">Current</th>
                   <th className="text-right pb-3 pr-4">PnL</th>
-                  <th className="text-right pb-3 pr-4">SL / TP</th>
+                  <th
+                    className="text-right pb-3 pr-4"
+                    title="Hard stop-loss · trail arms at TP, then sells on a drop from peak"
+                  >
+                    SL / TRAIL
+                  </th>
                   <th className="text-right pb-3 pr-4">Weight</th>
                   {showActions && <th className="text-right pb-3">Action</th>}
                 </tr>
