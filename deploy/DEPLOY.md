@@ -113,6 +113,25 @@ waits for you to confirm in the app, then restarts `neural-agent`.
 
 Do not run `baw auth signin` again while it is waiting — that invalidates the code.
 
+### Operator UI from your laptop (not the public monitor)
+
+`https://agents.clipx.app` is read-only. To control the **VPS** agent from this Mac:
+
+```bash
+# stop local `npm run dev` first (it occupies :3847)
+bash deploy/local-machine-simulator.sh
+```
+
+That runs:
+
+```bash
+ssh -N -L 3847:127.0.0.1:3847 root@agents.clipx.app
+curl -sS http://127.0.0.1:3847/api/health
+npm run dashboard
+```
+
+Open http://localhost:3000 (or :3001 if 3000 is busy). Local `.env` must use the same `API_SECRET` as the VPS.
+
 ## What `deploy/setup.sh` does
 
 1. Optional `--branch` fetch / `--reset` (keeps `.env`)

@@ -644,6 +644,8 @@ baw wallet balance --binanceChainId 56 --json
 
 If status is `UNCONNECTED` on a laptop, run `baw auth signin` and confirm in the Binance App. On a VPS use `bash deploy/baw-connect.sh` (or copy `~/.baw` from a machine that is already signed in).
 
+To control the **VPS** agent from this Mac (not the public monitor), stop `npm run dev` and run `bash deploy/local-machine-simulator.sh`.
+
 ---
 
 ## Competition

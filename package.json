@@ -14,6 +14,7 @@
     "agent:dev": "npm run dev --workspace=neural-alpha",
     "register": "npm run register --workspace=neural-alpha",
     "dashboard": "npm run dev --workspace=dashboard",
+    "local:simulator": "bash deploy/local-machine-simulator.sh",
     "dashboard:build": "npm run build --workspace=dashboard",
     "dashboard:start": "npm run start --workspace=dashboard",
     "prod:build": "npm run build",
