@@ -96,14 +96,16 @@ export class RiskManager {
     // 5. Daily trade pacing removed — 24/7 on-chain, no campaign daily cap.
 
 
-    // 6. Position size limit — autonomous only (assistant may size freely up to cash).
+    // 6. Position size limit — buys only. A winner that grew past the cap
+    //    (e.g. $600 buy now worth $610) must still be fully sellable.
     if (
+      signal.action === "buy" &&
       !opts.manual &&
       !opts.explicitAmount &&
       tradeAmountUsd > this.config.maxPositionSizeUsd
     ) {
       violations.push(
-        `Trade $${tradeAmountUsd.toFixed(2)} exceeds max position size $${this.config.maxPositionSizeUsd}`
+        `Buy $${tradeAmountUsd.toFixed(2)} exceeds max position size $${this.config.maxPositionSizeUsd}`
       );
     }
 

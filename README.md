@@ -264,7 +264,7 @@ All variables are documented in `.env.example`. Key ones:
 | `STRATEGY` | `medium` | `safe` / `medium` / `momentum` |
 | `TRADE_INTERVAL_MS` | 30s/60min | Cycle frequency |
 | `MAX_DRAWDOWN_PCT` | `20` | Hard drawdown cap (%) |
-| `MAX_POSITION_SIZE_USD` | `100` | Per-trade limit (USD) |
+| `MAX_POSITION_SIZE_USD` | `100` | Max **buy** size (USD). Sells are not capped — a position that grew past this can still exit in full. |
 | `MAX_DAILY_TRADES` | `10` | Daily autonomous trade cap (set in `.env`; dashboard reads from agent config) |
 | `STOP_LOSS_PCT` | `8` | Stop-loss threshold (%) |
 | `TAKE_PROFIT_PCT` | `15` | Take-profit threshold (%) |
