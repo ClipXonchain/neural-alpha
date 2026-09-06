@@ -24,6 +24,7 @@ interface StatProps {
   icon: React.ReactNode;
   tone?: Tone;
   delay?: number;
+  className?: string;
 }
 
 const TONE = {
@@ -61,12 +62,12 @@ const TONE = {
   },
 } as const;
 
-function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps) {
+function Stat({ label, value, sub, icon, tone = "muted", delay = 0, className }: StatProps) {
   const t = TONE[tone];
 
   return (
     <BorderGlow
-      className="min-w-0 w-full"
+      className={cn("min-w-0 w-full", className)}
       borderRadius={8}
       glowRadius={6}
       glowIntensity={0.7}
@@ -81,7 +82,7 @@ function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps)
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.28, delay }}
-        className="relative flex h-full min-h-[64px] items-start gap-2 sm:items-center sm:gap-3 overflow-hidden rounded-[inherit] px-2.5 sm:px-3 py-2"
+        className="relative flex h-full min-h-[68px] flex-col justify-center gap-0.5 overflow-hidden rounded-[inherit] px-2.5 py-2 sm:min-h-[64px] sm:flex-row sm:items-center sm:gap-3 sm:px-3"
       >
         <span className={cn("absolute inset-y-0 left-0 w-[2px]", t.bar)} />
         <div
@@ -92,21 +93,24 @@ function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps)
         >
           {icon}
         </div>
-        <div className="min-w-0 flex-1 leading-tight">
+        <div className="min-w-0 w-full leading-tight">
           <p className="text-[9px] font-mono uppercase tracking-[0.14em] text-text-muted">
             {label}
           </p>
           <p
-            className={cn("mt-0.5 text-[15px] sm:text-[16px] font-bold tabular-nums tracking-tight", t.value)}
+            className={cn(
+              "mt-0.5 text-[16px] font-bold tabular-nums tracking-tight whitespace-nowrap sm:text-[16px]",
+              t.value
+            )}
             style={{ fontFamily: "var(--font-mono)" }}
           >
             {value}
           </p>
           {sub && (
-            <p className={cn("mt-0.5 flex items-center gap-0.5 text-[10px] font-mono", t.sub)}>
-              {tone === "up" && <ArrowUpRight className="size-2.5 shrink-0" />}
-              {tone === "down" && <ArrowDownRight className="size-2.5 shrink-0" />}
-              <span className="min-w-0 truncate">{sub}</span>
+            <p className={cn("mt-0.5 text-[10px] font-mono whitespace-nowrap", t.sub)}>
+              {tone === "up" && <ArrowUpRight className="mr-0.5 inline size-2.5" />}
+              {tone === "down" && <ArrowDownRight className="mr-0.5 inline size-2.5" />}
+              {sub}
             </p>
           )}
         </div>
@@ -124,6 +128,7 @@ export function MetricCards({ state }: { state: AgentState }) {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 min-w-0 [&>*:last-child]:col-span-2 sm:[&>*:last-child]:col-span-1">
       <Stat
+        className="col-span-2 sm:col-span-1"
         label="Portfolio"
         value={formatUsd(state.portfolioValue)}
         icon={<Wallet className="size-3.5" />}
@@ -131,6 +136,7 @@ export function MetricCards({ state }: { state: AgentState }) {
         delay={0}
       />
       <Stat
+        className="col-span-2 sm:col-span-1"
         label="Total PnL"
         value={formatUsd(state.totalPnl)}
         sub={
