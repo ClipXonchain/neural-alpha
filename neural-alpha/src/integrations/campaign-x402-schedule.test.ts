@@ -81,12 +81,12 @@ describe("shouldFireX402", () => {
     );
   });
 
-  it("fires immediately when slots are open (even if interval has not elapsed)", () => {
+  it("fires when slots are open after the 15m cooldown (even if interval has not elapsed)", () => {
     assert.equal(
       shouldFireX402({
         enabled: true,
         slotsOpen: true,
-        lastFiredAt: now - 60_000,
+        lastFiredAt: now - (X402_IMMEDIATE_COOLDOWN_MS + 1),
         intervalMs: INTERVAL,
         now,
       }),

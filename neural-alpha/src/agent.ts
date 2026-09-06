@@ -2639,7 +2639,7 @@ export class TradingAgent {
   }
 
   /**
-   * Paid CMC / Studio x402. Open slots fire immediately (15s cooldown).
+   * Paid CMC / Studio x402. Open slots fire after a 15m cooldown.
    * Full book waits for CMC_X402_INTERVAL_MS / STUDIO_X402_INTERVAL_MS.
    */
   private fireCampaignX402IfNeeded(reason: "cycle" | "sell"): Promise<void> {

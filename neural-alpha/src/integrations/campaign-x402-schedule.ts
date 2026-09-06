@@ -1,12 +1,12 @@
 /**
  * Cadence for paid campaign x402 (CMC MCP + Agent Studio).
  *
- * When portfolio slots are open, fire immediately (short cooldown only).
+ * When portfolio slots are open, fire after the immediate cooldown (default 15m).
  * When slots are full, wait for the configured interval.
  */
 
-/** Min gap between paid calls of the same source — avoids cycle-start + post-sell double fire. */
-export const X402_IMMEDIATE_COOLDOWN_MS = 15_000;
+/** Min gap between paid calls of the same source when a slot is open. */
+export const X402_IMMEDIATE_COOLDOWN_MS = 15 * 60 * 1000;
 
 /** Matches the historical CMC_MACRO_REFRESH_MS code default. */
 export const DEFAULT_X402_INTERVAL_MS = 4 * 60 * 60 * 1000;
