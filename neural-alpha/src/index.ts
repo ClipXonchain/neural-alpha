@@ -4,6 +4,7 @@ import { createBridge } from "./integrations/create-bridge.js";
 import { logger } from "./utils/logger.js";
 import { initAgentStore } from "./db/store.js";
 import { startDashboard } from "./web/server.js";
+import { resolveInitialDepositUsd } from "./config.js";
 
 /**
  * Neural Alpha — Autonomous bStock trading agent
@@ -38,7 +39,7 @@ process.on("uncaughtException", (err: NodeJS.ErrnoException) => {
 async function main() {
   const mode = process.env.AGENT_MODE || "paper";
   const dashPort = process.env.DASHBOARD_PORT || "3847";
-  const initialCash = parseFloat(process.env.INITIAL_CASH_USD || "1000");
+  const initialCash = resolveInitialDepositUsd() ?? 1000;
 
   console.log(`
 \x1b[1;33m╔══════════════════════════════════════════════════════════╗

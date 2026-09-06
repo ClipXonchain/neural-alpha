@@ -9,7 +9,7 @@
     "start": "tsx --import ./src/load-env.ts src/index.ts",
     "dev": "tsx watch --import ./src/load-env.ts src/index.ts",
     "register": "tsx src/register.ts",
-    "test": "tsx --test src/integrations/campaign-x402-schedule.test.ts src/risk/manager.test.ts src/risk/portfolio-exits.test.ts"
+    "test": "tsx --test src/integrations/campaign-x402-schedule.test.ts src/risk/manager.test.ts src/risk/portfolio-exits.test.ts src/risk/portfolio-deposit.test.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.0.0",

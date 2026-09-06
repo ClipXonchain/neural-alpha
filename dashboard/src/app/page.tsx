@@ -131,6 +131,7 @@ export default function DashboardPage() {
               connected={connected}
               config={agentConfig ? {
                 mode: agentConfig.mode || state.mode,
+                initialDepositUsd: agentConfig.initialDepositUsd ?? 2000,
                 maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 250,
                 slippageTolerance: agentConfig.slippageTolerance ?? 1,
                 minGasReserveUsd: agentConfig.minGasReserveUsd ?? 1.5,

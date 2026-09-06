@@ -88,6 +88,8 @@ export class PortfolioTracker {
   private dayStartUtcDate = "";
   /** Cost basis restored from Neon when trade replay is incomplete. */
   private persistedEntries = new Map<string, { avgEntryPrice: number; peakPnlPct?: number }>();
+  /** Operator USDT/stable deposit. Baseline = deposit + gas at lock. */
+  private configuredDepositUsd: number | null = null;
 
   constructor(initialCashUsd: number, deferBaseline = false) {
     this.initialValueUsd = initialCashUsd;
@@ -131,6 +133,35 @@ export class PortfolioTracker {
 
   get hasBaseline(): boolean {
     return this.baselineInitialized;
+  }
+
+  getConfiguredDepositUsd(): number | null {
+    return this.configuredDepositUsd;
+  }
+
+  /**
+   * Remember the cash deposit. Baseline is applied on the next lock
+   * (usually first wallet sync, once gas is known).
+   */
+  setConfiguredDeposit(depositUsd: number) {
+    if (!Number.isFinite(depositUsd) || depositUsd <= 0) return;
+    this.configuredDepositUsd = depositUsd;
+    this.lockDepositBaseline(this.gasReserveUsd);
+  }
+
+  /** NAV baseline = USDT deposit + BNB gas at the moment we lock. */
+  lockDepositBaseline(gasUsd: number) {
+    if (this.configuredDepositUsd == null) return;
+    const gas = Number.isFinite(gasUsd) && gasUsd > 0 ? gasUsd : 0;
+    const baseline = this.configuredDepositUsd + gas;
+    this.initialValueUsd = baseline;
+    this.peakValueUsd = Math.max(this.peakValueUsd, baseline);
+    this.baselineInitialized = true;
+    logger.info("Portfolio NAV baseline locked to deposit + gas", {
+      depositUsd: Math.round(this.configuredDepositUsd * 100) / 100,
+      gasUsd: Math.round(gas * 100) / 100,
+      initialNavUsd: Math.round(baseline * 100) / 100,
+    });
   }
 
   getPeakNav(): number {
@@ -191,14 +222,26 @@ export class PortfolioTracker {
       initialRatio > 3 ||
       initialRatio < 0.25;
 
+    if (this.configuredDepositUsd != null) {
+      this.lockDepositBaseline(this.gasReserveUsd);
+      this.peakValueUsd = Math.max(this.peakValueUsd, peakNavUsd, this.initialValueUsd, navUsd);
+      logger.info("NAV restore used configured deposit (DB peak kept if higher)", {
+        depositUsd: this.configuredDepositUsd,
+        initialNavUsd: Math.round(this.initialValueUsd * 100) / 100,
+        navUsd: Math.round(navUsd * 100) / 100,
+      });
+      return;
+    }
+
     if (stale) {
-      this.initialValueUsd = navUsd;
-      this.peakValueUsd = navUsd;
+      // Keep the stored deposit; only the peak is realigned to wallet NAV.
+      this.initialValueUsd = initialNavUsd > 0 ? initialNavUsd : navUsd;
+      this.peakValueUsd = Math.max(navUsd, this.initialValueUsd);
       this.baselineInitialized = true;
-      logger.info("Stale NAV state from DB discarded — realigned to wallet", {
+      logger.info("Stale peak from DB discarded — deposit baseline kept", {
         navUsd: Math.round(navUsd * 100) / 100,
         peakNavUsd: Math.round(peakNavUsd * 100) / 100,
-        initialNavUsd: Math.round(initialNavUsd * 100) / 100,
+        initialNavUsd: Math.round(this.initialValueUsd * 100) / 100,
       });
       return;
     }
@@ -349,6 +392,12 @@ export class PortfolioTracker {
     this.gasReserveSymbol = symbol;
     this.gasReserveAmount = Math.max(0, amount);
     this.gasReserveUsd = Math.max(0, valueUsd);
+    if (
+      this.configuredDepositUsd != null &&
+      (!this.baselineInitialized || this.initialValueUsd === this.configuredDepositUsd)
+    ) {
+      this.lockDepositBaseline(this.gasReserveUsd);
+    }
   }
 
   /**
@@ -359,11 +408,17 @@ export class PortfolioTracker {
    */
   setBaselineNav(navUsd: number) {
     if (this.baselineInitialized) return;
+    if (this.configuredDepositUsd != null) {
+      this.lockDepositBaseline(this.gasReserveUsd);
+      return;
+    }
     if (!Number.isFinite(navUsd) || navUsd <= 0) return;
     this.initialValueUsd = navUsd;
     this.peakValueUsd = navUsd;
     this.baselineInitialized = true;
-    logger.info("Portfolio NAV baseline anchored", { navUsd: Math.round(navUsd * 100) / 100 });
+    logger.info("Portfolio NAV baseline anchored to first wallet NAV", {
+      navUsd: Math.round(navUsd * 100) / 100,
+    });
   }
 
   get tradeCount(): number {

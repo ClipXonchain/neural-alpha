@@ -119,6 +119,17 @@ export function isSwapCurrency(symbol: string, swapCurrencies: string[]): boolea
   return swapCurrencies.includes(symbol.toUpperCase());
 }
 
+/**
+ * Operator-set starting USDT (or stable) deposit. Gas is added at first wallet
+ * sync so Total PnL = current NAV − (deposit + starting BNB).
+ */
+export function resolveInitialDepositUsd(env: NodeJS.ProcessEnv = process.env): number | null {
+  const raw = env.INITIAL_DEPOSIT_USD || env.INITIAL_CASH_USD || env.AGENT_NAV_USD;
+  if (raw === undefined || String(raw).trim() === "") return null;
+  const n = parseFloat(raw);
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
 export function loadConfig(): AgentConfig {
   const mode = (process.env.AGENT_MODE as "live" | "paper") || "paper";
   const defaultInterval = mode === "paper" ? "30000" : "300000"; // 30s paper, 5min live
@@ -165,6 +176,7 @@ export function loadConfig(): AgentConfig {
     autoExitEnabled: process.env.AUTO_EXIT_ENABLED !== "false",
     failedSwapCooldownMs: parseInt(process.env.FAILED_SWAP_COOLDOWN_MS || "1800000", 10),
     minBuyIntervalMs: parseInt(process.env.MIN_BUY_INTERVAL_MS || "600000", 10),
+    initialDepositUsd: resolveInitialDepositUsd() ?? undefined,
     ...parseX402Settings(),
   };
 }

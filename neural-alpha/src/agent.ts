@@ -1,5 +1,5 @@
 import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot } from "./utils/types.js";
-import { loadConfig, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
+import { loadConfig, resolveInitialDepositUsd, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
 import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, parseCmcQuotesBatch, parseCmcTrending, unwrapX402Response } from "./data/market.js";
 import { fetchNewsFeed } from "./data/news.js";
 import { analyzeMarkets, selectTrades } from "./strategy/index.js";
@@ -201,6 +201,8 @@ export class TradingAgent {
     // Live mode defers the NAV baseline until the real on-chain balance is
     // synced, so a placeholder cash value can't trigger a false drawdown.
     this.portfolio = new PortfolioTracker(initialCashUsd, this.config.mode === "live");
+    const deposit = this.config.initialDepositUsd ?? resolveInitialDepositUsd();
+    if (deposit) this.portfolio.setConfiguredDeposit(deposit);
     this.riskManager = new RiskManager(this.config, this.portfolio);
     this.mcp = mcp;
     this.bridgeSource = bridgeSource;
@@ -1517,7 +1519,10 @@ export class TradingAgent {
   }
 
   getConfig(): AgentConfig {
-    return { ...this.config };
+    return {
+      ...this.config,
+      initialDepositUsd: this.portfolio.getConfiguredDepositUsd() ?? this.config.initialDepositUsd,
+    };
   }
 
   updateWatchlist(tokens: string[]) {
@@ -1555,6 +1560,7 @@ export class TradingAgent {
       "minTradeAmountUsd", "minBuyConfidence", "stopLossPct", "takeProfitPct",
       "trailingActivatePct", "trailingGivebackPct", "autoExitEnabled",
       "protectiveExitCheckMs", "signalRefreshMs", "minBuyIntervalMs",
+      "initialDepositUsd",
     ];
     for (const key of safe) {
       if (partial[key] !== undefined) {
@@ -1565,6 +1571,15 @@ export class TradingAgent {
     if (partial.takeProfitPct !== undefined && partial.trailingActivatePct === undefined) {
       this.config.trailingActivatePct = this.config.takeProfitPct;
       changed.trailingActivatePct = this.config.takeProfitPct;
+    }
+    if (partial.initialDepositUsd !== undefined) {
+      const deposit = Number(partial.initialDepositUsd);
+      if (Number.isFinite(deposit) && deposit > 0) {
+        this.config.initialDepositUsd = deposit;
+        this.portfolio.setConfiguredDeposit(deposit);
+        changed.initialDepositUsd = deposit;
+        changed.initialNavUsd = this.portfolio.initialValue;
+      }
     }
     if (partial.minGasReserveUsd !== undefined) {
       this.portfolio.setMinGasReserveUsd(Number(partial.minGasReserveUsd));
@@ -1586,8 +1601,10 @@ export class TradingAgent {
   async restart() {
     this.running = false;
 
-    const initialCash = parseFloat(process.env.INITIAL_CASH_USD || "10");
+    const initialCash =
+      this.config.initialDepositUsd ?? resolveInitialDepositUsd() ?? 1000;
     this.portfolio = new PortfolioTracker(initialCash, this.config.mode === "live");
+    if (initialCash > 0) this.portfolio.setConfiguredDeposit(initialCash);
     this.cycleCount = 0;
     this.lastSignals.clear();
     this.lastNewsSentiment.clear();

@@ -476,7 +476,7 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
             "tradeIntervalMs", "maxDrawdownPct", "minTradeAmountUsd",
             "minBuyConfidence", "trailingActivatePct", "trailingGivebackPct",
             "protectiveExitCheckMs", "signalRefreshMs", "sessionPolicy",
-            "minBuyIntervalMs",
+            "minBuyIntervalMs", "initialDepositUsd",
           ]);
           const disallowed = Object.keys(updates).filter((k) => !ALLOWED_CONFIG_KEYS.has(k));
           if (disallowed.length > 0) {

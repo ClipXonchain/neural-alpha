@@ -198,6 +198,8 @@ export interface AgentConfig {
   excludedTokens?: string[];
   /** Dashboard / API: minimum USD price to consider tradable. */
   minTradablePriceUsd?: number;
+  /** Starting USDT/stable deposit. NAV baseline = this + gas at first lock. */
+  initialDepositUsd?: number;
 }
 
 export interface PortfolioHolding {

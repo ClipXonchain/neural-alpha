@@ -243,7 +243,7 @@ See [Deployment](#deployment) for full VPS setup.
 | | Paper (`AGENT_MODE=paper`) | Live (`AGENT_MODE=live`) |
 |---|---|---|
 | Swaps | Simulated (`paper-*` tx hash) | Real BSC transactions via Agentic Wallet |
-| Capital | Uses `INITIAL_CASH_USD` | Syncs from on-chain USDT balance |
+| Capital | Uses `INITIAL_DEPOSIT_USD` | Wallet USDT + positions + gas; PnL vs deposit + starting BNB |
 | Cycle interval | 30s default | 60 min default |
 | Portfolio | In-memory only | Reconciled with on-chain state each cycle |
 
@@ -259,6 +259,7 @@ All variables are documented in `.env.example`. Key ones:
 | `PAYMENT_TOKEN` | `USDT` | Campaign payment token: BNB / USDT / USDC / U / USD1 |
 | `BAW_CLI` | `baw` | Binance Agentic Wallet CLI |
 | `AGENT_WALLET_ADDRESS` | — | BSC wallet address (auto-detected from `baw`) |
+| `INITIAL_DEPOSIT_USD` | `2000` | Starting USDT deposit. Total PnL = NAV − (this + BNB at lock) |
 | `API_SECRET` | — | **Required in production** — Bearer token for API auth |
 | `NODE_ENV` | — | Set to `production` on VPS |
 | `STRATEGY` | `medium` | `safe` / `medium` / `momentum` |

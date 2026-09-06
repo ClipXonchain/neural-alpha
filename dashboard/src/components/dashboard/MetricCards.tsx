@@ -137,7 +137,7 @@ export function MetricCards({ state }: { state: AgentState }) {
         value={formatUsd(state.totalPnl)}
         sub={
           state.initialNavUsd > 0
-            ? `${formatPct(state.totalPnlPct)} vs ${formatUsd(state.initialNavUsd)}`
+            ? `${formatPct(state.totalPnlPct)} vs ${formatUsd(state.initialNavUsd)} start (USDT+gas)`
             : undefined
         }
         icon={state.totalPnl >= 0 ? <TrendingUp className="size-3.5" /> : <TrendingDown className="size-3.5" />}

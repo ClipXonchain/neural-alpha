@@ -15,6 +15,7 @@ export interface DeskConfig {
   stopLossPct?: number;
   takeProfitPct?: number;
   trailingGivebackPct?: number;
+  initialDepositUsd?: number;
 }
 
 function snap(value: number, step: number): number {
@@ -165,6 +166,7 @@ interface AgentControlsProps {
 }
 
 export function AgentControls({ connected, config, onSave }: AgentControlsProps) {
+  const [deposit, setDeposit] = useState(2000);
   const [maxPos, setMaxPos] = useState(250);
   const [slippage, setSlippage] = useState(1);
   const [gasReserve, setGasReserve] = useState(1.5);
@@ -177,6 +179,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
   const [dirty, setDirty] = useState(false);
 
   const applyConfig = useCallback((next: DeskConfig) => {
+    if (next.initialDepositUsd != null) setDeposit(next.initialDepositUsd);
     setMaxPos(next.maxPositionSizeUsd);
     setSlippage(next.slippageTolerance);
     setGasReserve(next.minGasReserveUsd);
@@ -213,6 +216,7 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
     setMessage(null);
     try {
       const result = await onSave({
+        initialDepositUsd: clamp(deposit, 10, 1_000_000, 10),
         maxPositionSizeUsd: clamp(maxPos, 5, 10000, 5),
         maxPortfolioTokens: clamp(maxPositions, 1, 20, 1),
         slippageTolerance: clamp(slippage, 0.1, 10, 0.1),
@@ -261,12 +265,25 @@ export function AgentControls({ connected, config, onSave }: AgentControlsProps)
       </div>
 
       <div className="mb-4 rounded-lg border border-border-dim bg-void/40 px-3 py-2 text-[11px] text-text-secondary tabular-nums">
-        Each buy ≤ ${maxPos} · up to {maxPositions} names · cut −{stopLoss}% · arm trail +{takeProfit}% · sell −{trailGiveback}% off peak
+        Start ${deposit} + gas · each buy ≤ ${maxPos} · up to {maxPositions} names · cut −{stopLoss}% · arm trail +{takeProfit}% · sell −{trailGiveback}% off peak
       </div>
 
       <section className="mb-4">
         <p className="mb-2 text-[10px] uppercase tracking-[0.16em] text-text-muted">Position</p>
         <div className="grid grid-cols-2 gap-3">
+          <SettingField
+            label="Start deposit"
+            hint="USDT in + gas"
+            value={deposit}
+            onChange={markDirty(setDeposit)}
+            min={10}
+            max={1_000_000}
+            step={10}
+            disabled={!connected}
+            unit="USD"
+            presets={[1000, 2000, 5000]}
+            accent="cyan"
+          />
           <SettingField
             label="Max size"
             hint="per name"
