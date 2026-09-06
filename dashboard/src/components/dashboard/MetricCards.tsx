@@ -81,36 +81,34 @@ function Stat({ label, value, sub, icon, tone = "muted", delay = 0 }: StatProps)
         initial={{ opacity: 0, y: 8 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.28, delay }}
-        className="relative flex h-full min-h-[52px] items-center gap-2.5 sm:gap-3 overflow-hidden rounded-[inherit] px-2.5 sm:px-3 py-2.5"
+        className="relative flex h-full min-h-[64px] items-start gap-2 sm:items-center sm:gap-3 overflow-hidden rounded-[inherit] px-2.5 sm:px-3 py-2"
       >
         <span className={cn("absolute inset-y-0 left-0 w-[2px]", t.bar)} />
         <div
           className={cn(
-            "flex size-8 shrink-0 items-center justify-center rounded-md",
+            "mt-0.5 hidden size-8 shrink-0 items-center justify-center rounded-md sm:flex",
             t.chip
           )}
         >
           {icon}
         </div>
-        <div className="min-w-0 leading-tight">
+        <div className="min-w-0 flex-1 leading-tight">
           <p className="text-[9px] font-mono uppercase tracking-[0.14em] text-text-muted">
             {label}
           </p>
-          <p className="mt-0.5 flex items-baseline gap-1.5 min-w-0">
-            <span
-              className={cn("text-[13px] sm:text-[15px] font-bold tabular-nums tracking-tight truncate", t.value)}
-              style={{ fontFamily: "var(--font-mono)" }}
-            >
-              {value}
-            </span>
-            {sub && (
-              <span className={cn("flex items-center gap-0.5 truncate text-[10px] font-mono", t.sub)}>
-                {tone === "up" && <ArrowUpRight className="size-2.5 shrink-0" />}
-                {tone === "down" && <ArrowDownRight className="size-2.5 shrink-0" />}
-                {sub}
-              </span>
-            )}
+          <p
+            className={cn("mt-0.5 text-[15px] sm:text-[16px] font-bold tabular-nums tracking-tight", t.value)}
+            style={{ fontFamily: "var(--font-mono)" }}
+          >
+            {value}
           </p>
+          {sub && (
+            <p className={cn("mt-0.5 flex items-center gap-0.5 text-[10px] font-mono", t.sub)}>
+              {tone === "up" && <ArrowUpRight className="size-2.5 shrink-0" />}
+              {tone === "down" && <ArrowDownRight className="size-2.5 shrink-0" />}
+              <span className="min-w-0 truncate">{sub}</span>
+            </p>
+          )}
         </div>
       </motion.div>
     </BorderGlow>
@@ -137,7 +135,7 @@ export function MetricCards({ state }: { state: AgentState }) {
         value={formatUsd(state.totalPnl)}
         sub={
           state.initialNavUsd > 0
-            ? `${formatPct(state.totalPnlPct)} vs ${formatUsd(state.initialNavUsd)} start (USDT+gas)`
+            ? `${formatPct(state.totalPnlPct)} vs ${formatUsd(state.initialNavUsd, 0)}`
             : undefined
         }
         icon={state.totalPnl >= 0 ? <TrendingUp className="size-3.5" /> : <TrendingDown className="size-3.5" />}
