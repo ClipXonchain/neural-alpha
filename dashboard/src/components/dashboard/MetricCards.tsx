@@ -139,11 +139,7 @@ export function MetricCards({ state }: { state: AgentState }) {
         className="col-span-2 sm:col-span-1"
         label="Total PnL"
         value={formatUsd(state.totalPnl)}
-        sub={
-          state.initialNavUsd > 0
-            ? `${formatPct(state.totalPnlPct)} vs ${formatUsd(state.initialNavUsd, 0)}`
-            : undefined
-        }
+        sub={state.initialNavUsd > 0 ? formatPct(state.totalPnlPct) : undefined}
         icon={state.totalPnl >= 0 ? <TrendingUp className="size-3.5" /> : <TrendingDown className="size-3.5" />}
         tone={pnlTone}
         delay={0.04}
