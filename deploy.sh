@@ -15,7 +15,7 @@ set -euo pipefail
 #   bash deploy.sh                         # interactive menu
 #   bash deploy.sh 1                       # fresh
 #   bash deploy.sh 2                       # update
-#   bash deploy.sh update --branch agentic-wallet --reset
+#   bash deploy.sh update --branch dashboard --reset
 #
 # Optional env:
 #   DOMAIN=neuralalpha.io
@@ -25,7 +25,7 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 DOMAIN="${DOMAIN:-neuralalpha.io}"
 WWW_DOMAIN="${WWW_DOMAIN:-www.${DOMAIN}}"
-BRANCH=""
+BRANCH="${BRANCH:-dashboard}"
 MODE=""
 RESET=0
 SKIP_NGINX=0
@@ -44,7 +44,7 @@ Neural Alpha — ${DOMAIN}
   bash deploy.sh 2            Update (git pull, rebuild, pm2 restart)
   bash deploy.sh fresh|update Same as 1 or 2
 
-  --branch <name>   Branch to fetch (update defaults to the checked-out branch)
+  --branch <name>   Branch to fetch (default: dashboard)
   --reset           Discard local code changes (keeps .env)
   --skip-nginx      Fresh deploy: do not install or reload Nginx
   --skip-ssl        Fresh deploy: do not request a Let's Encrypt certificate
@@ -52,6 +52,7 @@ Neural Alpha — ${DOMAIN}
   -h, --help        Show this help
 
 Domain defaults to neuralalpha.io (override with DOMAIN= / WWW_DOMAIN=).
+Git always checks out origin/dashboard unless --branch is set.
 EOF
 }
 
@@ -242,7 +243,7 @@ choose_mode() {
     echo "     Nginx + Certbot + build + PM2 start"
     echo ""
     echo "  2) Update"
-    echo "     git pull, rebuild, pm2 restart"
+    echo "     git pull origin/${BRANCH}, rebuild, pm2 restart"
     echo "     (keeps Nginx, SSL, and .env)"
     echo ""
     echo "  q) Quit"
@@ -300,22 +301,13 @@ sync_git() {
     return
   fi
 
-  if [[ "$required" -eq 0 && -z "$BRANCH" ]]; then
-    return
-  fi
-
   echo ""
-  echo "▸ Syncing git..."
+  echo "▸ Syncing git (origin/${BRANCH})..."
   if [[ ! -d .git ]]; then
     echo "  ✗ $APP_DIR is not a git repo"
+    echo "    Clone the dashboard branch into its own directory:"
+    echo "    git clone -b dashboard --single-branch git@github-neural-alpha:ClipXonchain/neural-alpha.git ~/neural-alpha"
     exit 1
-  fi
-
-  if [[ -z "$BRANCH" ]]; then
-    BRANCH="$(git rev-parse --abbrev-ref HEAD)"
-    if [[ "$BRANCH" == "HEAD" ]]; then
-      BRANCH="agentic-wallet"
-    fi
   fi
 
   local env_bak=""
@@ -351,6 +343,17 @@ sync_git() {
     git pull --ff-only origin "$BRANCH"
     echo "  ✓ Pulled origin/$BRANCH"
   fi
+
+  local head_sha origin_sha current_branch
+  head_sha="$(git rev-parse HEAD)"
+  origin_sha="$(git rev-parse "origin/$BRANCH")"
+  current_branch="$(git rev-parse --abbrev-ref HEAD)"
+  if [[ "$current_branch" != "$BRANCH" || "$head_sha" != "$origin_sha" ]]; then
+    echo "  ✗ Not on origin/${BRANCH} (branch=${current_branch}, HEAD=${head_sha:0:12})"
+    [[ -n "$env_bak" && -f "$env_bak" ]] && rm -f "$env_bak"
+    exit 1
+  fi
+  echo "  ✓ Exact branch ${BRANCH} @ ${head_sha:0:12}"
 
   if [[ -n "$env_bak" && -f "$env_bak" ]]; then
     cp -a "$env_bak" .env
