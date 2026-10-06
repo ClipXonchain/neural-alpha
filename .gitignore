@@ -29,6 +29,9 @@ credentials.json
 wallet.json
 neural-alpha/data/campaign-state.json
 neural-alpha/data/position-entries.json
+neural-alpha/data/*.sqlite
+neural-alpha/data/*.sqlite-wal
+neural-alpha/data/*.sqlite-shm
 
 # Logs
 logs/

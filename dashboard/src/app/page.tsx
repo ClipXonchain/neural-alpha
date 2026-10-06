@@ -1,48 +1,31 @@
 "use client";
 
-import { Header } from "@/components/dashboard/Header";
-import { AutonomousPanel } from "@/components/dashboard/AutonomousPanel";
-import { MetricCards } from "@/components/dashboard/MetricCards";
-import { PositionsTable } from "@/components/dashboard/PositionsTable";
-import { TradeHistory } from "@/components/dashboard/TradeHistory";
-import { SignalMonitor } from "@/components/dashboard/SignalMonitor";
-import { ActivityFeed } from "@/components/dashboard/ActivityFeed";
-import { WalletPanel } from "@/components/dashboard/WalletPanel";
-import { AgentControls } from "@/components/dashboard/AgentControls";
+import Image from "next/image";
+import { Info } from "lucide-react";
+import { ClipxApp } from "@/components/clipx/ClipxApp";
 import { useAgentConnection } from "@/hooks/useAgentConnection";
 import { useReadOnly } from "@/hooks/useReadOnly";
 import { blacklistToken, unblacklistToken } from "@/lib/agent-api";
-import dynamic from "next/dynamic";
-
-const EquityChart = dynamic(
-  () => import("@/components/dashboard/EquityChart").then((m) => m.EquityChart),
-  { ssr: false, loading: () => <div className="lg:col-span-3 min-h-[260px] rounded-xl bg-surface border border-border-dim" /> }
-);
-const AllocationChart = dynamic(
-  () => import("@/components/dashboard/AllocationChart").then((m) => m.AllocationChart),
-  { ssr: false, loading: () => <div className="lg:col-span-2 min-h-[260px] rounded-xl bg-surface border border-border-dim" /> }
-);
 
 function DashboardSkeleton() {
-  const readOnly = useReadOnly();
   return (
-    <div className="min-h-screen bg-void">
-      <div className="h-[57px] border-b border-border-dim bg-surface" />
-      <main className="w-full min-w-0 px-3 sm:px-4 md:px-6 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto">
-        {!readOnly && (
-          <div className="h-16 rounded-xl bg-surface border border-border-dim animate-pulse" />
-        )}
-        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 py-1">
-          {Array.from({ length: 5 }).map((_, i) => (
-            <div key={i} className="h-[52px] rounded-lg bg-surface border border-border-dim animate-pulse" />
-          ))}
+    <div className="app">
+      <aside className="sidebar">
+        <div className="brand">
+          <Image className="brand-logo" src="/brand/neural-alpha-logo.png" alt="Neural Alpha" width={960} height={300} priority sizes="208px" style={{ width: "100%", height: "auto" }} />
         </div>
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 min-w-0">
-          <div className="lg:col-span-3 h-[260px] rounded-xl bg-surface border border-border-dim animate-pulse" />
-          <div className="lg:col-span-2 h-[260px] rounded-xl bg-surface border border-border-dim animate-pulse" />
+        <div className="sidebar-bottom">
+          <a className="about-link" href="/about">
+            <Info size={18} />
+            <span>About</span>
+          </a>
         </div>
-        <div className="h-48 rounded-xl bg-surface border border-border-dim animate-pulse" />
-        <p className="text-center text-xs font-mono text-text-muted">Connecting to agent…</p>
+      </aside>
+      <main className="main">
+        <header className="topbar" />
+        <div className="page">
+          <p style={{ color: "#7e8a97", fontSize: 12 }}>Connecting to agent…</p>
+        </div>
       </main>
     </div>
   );
@@ -67,108 +50,38 @@ export default function DashboardPage() {
     handleSellPosition,
   } = useAgentConnection();
 
-  const home = loading || !state ? (
-    <DashboardSkeleton />
-  ) : (
-    <>
-      <Header
-        state={state}
-        onStart={handleStart}
-        onStop={handleStop}
-        connected={connected}
-        error={error}
-        readOnly={readOnly}
-      />
-
-      <main className="w-full min-w-0 px-3 sm:px-4 md:px-6 py-3 sm:py-4 flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto">
-        {!connected && error && (
-          <div className="rounded-lg border border-warning/30 bg-warning/10 px-4 py-2 text-xs font-mono text-warning">
-            {error}
-          </div>
-        )}
-
-        {!readOnly && <AutonomousPanel state={state} />}
-        <MetricCards state={state} />
-
-        <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 min-w-0">
-          <EquityChart state={state} />
-          <AllocationChart state={state} onRefresh={readOnly ? undefined : handleResync} />
-        </div>
-
-        <PositionsTable
-          positions={state.positions}
-          readOnly={readOnly}
-          connected={connected}
-          onSell={readOnly ? undefined : handleSellPosition}
-        />
-
-        <SignalMonitor
-          signals={state.signals}
-          lastSignalRefreshAt={state.lastSignalRefreshAt}
-          signalRefreshSec={state.signalRefreshSec ?? 10}
-          session={state.sessionActive}
-          readOnly={readOnly}
-          onBlacklist={readOnly ? undefined : async (sym) => { await blacklistToken(sym); }}
-          onUnblacklist={readOnly ? undefined : async (sym) => { await unblacklistToken(sym); }}
-        />
-
-        <TradeHistory trades={state.trades} />
-
-        <WalletPanel
-          wallet={wallet}
-          mode={state.mode}
-          connected={connected}
-          onSync={handleSyncWallet}
-          onSignin={handleWalletSignin}
-          onVerify={handleWalletVerify}
-          readOnly={readOnly}
-        />
-
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
-          <ActivityFeed activity={state.activity} />
-          {!readOnly && (
-            <AgentControls
-              connected={connected}
-              config={agentConfig ? {
-                mode: agentConfig.mode || state.mode,
-                initialDepositUsd: agentConfig.initialDepositUsd ?? 2000,
-                maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 250,
-                slippageTolerance: agentConfig.slippageTolerance ?? 1,
-                minGasReserveUsd: agentConfig.minGasReserveUsd ?? 1.5,
-                maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 4,
-                baseCurrency: agentConfig.baseCurrency,
-                swapCurrencies: agentConfig.swapCurrencies,
-                stopLossPct: agentConfig.stopLossPct ?? state.stopLossPct ?? 8,
-                takeProfitPct: agentConfig.takeProfitPct ?? state.takeProfitPct ?? 14,
-                trailingGivebackPct: agentConfig.trailingGivebackPct ?? state.trailingGivebackPct ?? 1,
-              } : null}
-              onSave={handleSaveConfig}
-            />
-          )}
-        </div>
-
-        <footer className="flex flex-wrap items-center justify-between gap-2 py-4 pb-[max(1rem,env(safe-area-inset-bottom))] border-t border-border-dim text-[10px] font-mono text-text-muted">
-          <span>Neural Alpha</span>
-          <div className="flex items-center gap-4">
-            <span>{connected ? "Live agent" : "Offline"}</span>
-            <span>bStock · BSC 56</span>
-            <span>Agentic Wallet</span>
-          </div>
-        </footer>
-      </main>
-    </>
-  );
+  if (loading || !state) return <DashboardSkeleton />;
 
   return (
-    <div className="min-h-screen grid-bg scanlines relative">
-      <div className="pointer-events-none fixed inset-0 z-0">
-        <div className="absolute top-1/4 left-1/4 w-[500px] h-[500px] rounded-full bg-neon/[0.02] blur-[120px]" />
-        <div className="absolute bottom-1/4 right-1/4 w-[400px] h-[400px] rounded-full bg-cyan/[0.02] blur-[120px]" />
-      </div>
-
-      <div className="relative z-10 min-w-0 overflow-x-clip">
-        {home}
-      </div>
-    </div>
+    <ClipxApp
+      state={state}
+      wallet={wallet}
+      connected={connected}
+      error={error}
+      readOnly={readOnly}
+      config={agentConfig ? {
+        mode: agentConfig.mode || state.mode,
+        initialDepositUsd: agentConfig.initialDepositUsd ?? 2000,
+        maxPositionSizeUsd: agentConfig.maxPositionSizeUsd ?? 250,
+        slippageTolerance: agentConfig.slippageTolerance ?? 1,
+        minGasReserveUsd: agentConfig.minGasReserveUsd ?? 1.5,
+        maxPortfolioTokens: agentConfig.maxPortfolioTokens ?? 4,
+        baseCurrency: agentConfig.baseCurrency,
+        swapCurrencies: agentConfig.swapCurrencies,
+        stopLossPct: agentConfig.stopLossPct ?? state.stopLossPct ?? 8,
+        takeProfitPct: agentConfig.takeProfitPct ?? state.takeProfitPct ?? 14,
+        trailingGivebackPct: agentConfig.trailingGivebackPct ?? state.trailingGivebackPct ?? 1,
+      } : null}
+      onStart={handleStart}
+      onStop={handleStop}
+      onSync={handleSyncWallet}
+      onSignin={handleWalletSignin}
+      onVerify={handleWalletVerify}
+      onResync={readOnly ? undefined : handleResync}
+      onSell={readOnly ? undefined : handleSellPosition}
+      onSave={handleSaveConfig}
+      onBlacklist={readOnly ? undefined : async (symbol) => { await blacklistToken(symbol); }}
+      onUnblacklist={readOnly ? undefined : async (symbol) => { await unblacklistToken(symbol); }}
+    />
   );
 }

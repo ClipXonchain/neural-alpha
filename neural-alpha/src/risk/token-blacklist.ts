@@ -1,7 +1,7 @@
 import { logger } from "../utils/logger.js";
 import { brain } from "../utils/brain-log.js";
 
-/** Operator-curated blocklist — persisted in Neon, merged at runtime with static exclusions. */
+/** Operator-curated blocklist — persisted in SQLite, merged at runtime with static exclusions. */
 const userBlacklisted = new Set<string>();
 
 export function normalizeSymbol(symbol: string): string {

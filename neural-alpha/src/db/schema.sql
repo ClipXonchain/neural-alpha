@@ -1,5 +1,6 @@
--- Neural Alpha persistence schema (Neon Postgres)
--- Applied automatically on agent start when DATABASE_URL is set.
+-- Neon Postgres backup schema.
+-- SQLite is the live database. This schema is applied only so the hourly
+-- backup has somewhere to upsert rows. The agent does not read these tables.
 
 CREATE TABLE IF NOT EXISTS trades (
   id BIGSERIAL PRIMARY KEY,
@@ -70,6 +71,12 @@ CREATE TABLE IF NOT EXISTS chain_syncs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_chain_syncs_timestamp ON chain_syncs(timestamp DESC);
+
+-- SQLite row id. Hourly backups upsert on this so a snapshot is stored once.
+ALTER TABLE nav_snapshots ADD COLUMN IF NOT EXISTS local_id BIGINT;
+ALTER TABLE chain_syncs ADD COLUMN IF NOT EXISTS local_id BIGINT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_nav_snapshots_local_id ON nav_snapshots (local_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_chain_syncs_local_id ON chain_syncs (local_id);
 
 CREATE TABLE IF NOT EXISTS agent_state (
   key TEXT PRIMARY KEY,

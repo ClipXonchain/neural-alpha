@@ -10,7 +10,11 @@ function apiSecret(): string | undefined {
   return getServerEnv("API_SECRET");
 }
 
-const PUBLIC_DASHBOARD_HOSTS = new Set(["agents.clipx.app"]);
+const PUBLIC_DASHBOARD_HOSTS = new Set([
+  "neuralalpha.io",
+  "www.neuralalpha.io",
+  "agents.clipx.app",
+]);
 const LONG_RUNNING_PATHS = new Set([
   "control/sell",
   "wallet/sync",
@@ -21,6 +25,8 @@ const LONG_RUNNING_PATHS = new Set([
   "competition/register",
   "campaign/ai-tasks",
   "control/start",
+  "assistant",
+  "reviews/run",
 ]);
 
 const UPSTREAM_TIMEOUT_MS = 180_000;
@@ -33,7 +39,8 @@ function isReadonlyDeploy(req: NextRequest): boolean {
   return PUBLIC_DASHBOARD_HOSTS.has(host);
 }
 const ALLOWED_ORIGINS = new Set(
-  (process.env.CORS_ORIGINS ?? "https://agents.clipx.app,http://localhost:3000")
+  (process.env.CORS_ORIGINS ??
+    "https://neuralalpha.io,https://www.neuralalpha.io,https://agents.clipx.app,http://localhost:3000")
     .split(",")
     .map((o) => o.trim())
     .filter(Boolean)

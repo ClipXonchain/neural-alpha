@@ -190,10 +190,12 @@ export interface AgentConfig {
   cmcX402Enabled: boolean;
   /** Paid Agent Studio stock-analysis x402. Default on. */
   studioX402Enabled: boolean;
-  /** CMC x402 interval when portfolio slots are full (ms). */
+  /** CMC x402 interval (ms). Default 2h. */
   cmcX402IntervalMs: number;
-  /** Studio x402 interval when portfolio slots are full (ms). */
+  /** Studio x402 interval (ms). Default 2h. */
   studioX402IntervalMs: number;
+  /** Paid x402 stays off unless free USDT is at least this many dollars. */
+  x402MinFreeUsdtUsd: number;
   /** Dashboard / API: tokens blocklisted from scans and new buys. */
   excludedTokens?: string[];
   /** Dashboard / API: minimum USD price to consider tradable. */

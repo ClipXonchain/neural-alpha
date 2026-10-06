@@ -28,27 +28,37 @@ function CustomTooltip({ active, payload, label }: any) {
   );
 }
 
-export function EquityChart({ state }: { state: AgentState }) {
-  const data = state.equityCurve;
+export function EquityChart({
+  state,
+  embedded = false,
+  rangeMs,
+}: {
+  state: AgentState;
+  embedded?: boolean;
+  rangeMs?: number;
+}) {
+  const now = Date.now();
+  const data = rangeMs
+    ? state.equityCurve.filter((point) => !point.ts || point.ts >= now - rangeMs)
+    : state.equityCurve;
   const last = data[data.length - 1];
-  // Initial NAV baseline: value − pnl is constant across the curve.
   const initialValue =
     last !== undefined ? Number((last.value - last.pnl).toFixed(2)) : 0;
   const values = data.map((d) => d.value);
-  const minValue = values.length
-    ? Math.min(...values, initialValue) * 0.995
-    : 0;
-  const maxValue = values.length
-    ? Math.max(...values, initialValue) * 1.005
-    : 1;
+  const seriesMin = values.length ? Math.min(...values) : 0;
+  const seriesMax = values.length ? Math.max(...values) : 1;
+  const pad = Math.max((seriesMax - seriesMin) * 0.18, seriesMax * 0.004, 1);
+  const minValue = embedded ? seriesMin - pad : Math.min(seriesMin, initialValue) * 0.995;
+  const maxValue = embedded ? seriesMax + pad : Math.max(seriesMax, initialValue) * 1.005;
 
   return (
     <motion.div
       initial={{ opacity: 0, y: 20 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.2 }}
-      className="glass-raised rounded-xl p-3 sm:p-5 col-span-full lg:col-span-3 min-w-0"
+      className={embedded ? "min-w-0" : "glass-raised rounded-xl p-3 sm:p-5 col-span-full lg:col-span-3 min-w-0"}
     >
+      {!embedded && (
       <div className="flex items-center gap-2 mb-4">
           <TrendingUp className="size-4 text-cyan" />
           <h3
@@ -58,26 +68,26 @@ export function EquityChart({ state }: { state: AgentState }) {
             Equity Curve
           </h3>
         </div>
+      )}
 
-      <div className="h-[200px] sm:h-[280px]">
+      <div className={embedded ? "h-[268px]" : "h-[200px] sm:h-[280px]"}>
         {data.length === 0 ? (
           <div className="h-full flex items-center justify-center text-[11px] text-text-muted" style={{ fontFamily: "var(--font-mono)" }}>
             No NAV history yet
           </div>
         ) : (
         <ResponsiveContainer width="100%" height="100%">
-          <AreaChart data={data} margin={{ top: 5, right: 5, bottom: 5, left: 5 }}>
+          <AreaChart data={data} margin={{ top: 8, right: 12, bottom: 0, left: 0 }}>
             <defs>
               <linearGradient id="equityGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#0ecb81" stopOpacity={0.2} />
-                <stop offset="50%" stopColor="#0ecb81" stopOpacity={0.05} />
-                <stop offset="100%" stopColor="#0ecb81" stopOpacity={0} />
+                <stop offset="0%" stopColor="#12b264" stopOpacity={0.28} />
+                <stop offset="100%" stopColor="#12b264" stopOpacity={0} />
               </linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.03)" />
+            <CartesianGrid vertical={false} stroke="rgba(255,255,255,0.06)" />
             <XAxis
               dataKey="time"
-              tick={{ fontSize: 10, fill: "#848e9c", fontFamily: "IBM Plex Mono" }}
+              tick={{ fontSize: 10, fill: "#5d6975", fontFamily: "JetBrains Mono, monospace" }}
               axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
               tickLine={false}
               interval={data.length > 8 ? Math.floor(data.length / 8) : 0}
@@ -85,13 +95,13 @@ export function EquityChart({ state }: { state: AgentState }) {
             <YAxis
               width={42}
               domain={[minValue, maxValue]}
-              tick={{ fontSize: 10, fill: "#848e9c", fontFamily: "IBM Plex Mono" }}
+              tick={{ fontSize: 10, fill: "#5d6975", fontFamily: "JetBrains Mono, monospace" }}
               axisLine={false}
               tickLine={false}
               tickFormatter={(v) => `$${v.toFixed(0)}`}
             />
             <Tooltip content={<CustomTooltip />} />
-            {initialValue > 0 && (
+            {!embedded && initialValue > 0 && (
               <ReferenceLine
                 y={initialValue}
                 stroke="rgba(30,159,242,0.4)"
@@ -108,15 +118,15 @@ export function EquityChart({ state }: { state: AgentState }) {
             <Area
               type="monotone"
               dataKey="value"
-              stroke="#0ecb81"
-              strokeWidth={2}
+              stroke="#12b264"
+              strokeWidth={embedded ? 3 : 2.6}
               fill="url(#equityGrad)"
               animationDuration={800}
               animationEasing="ease-out"
               dot={false}
               activeDot={{
                 r: 4,
-                fill: "#0ecb81",
+                fill: "#12b264",
                 stroke: "#050608",
                 strokeWidth: 2,
               }}

@@ -91,7 +91,7 @@ Built for the **[bStock AI-Powered PnL Contest](https://web3.binance.com/en/dev-
 - API authentication (Bearer token)
 - CORS origin restriction, rate limiting, request size limits
 - PM2 process management, Nginx reverse proxy, Let's Encrypt SSL
-- Neon Postgres persistence for trades, NAV snapshots, and chain sync state
+- SQLite persistence for trades, NAV snapshots, and chain sync state, with an optional hourly Neon backup
 - Graceful shutdown with SIGTERM/SIGINT handling
 
 ---
@@ -126,7 +126,7 @@ flowchart TB
 
     subgraph OUTPUTS["Outputs"]
         UI["Dashboard + SSE<br/>State · trades · logs"]
-        DB[("Neon Postgres<br/>Trades · NAV · sync")]
+        DB[("SQLite<br/>Trades · NAV · sync<br/>Neon backup hourly")]
         TX["BSC mainnet<br/>Signed BEP-20 swaps"]
     end
 
@@ -153,7 +153,7 @@ flowchart TB
 | **Decide** | Pick the best trades; optional protective exits (stop-loss / take-profit / trailing) run first |
 | **Risk gate** | Block trades that breach drawdown, daily caps, position size, token allowlist, or tx budget |
 | **Execute** | Live mode: `baw market-order swap` on BSC, poll until FINISHED/FAILED. Paper mode: simulated fill |
-| **Reconcile** | Match portfolio to chain, update NAV, stream to dashboard, save to Postgres, sleep, repeat |
+| **Reconcile** | Match portfolio to chain, update NAV, stream to dashboard, save to SQLite, sleep, repeat |
 
 **Operator path:** Browser → [agents.clipx.app](https://agents.clipx.app) → Next.js dashboard → authenticated proxy → agent API (`127.0.0.1:3847`). Manual commands (`buy`, `sell`, `portfolio`) use the same risk and execution path as autonomous trades.
 
@@ -274,7 +274,9 @@ All variables are documented in `.env.example`. Key ones:
 | `AUTO_EXIT_ENABLED` | `false` | Enable autonomous stop-loss/take-profit exits |
 | `OPENAI_API_KEY` | — | Enables AI assistant + signal analysis |
 | `OPENAI_MODEL` | `gpt-4o-mini` | Any OpenAI-compatible chat model |
-| `DATABASE_URL` | — | Neon Postgres connection string |
+| `SQLITE_PATH` | `data/neural-alpha.sqlite` | Local SQLite file. This is the live database |
+| `DATABASE_URL` | — | Optional Neon Postgres connection. Receives an hourly copy of SQLite |
+| `NEON_BACKUP_INTERVAL_MS` | `3600000` | How often SQLite is backed up to Neon |
 | `CORS_ORIGINS` | — | Additional allowed CORS origins (comma-separated) |
 | `DASHBOARD_PORT` | `3847` | Agent API port (internal) |
 | `LOG_LEVEL` | `info` | `error` / `warn` / `trade` / `signal` / `info` / `debug` |
@@ -546,8 +548,10 @@ neural-alpha/
 │       │   ├── market.ts          # CMC quotes, price history, F&G
 │       │   └── news.ts            # ClipX news fetcher
 │       ├── db/
-│       │   ├── schema.sql         # Neon Postgres schema
-│       │   └── store.ts           # Persistence layer (trades, NAV, sync)
+│       │   ├── schema.sqlite.sql  # Live SQLite schema
+│       │   ├── schema.sql         # Neon backup schema
+│       │   ├── store.ts           # SQLite persistence (trades, NAV, sync)
+│       │   └── neon-backup.ts     # Hourly SQLite → Neon copy
 │       ├── risk/
 │       │   ├── manager.ts         # Risk validation + emergency mode
 │       │   └── portfolio.ts       # PnL tracking, snapshots, reconciliation

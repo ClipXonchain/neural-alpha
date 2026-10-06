@@ -23,7 +23,7 @@
     "prod:restart": "pm2 restart neural-agent neural-dashboard",
     "prod:logs": "pm2 logs neural-agent neural-dashboard",
     "prod:status": "pm2 status",
-    "prod:deploy": "bash deploy/setup.sh"
+    "prod:deploy": "bash deploy.sh"
   },
   "devDependencies": {
     "concurrently": "^9.1.0"

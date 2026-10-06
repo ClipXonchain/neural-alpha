@@ -1,7 +1,10 @@
-import OpenAI from "openai";
+import type OpenAI from "openai";
 import type { MarketData, TechnicalSignals, TradeSignal } from "../utils/types.js";
 import { logger } from "../utils/logger.js";
+import { llmClient, llmEnabled, llmModel } from "../llm/client.js";
 import { getCmcMacro } from "./cmc-macro.js";
+import type { NewsSentiment } from "./news-sentiment.js";
+import { studioExcerpt } from "./research-store.js";
 
 export interface AiSignalInsight {
   symbol: string;
@@ -12,24 +15,12 @@ export interface AiSignalInsight {
   confidence: number;
 }
 
-let client: OpenAI | null = null;
-let model = "gpt-4o-mini";
-
 function isEnabled(): boolean {
   if (process.env.AI_SIGNAL_ANALYSIS === "false") return false;
-  return !!process.env.OPENAI_API_KEY?.trim();
+  return llmEnabled();
 }
 
-function getClient(): OpenAI {
-  if (!client) {
-    client = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-      baseURL: process.env.OPENAI_BASE_URL || undefined,
-    });
-    model = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  }
-  return client;
-}
+const REPORT_EXCERPT_CHARS = 1200;
 
 function formatTechnicals(t: TechnicalSignals, price: number): Record<string, unknown> {
   const bb = t.bollingerBands;
@@ -62,11 +53,14 @@ function formatTechnicals(t: TechnicalSignals, price: number): Record<string, un
 function buildPayload(
   signals: TradeSignal[],
   markets: Map<string, MarketData>,
-  technicals: Map<string, TechnicalSignals>
+  technicals: Map<string, TechnicalSignals>,
+  news?: Map<string, NewsSentiment>
 ) {
   return signals.map((s) => {
     const m = markets.get(s.symbol);
     const t = technicals.get(s.symbol);
+    const n = news?.get(s.symbol) ?? news?.get(s.symbol.toUpperCase());
+    const report = studioExcerpt(s.symbol, REPORT_EXCERPT_CHARS);
     return {
       symbol: s.symbol,
       price: m?.price ?? null,
@@ -76,6 +70,10 @@ function buildPayload(
       ruleScore: Math.round(s.score),
       ruleReasons: s.reasons.slice(0, 4),
       indicators: t ? formatTechnicals(t, m?.price ?? 0) : {},
+      ...(n && n.articles > 0
+        ? { news: { score: n.score, articles: n.articles, headlines: n.reasons } }
+        : {}),
+      ...(report ? { analystReport: report } : {}),
     };
   });
 }
@@ -132,7 +130,8 @@ const ANALYSIS_TOOL: OpenAI.ChatCompletionTool = {
 export async function enrichSignalsWithAi(
   signals: TradeSignal[],
   markets: MarketData[],
-  technicalsBySymbol: Map<string, TechnicalSignals>
+  technicalsBySymbol: Map<string, TechnicalSignals>,
+  news?: Map<string, NewsSentiment>
 ): Promise<Map<string, AiSignalInsight>> {
   const results = new Map<string, AiSignalInsight>();
   if (!isEnabled()) return results;
@@ -146,19 +145,24 @@ export async function enrichSignalsWithAi(
   if (candidates.length === 0) return results;
 
   const marketMap = new Map(markets.map((m) => [m.symbol, m]));
-  const payload = buildPayload(candidates, marketMap, technicalsBySymbol);
+  const payload = buildPayload(candidates, marketMap, technicalsBySymbol, news);
   const cmc = getCmcMacro();
+  const model = llmModel();
 
-  const system = `You are a bStock technical analyst for Neural Alpha, a 24/7 on-chain US stock trading agent on BNB Smart Chain.
+  const system = `You are a bStock analyst for Neural Alpha, a 24/7 on-chain US stock trading agent on BNB Smart Chain.
 Analyze each tokenized stock using the provided indicators and rule-based signal.
+When present, also weigh:
+- analystReport: a paid Agent Studio fundamental/technical report on the underlying stock (may be hours old).
+- news: recent headlines with a keyword sentiment score (-100..100); headlines matter more than the score.
 Respect US session context (RTH vs overnight gaps) when mentioned in reasons.
 Use the CMC crypto-macro overlay as a risk-on/risk-off filter, not as a stock picker.
-Be concise and actionable. Flag contradictions (e.g. buy signal but bearish MACD + overbought RSI).
-Do not invent prices or indicators not in the data.
+Be concise and actionable. Flag contradictions (e.g. buy signal but bearish MACD + overbought RSI, or a buy against a negative report or headline).
+Mention the report or a headline in the summary when it changed your view.
+Do not invent prices, indicators, or news not in the data.
 Always call submit_ta_analysis with one entry per token.`;
 
   try {
-    const ai = getClient();
+    const ai = llmClient();
     const response = await ai.chat.completions.create({
       model,
       messages: [
@@ -172,13 +176,14 @@ Always call submit_ta_analysis with one entry per token.`;
             sizeScale: cmc.sizeScale,
             eventRisk: cmc.eventRisk,
             eventHint: cmc.eventHint,
+            summary: cmc.summary,
           }) : "unavailable"}\n\nAnalyze these tokens:\n${JSON.stringify(payload, null, 2)}`,
         },
       ],
       tools: [ANALYSIS_TOOL],
       tool_choice: { type: "function", function: { name: "submit_ta_analysis" } },
       temperature: 0.2,
-      max_tokens: 1200,
+      max_tokens: 1500,
     });
 
     const toolCall = response.choices[0]?.message?.tool_calls?.[0] as

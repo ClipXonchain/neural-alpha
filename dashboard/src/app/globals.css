@@ -1,26 +1,26 @@
 @import "tailwindcss";
 
 @theme inline {
-  --color-void: #050608;
-  --color-surface: #0e1013;
-  --color-surface-raised: #14171c;
-  --color-surface-overlay: #1c2026;
-  --color-border-dim: #1f2328;
-  --color-border-glow: #2b3139;
-  --color-neon: #0ecb81;
-  --color-neon-dim: #0ecb8140;
-  --color-cyan: #1e9ff2;
-  --color-cyan-dim: #1e9ff240;
-  --color-danger: #f6465d;
-  --color-danger-dim: #f6465d40;
-  --color-warning: #f0b90b;
-  --color-warning-dim: #f0b90b40;
-  --color-text-primary: #eaecef;
-  --color-text-secondary: #b7bdc6;
-  --color-text-muted: #848e9c;
-  --font-display: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Monaco, monospace;
-  --font-body: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --color-void: #070809;
+  --color-surface: #101214;
+  --color-surface-raised: #16181a;
+  --color-surface-overlay: #1c1e20;
+  --color-border-dim: rgba(255, 255, 255, 0.075);
+  --color-border-glow: rgba(255, 255, 255, 0.12);
+  --color-neon: #12b264;
+  --color-neon-dim: rgba(18, 178, 100, 0.16);
+  --color-cyan: #3b9eff;
+  --color-cyan-dim: rgba(59, 158, 255, 0.16);
+  --color-danger: #ff4d5e;
+  --color-danger-dim: rgba(255, 77, 94, 0.16);
+  --color-warning: #f5b942;
+  --color-warning-dim: rgba(245, 185, 66, 0.16);
+  --color-text-primary: #f1f5f9;
+  --color-text-secondary: #aeb8c2;
+  --color-text-muted: #7e8a97;
+  --font-display: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-jetbrains), ui-monospace, monospace;
+  --font-body: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
 }
 
 html {
@@ -57,8 +57,8 @@ body {
 }
 
 .glass-raised {
-  background: var(--color-surface-raised);
-  border: 1px solid var(--color-border-dim);
+  background: linear-gradient(180deg, rgba(15, 21, 27, 0.96), rgba(11, 16, 21, 0.96));
+  border: 1px solid rgba(255, 255, 255, 0.075);
   border-radius: 12px;
 }
 
@@ -127,4 +127,8 @@ body {
   syntax: "<number>";
   inherits: true;
   initial-value: 0;
+}
+
+nextjs-portal {
+  display: none !important;
 }

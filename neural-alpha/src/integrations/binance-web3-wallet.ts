@@ -27,6 +27,8 @@ export interface BinanceWeb3Position {
   percentChange24h: number;
   remainQty: number;
   valueUsd: number;
+  /** Average buy price across this wallet's swaps (0 when Binance has none). */
+  avgPrice?: number;
 }
 
 interface BinanceWeb3Response {
@@ -50,6 +52,7 @@ function parsePosition(row: Record<string, unknown>): BinanceWeb3Position | null
   const remainQty = parseNum(row.remainQty ?? row.quantity);
   const price = parseNum(row.price ?? row.priceUsd);
   const valueUsd = remainQty > 0 && price > 0 ? remainQty * price : 0;
+  const avgPrice = parseNum(row.buyCnt) > 0 ? parseNum(row.avgPrice) : 0;
 
   return {
     chainId: String(row.chainId ?? BSC_CHAIN_ID),
@@ -65,6 +68,7 @@ function parsePosition(row: Record<string, unknown>): BinanceWeb3Position | null
     percentChange24h: parseNum(row.percentChange24h ?? row.priceChange24h),
     remainQty,
     valueUsd,
+    ...(avgPrice > 0 ? { avgPrice } : {}),
   };
 }
 

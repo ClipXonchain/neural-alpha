@@ -1,4 +1,4 @@
-import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot } from "./utils/types.js";
+import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot, LogEntry } from "./utils/types.js";
 import { loadConfig, resolveInitialDepositUsd, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
 import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, parseCmcQuotesBatch, parseCmcTrending, unwrapX402Response } from "./data/market.js";
 import { fetchNewsFeed } from "./data/news.js";
@@ -14,6 +14,16 @@ import { analyzeNewsSentiment, type NewsSentiment } from "./strategy/news-sentim
 import { getCmcMacro, refreshCmcMacro } from "./strategy/cmc-macro.js";
 import { RiskManager } from "./risk/manager.js";
 import { PortfolioTracker } from "./risk/portfolio.js";
+import { loadExternalFlows, summarizeExternalFlows } from "./risk/external-flows.js";
+import { hasStudioReport, latestStudioReports, saveStudioReport } from "./strategy/research-store.js";
+import {
+  answerOperatorQuestion,
+  operatorLlmEnabled,
+  writeDailyReview,
+  type DailyReview,
+  type OperatorContext,
+} from "./llm/operator.js";
+import { llmModel, llmReasoningModel } from "./llm/client.js";
 import {
   blacklistToken as addUserBlacklist,
   unblacklistToken as removeUserBlacklist,
@@ -29,7 +39,7 @@ import {
   isOnChainTxHash,
   floorTokenAmount,
 } from "./execution/executor.js";
-import { logger } from "./utils/logger.js";
+import { logger, addLogListener } from "./utils/logger.js";
 import {
   brainAgentStarted,
   brainCycleDone,
@@ -60,6 +70,7 @@ import {
   tradeDedupeKey,
 } from "./utils/trade-dedupe.js";
 import { fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
+import { fetchRawBinancePositions } from "./integrations/binance-web3-trade-history.js";
 import {
   enrichSymbolsFromBinance,
   iconFromWalletRow,
@@ -88,6 +99,31 @@ import { tickerFromBstock } from "./integrations/bstock.js";
 const DEEP_SCAN_MS = 180_000;
 /** ClipX news cadence — not needed on every live price tick. */
 const NEWS_REFRESH_MS = 120_000;
+/** Equity-curve history reloaded from SQLite on startup. */
+const NAV_HISTORY_RESTORE_MS = 90 * 86_400_000;
+/** Binance Web3 scan older than this is not used as the chart NAV. */
+const WALLET_NAV_MAX_AGE_MS = 15 * 60_000;
+/** Studio jobs usually finish in a few minutes; give up after ~30 min. */
+const STUDIO_POLL_INTERVAL_MS = 60_000;
+const STUDIO_POLL_MAX_TRIES = 30;
+/** On boot, resume polling the last Studio job if it is younger than this. */
+const STUDIO_JOB_RECOVER_MS = 6 * 3_600_000;
+const OPERATOR_EVENT_LEVELS = new Set(["warn", "error", "trade", "risk"]);
+const MAX_OPERATOR_EVENTS = 300;
+const DAILY_REVIEW_KEY = "daily_reviews";
+const MAX_DAILY_REVIEWS = 30;
+/** After a failed auto review, wait this long before trying again. */
+const DAILY_REVIEW_RETRY_MS = 3_600_000;
+const STABLE_SYMBOLS = new Set(["USDT", "USDC", "U", "USD1", "BUSD", "FDUSD"]);
+
+function round(n: number, digits: number): number {
+  const f = 10 ** digits;
+  return Math.round(n * f) / f;
+}
+
+function utcDay(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
 
 /**
  * Core autonomous trading agent — Neural Alpha.
@@ -158,6 +194,10 @@ export class TradingAgent {
   private lastSignals: Map<string, number> = new Map();
   private lastSignalConfidence: Map<string, number> = new Map();
   private lastNewsSentiment: Map<string, NewsSentiment> = new Map();
+  private operatorEvents: LogEntry[] = [];
+  private polledStudioJobs = new Set<string>();
+  private dailyReviewInflight: Promise<DailyReview> | null = null;
+  private lastAutoReviewAttemptAt = 0;
   private lastNewsCount = 0;
   private lastAiInsights = new Map<string, AiSignalInsight>();
   private lastTradeSignals = new Map<string, import("./utils/types.js").TradeSignal>();
@@ -195,6 +235,8 @@ export class TradingAgent {
   /** Last paid Agent Studio x402 attempt. */
   private lastStudioX402At = 0;
   private x402Inflight: Promise<void> | null = null;
+  /** Avoid repeating the free-USDT skip line on every trade cycle. */
+  private x402CashSkipLogged = false;
 
   constructor(mcp: McpBridge, initialCashUsd = 1000, bridgeSource = "unknown") {
     this.config = loadConfig();
@@ -211,6 +253,15 @@ export class TradingAgent {
     const camp = loadCampaignState();
     this.lastCmcX402At = lastSettledCallAt(camp.cmcCalls);
     this.lastStudioX402At = lastSettledCallAt(camp.studioCalls);
+    if (camp.lastStudioJob && Date.now() - camp.lastStudioJob.at < STUDIO_JOB_RECOVER_MS) {
+      this.trackStudioJob(camp.lastStudioJob);
+    }
+
+    addLogListener((entry) => {
+      if (!OPERATOR_EVENT_LEVELS.has(entry.level)) return;
+      this.operatorEvents.push(entry);
+      if (this.operatorEvents.length > MAX_OPERATOR_EVENTS) this.operatorEvents.shift();
+    });
 
     logger.info("Trading agent initialized", {
       mode: this.config.mode,
@@ -226,6 +277,7 @@ export class TradingAgent {
       studioX402Enabled: this.config.studioX402Enabled,
       cmcX402IntervalMs: this.config.cmcX402IntervalMs,
       studioX402IntervalMs: this.config.studioX402IntervalMs,
+      x402MinFreeUsdtUsd: this.config.x402MinFreeUsdtUsd,
     });
   }
 
@@ -344,7 +396,7 @@ export class TradingAgent {
       await this.reconcileLivePortfolio();
     }
 
-    // Open slots: paid CMC/Studio x402 now (cooldown only). Full book: interval cadence.
+    // Paid CMC/Studio x402 only with free USDT, and at most once per interval.
     await this.fireCampaignX402IfNeeded("cycle");
 
     // Step 1: Refresh market data + signals (full scan on cycle 1 and every N cycles).
@@ -384,7 +436,8 @@ export class TradingAgent {
     this.lastAiInsights = await enrichSignalsWithAi(
       signals,
       markets,
-      technicalsMap
+      technicalsMap,
+      this.lastNewsSentiment
     );
     if (this.lastAiInsights.size > 0) {
       signals = signals.map((s) =>
@@ -486,16 +539,26 @@ export class TradingAgent {
     }
 
     // Step 7: Take portfolio snapshot
-    const snapshot = this.portfolio.snapshot(currentPrices, {
-      stopLossPct: this.config.stopLossPct,
-      takeProfitPct: this.config.takeProfitPct,
-      trailingActivatePct: this.config.trailingActivatePct,
-      trailingGivebackPct: this.config.trailingGivebackPct,
-    });
-    await this.persistCycleSnapshot(cycleId, snapshot);
+    const walletNav = this.config.mode === "live" ? this.freshWalletNavUsd() : undefined;
+    const snapshot = this.portfolio.snapshot(
+      currentPrices,
+      {
+        stopLossPct: this.config.stopLossPct,
+        takeProfitPct: this.config.takeProfitPct,
+        trailingActivatePct: this.config.trailingActivatePct,
+        trailingGivebackPct: this.config.trailingGivebackPct,
+      },
+      walletNav
+    );
+    if (walletNav) {
+      await this.persistCycleSnapshot(cycleId, { ...snapshot, totalValueUsd: walletNav });
+    } else if (this.portfolio.isNavVerified) {
+      await this.persistCycleSnapshot(cycleId, snapshot);
+    }
 
     // Step 8: Log risk summary
     logger.info("Risk status", this.riskManager.riskSummary());
+    void this.maybeWriteDailyReview();
 
     const duration = Date.now() - startTime;
     this.lastCycleCompletedAt = Date.now();
@@ -1694,6 +1757,7 @@ export class TradingAgent {
   /** Read Agentic Wallet address + on-chain balances for dashboard. */
   private _cachedWalletInfo: WalletInfo | null = null;
   private _walletInfoRefreshing = false;
+  private _walletPositionsAt = 0;
 
   async getWalletInfo(): Promise<WalletInfo> {
     const addrResult = await this.mcp.getAddress(BSC_CHAIN);
@@ -1722,6 +1786,7 @@ export class TradingAgent {
       try {
         binancePositions = await fetchWalletPositions(address);
         if (binancePositions.length > 0) {
+          this._walletPositionsAt = Date.now();
           const binanceUsdt = binancePositions.find((p) => p.symbol === "USDT");
           if (binanceUsdt && binanceUsdt.remainQty > 0) {
             usdtBalance = binanceUsdt.remainQty;
@@ -1778,8 +1843,28 @@ export class TradingAgent {
     return info;
   }
 
+  /**
+   * Wallet NAV from the Binance Web3 scan (cash + gas + holdings ≥ $1), same
+   * rule as the dashboard. Undefined when the scan is missing or stale.
+   */
+  private freshWalletNavUsd(): number | undefined {
+    const rows = this._cachedWalletInfo?.binancePositions;
+    if (!rows?.length || Date.now() - this._walletPositionsAt > WALLET_NAV_MAX_AGE_MS) {
+      return undefined;
+    }
+    let nav = 0;
+    for (const p of rows) {
+      const sym = p.symbol.toUpperCase();
+      const value = p.valueUsd > 0 ? p.valueUsd : p.remainQty * p.price;
+      if (!(value > 0)) continue;
+      if (sym === "BNB" || isStablecoin(sym) || value >= MIN_POSITION_VALUE_USD) nav += value;
+    }
+    return nav > 0 ? nav : undefined;
+  }
+
   /** Seed dashboard wallet cache from an on-chain sync (no MCP round-trips). */
   private primeWalletCache(address: string, binancePositions: BinanceWeb3Position[]) {
+    this._walletPositionsAt = Date.now();
     const usdt = binancePositions.find((p) => p.symbol === "USDT");
     const bnb = binancePositions.find((p) => p.symbol === "BNB");
     const base = this._cachedWalletInfo ?? {
@@ -1798,6 +1883,25 @@ export class TradingAgent {
       usdtBalance: usdt?.remainQty ?? base.usdtBalance,
       binancePositions,
     };
+  }
+
+  private async seedEntriesFromBinance(address: string) {
+    const missing = [...this.portfolio.getAllPositions()].filter(([, p]) => !(p.avgEntryPrice > 0));
+    if (missing.length === 0) return;
+    try {
+      const rows = await fetchRawBinancePositions(address);
+      const avg = new Map<string, number>();
+      for (const row of rows) {
+        const symbol = String(row.symbol ?? "").toUpperCase();
+        const price = Number(row.avgPrice);
+        if (symbol && Number(row.buyCnt) > 0 && price > 0) avg.set(symbol, price);
+      }
+      if (this.portfolio.seedMissingEntries(avg).length > 0) {
+        void getAgentStore().savePositionEntries(this.portfolio.exportPositionEntries());
+      }
+    } catch (err) {
+      logger.warn("Binance cost basis lookup failed", { error: String(err) });
+    }
   }
 
   /** Non-blocking: returns cached wallet info, or fetches with a 8s timeout. */
@@ -1905,6 +2009,7 @@ export class TradingAgent {
 
     const entries = await store.loadPositionEntries();
     if (entries) this.portfolio.restorePersistedEntries(entries);
+    this.portfolio.setExternalFlows(loadExternalFlows());
 
     if (store.enabled) {
       const navState = await store.loadNavState();
@@ -1923,6 +2028,9 @@ export class TradingAgent {
         }
       }
       await store.saveNavState(this.portfolio.exportNavState());
+
+      const history = await store.loadNavHistory(Date.now() - NAV_HISTORY_RESTORE_MS);
+      this.portfolio.hydrateChartHistory(history);
 
       const wallet = await this.resolveBootstrapWalletAddress();
       const bl = await store.loadUserBlacklist();
@@ -1985,8 +2093,8 @@ export class TradingAgent {
   }
 
   /**
-   * Import Recent Trades from Binance Web3 / BscScan when DB is empty or sparse.
-   * Runs even without DATABASE_URL — does not depend on Neon.
+   * Import Recent Trades from Binance Web3 / BscScan when the local DB is empty or sparse.
+   * Reads and writes SQLite. Neon is only the hourly backup.
    */
   private async backfillTradeHistoryFromChain(
     existing: import("./utils/types.js").TradeResult[] = []
@@ -2506,6 +2614,7 @@ export class TradingAgent {
     }
 
     const { added, removed } = this.portfolio.reconcileOnChainPositions(amounts, prices);
+    if (walletAddress) await this.seedEntriesFromBinance(walletAddress);
     const gas = this.portfolio.gasReserve;
     if (added.length > 0 || removed.length > 0 || gas.valueUsd > 0 || rediscovered > 0) {
       logger.info("On-chain wallet synced", {
@@ -2553,6 +2662,8 @@ export class TradingAgent {
     } else {
       this.portfolio.realignNavBaselineIfStale(navUsd);
     }
+    this.portfolio.markNavVerified();
+    this.portfolio.resetDayStartIfImplausible(navUsd);
     this.portfolio.observeDayNav(navUsd);
     void getAgentStore().saveNavState(this.portfolio.exportNavState());
 
@@ -2620,15 +2731,11 @@ export class TradingAgent {
             ? opts.tickers
             : this.studioResearchTickers();
         const job = await submitStudioAnalysis(tickers);
+        this.trackStudioJob(job);
         out.studio = job;
       }
     }
     return { ...out, qualification: campaignQualification() };
-  }
-
-  /** Material positions below max names — a free slot to fill. */
-  private slotsOpen(): boolean {
-    return this.portfolio.countMaterialPositions() < this.config.maxPortfolioTokens;
   }
 
   private studioResearchTickers(): string[] {
@@ -2639,8 +2746,8 @@ export class TradingAgent {
   }
 
   /**
-   * Paid CMC / Studio x402. Open slots fire after a 15m cooldown.
-   * Full book waits for CMC_X402_INTERVAL_MS / STUDIO_X402_INTERVAL_MS.
+   * Paid CMC / Studio x402. Each source waits for its interval (default 2h)
+   * and only runs when free USDT is at least X402_MIN_FREE_USDT.
    */
   private fireCampaignX402IfNeeded(reason: "cycle" | "sell"): Promise<void> {
     if (this.x402Inflight) return this.x402Inflight;
@@ -2651,27 +2758,53 @@ export class TradingAgent {
   }
 
   private async doFireCampaignX402(reason: "cycle" | "sell"): Promise<void> {
-    const slotsOpen = this.slotsOpen();
     const now = Date.now();
+    const freeUsdtUsd = this.portfolio.cash;
+    const minFreeUsdtUsd = this.config.x402MinFreeUsdtUsd;
+    const gate = {
+      freeUsdtUsd,
+      minFreeUsdtUsd,
+      now,
+    };
     const cmcDue = shouldFireX402({
       enabled: this.config.cmcX402Enabled,
-      slotsOpen,
       lastFiredAt: this.lastCmcX402At,
       intervalMs: this.config.cmcX402IntervalMs,
-      now,
+      ...gate,
     });
     const studioDue = shouldFireX402({
       enabled: this.config.studioX402Enabled,
-      slotsOpen,
       lastFiredAt: this.lastStudioX402At,
       intervalMs: this.config.studioX402IntervalMs,
-      now,
+      ...gate,
     });
-    if (!cmcDue && !studioDue) return;
+    if (!cmcDue && !studioDue) {
+      if (freeUsdtUsd < minFreeUsdtUsd) {
+        const cmcWaited =
+          this.config.cmcX402Enabled &&
+          (this.lastCmcX402At <= 0 || now - this.lastCmcX402At >= this.config.cmcX402IntervalMs);
+        const studioWaited =
+          this.config.studioX402Enabled &&
+          (this.lastStudioX402At <= 0 ||
+            now - this.lastStudioX402At >= this.config.studioX402IntervalMs);
+        if ((cmcWaited || studioWaited) && !this.x402CashSkipLogged) {
+          this.x402CashSkipLogged = true;
+          logger.info("Skipping paid x402 — free USDT below reserve", {
+            reason,
+            freeUsdtUsd,
+            minFreeUsdtUsd,
+          });
+        }
+      }
+      return;
+    }
+
+    this.x402CashSkipLogged = false;
 
     logger.info("Campaign x402 research", {
       reason,
-      slotsOpen,
+      freeUsdtUsd,
+      minFreeUsdtUsd,
       positionCount: this.portfolio.countMaterialPositions(),
       maxPortfolioTokens: this.config.maxPortfolioTokens,
       cmc: cmcDue,
@@ -2681,7 +2814,7 @@ export class TradingAgent {
     if (cmcDue) {
       this.lastCmcX402At = now;
       try {
-        const cmc = await refreshCmcMacro({ force: slotsOpen });
+        const cmc = await refreshCmcMacro();
         if (cmc) {
           this.lastCmcX402At = Math.max(this.lastCmcX402At, cmc.at);
           brainCmcMacro(cmc.summary, cmc.sizeScale, cmc.eventRisk);
@@ -2704,6 +2837,7 @@ export class TradingAgent {
             jobId: job.jobId,
             symbols: job.symbols,
           });
+          this.trackStudioJob(job);
         } catch (err) {
           logger.warn("Studio x402 research failed", { error: String(err), reason });
         }
@@ -2714,7 +2848,311 @@ export class TradingAgent {
   async pollCampaignStudioJob(): Promise<Record<string, unknown> | null> {
     const job = loadCampaignState().lastStudioJob;
     if (!job) return null;
-    return pollStudioJob(job.jobId, job.jobToken);
+    const result = await pollStudioJob(job.jobId, job.jobToken);
+    this.keepStudioReport(job.jobId, job.symbols, result.report);
+    return result;
+  }
+
+  /**
+   * Poll a submitted Studio job in the background and keep the finished report
+   * for the LLM analyst and the operator assistant.
+   */
+  private trackStudioJob(job: { jobId: string; jobToken: string; symbols: string[] }): void {
+    if (!job.jobId || !job.jobToken) return;
+    if (this.polledStudioJobs.has(job.jobId) || hasStudioReport(job.jobId)) return;
+    this.polledStudioJobs.add(job.jobId);
+
+    let tries = 0;
+    const tick = async () => {
+      tries++;
+      try {
+        const res = await pollStudioJob(job.jobId, job.jobToken);
+        if (res.status === "succeeded") {
+          if (!this.keepStudioReport(job.jobId, job.symbols, res.report)) {
+            logger.warn("Agent Studio job finished without a readable report", { jobId: job.jobId });
+          }
+          return;
+        }
+        if (res.status === "failed" || res.status === "expired" || res.status === "cancelled") {
+          logger.warn("Agent Studio job did not finish", { jobId: job.jobId, status: res.status });
+          return;
+        }
+      } catch (err) {
+        if (tries >= STUDIO_POLL_MAX_TRIES) {
+          logger.warn("Agent Studio poll failed", { jobId: job.jobId, error: String(err) });
+        }
+      }
+      if (tries < STUDIO_POLL_MAX_TRIES) setTimeout(tick, STUDIO_POLL_INTERVAL_MS).unref?.();
+    };
+    setTimeout(tick, STUDIO_POLL_INTERVAL_MS).unref?.();
+  }
+
+  private keepStudioReport(jobId: string, symbols: string[], report: string | undefined): boolean {
+    const text = report?.trim();
+    // Studio can hand back a PDF; only text reports are useful to the model.
+    if (!text || text.startsWith("%PDF") || text.includes("\u0000")) return false;
+    saveStudioReport({ jobId, tickers: symbols, text, at: Date.now() });
+    logger.info("Agent Studio report saved", { jobId, symbols, chars: text.length });
+    return true;
+  }
+
+  // ── Operator assistant + daily review (read-only LLM features) ──────────
+
+  getLlmStatus() {
+    return {
+      enabled: operatorLlmEnabled(),
+      model: operatorLlmEnabled() ? llmModel() : null,
+      reasoningModel: operatorLlmEnabled() ? llmReasoningModel() : null,
+      studioReports: latestStudioReports().map((r) => ({ tickers: r.tickers, at: r.at })),
+    };
+  }
+
+  async askAssistant(question: string): Promise<{ answer: string; model: string }> {
+    const ctx = await this.buildOperatorContext();
+    const answer = await answerOperatorQuestion(question, ctx);
+    return { answer, model: llmReasoningModel() };
+  }
+
+  getDailyReviews(): DailyReview[] {
+    return getAgentStore().loadJsonState<DailyReview[]>(DAILY_REVIEW_KEY) ?? [];
+  }
+
+  /** Write (or rewrite) the review for `day` (UTC, YYYY-MM-DD; default today). */
+  async runDailyReview(day = utcDay(Date.now())): Promise<DailyReview> {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day)) throw new Error("day must be YYYY-MM-DD");
+    if (this.dailyReviewInflight) return this.dailyReviewInflight;
+    this.dailyReviewInflight = (async () => {
+      const partial = day === utcDay(Date.now());
+      const ctx = await this.buildOperatorContext(day);
+      const review = await writeDailyReview(day, ctx, partial);
+      const reviews = [review, ...this.getDailyReviews().filter((r) => r.day !== day)]
+        .sort((a, b) => b.day.localeCompare(a.day))
+        .slice(0, MAX_DAILY_REVIEWS);
+      getAgentStore().saveJsonState(DAILY_REVIEW_KEY, reviews);
+      return review;
+    })().finally(() => {
+      this.dailyReviewInflight = null;
+    });
+    return this.dailyReviewInflight;
+  }
+
+  /** Once per UTC day, review yesterday after it closes. */
+  private async maybeWriteDailyReview(): Promise<void> {
+    if (process.env.AI_DAILY_REVIEW === "false" || !operatorLlmEnabled()) return;
+    if (this.dailyReviewInflight) return;
+    if (Date.now() - this.lastAutoReviewAttemptAt < DAILY_REVIEW_RETRY_MS) return;
+    const yesterday = utcDay(Date.now() - 86_400_000);
+    const existing = this.getDailyReviews().find((r) => r.day === yesterday);
+    if (existing && !existing.partial) return;
+    this.lastAutoReviewAttemptAt = Date.now();
+    try {
+      await this.runDailyReview(yesterday);
+    } catch (err) {
+      logger.warn("Daily review failed", { day: yesterday, error: String(err) });
+    }
+  }
+
+  /**
+   * NAV, cash, gas and holdings for the LLM: the fresh wallet scan when there is
+   * one, the agent's book once it has synced, else the last stored NAV point.
+   */
+  private operatorHoldings(snap: PortfolioSnapshot): {
+    nav: number;
+    navSource: OperatorContext["wallet"]["navSource"];
+    cashUsd: number | null;
+    gasUsd: number | null;
+    positions: OperatorContext["positions"];
+  } {
+    const walletNav = this.freshWalletNavUsd();
+    const rows = this._cachedWalletInfo?.binancePositions;
+    if (walletNav && rows) {
+      let cashUsd = 0;
+      let gasUsd = 0;
+      const positions: OperatorContext["positions"] = [];
+      for (const p of rows) {
+        const sym = p.symbol.toUpperCase();
+        const value = p.valueUsd > 0 ? p.valueUsd : p.remainQty * p.price;
+        if (!(value > 0)) continue;
+        if (sym === "BNB") gasUsd += value;
+        else if (isStablecoin(sym)) cashUsd += value;
+        else if (value >= MIN_POSITION_VALUE_USD) {
+          const entry = p.avgPrice && p.avgPrice > 0 ? p.avgPrice : null;
+          positions.push({
+            symbol: sym,
+            qty: round(p.remainQty, 4),
+            price: round(p.price, 4),
+            entry: entry != null ? round(entry, 4) : null,
+            pnlUsd: entry != null ? round((p.price - entry) * p.remainQty, 2) : null,
+            pnlPct: entry != null ? round((p.price / entry - 1) * 100, 2) : null,
+          });
+        }
+      }
+      return { nav: walletNav, navSource: "wallet", cashUsd, gasUsd, positions };
+    }
+
+    const bookPositions = snap.positions
+      .filter((p) => p.amount * p.currentPrice >= MIN_POSITION_VALUE_USD)
+      .map((p) => ({
+        symbol: p.symbol,
+        qty: round(p.amount, 4),
+        price: round(p.currentPrice, 4),
+        entry: p.avgEntryPrice > 0 ? round(p.avgEntryPrice, 4) : null,
+        pnlUsd: p.avgEntryPrice > 0 ? round(p.unrealizedPnl, 2) : null,
+        pnlPct: p.avgEntryPrice > 0 ? round(p.unrealizedPnlPct, 2) : null,
+      }));
+    const lastSaved = this.portfolio.getChartPoints().at(-1);
+    if (this.config.mode === "live" && !this.portfolio.isNavVerified && lastSaved) {
+      return { nav: lastSaved.totalValueUsd, navSource: "last-saved", cashUsd: null, gasUsd: null, positions: bookPositions };
+    }
+    return {
+      nav: snap.totalValueUsd,
+      navSource: "agent-book",
+      cashUsd: snap.cashUsd,
+      gasUsd: snap.gasReserveUsd ?? 0,
+      positions: bookPositions,
+    };
+  }
+
+  /**
+   * Facts for the LLM. With `day`, trades and events are limited to that UTC
+   * day and the day's opening/closing NAV comes from the stored curve.
+   */
+  private async buildOperatorContext(day?: string): Promise<OperatorContext> {
+    const now = Date.now();
+    const state = this.getStateSnapshot();
+    const snap = state.portfolio;
+    const flows = this.portfolio.getExternalFlows();
+    const flowSum = summarizeExternalFlows(flows);
+    const { nav, navSource, cashUsd, gasUsd, positions } = this.operatorHoldings(snap);
+    const deposit = snap.initialNavUsd ?? this.portfolio.initialValue;
+    const basis = deposit + flowSum.inUsd;
+    const totalPnl = nav + flowSum.outUsd - basis;
+    // The book's day mark can be stale when the wallet never synced; trust it
+    // only next to a similar NAV, else use today's first stored NAV point.
+    const bookDayStart = snap.dayStartNavUsd ?? 0;
+    const plausible = bookDayStart > 0 && nav / bookDayStart > 0.5 && nav / bookDayStart < 1.5;
+    const todayStartMs = Date.parse(`${utcDay(now)}T00:00:00Z`);
+    const dayStart = plausible
+      ? bookDayStart
+      : this.portfolio.getChartPoints().find((p) => p.timestamp >= todayStartMs)?.totalValueUsd ?? 0;
+    const dailyPnl = dayStart > 0 ? nav - dayStart + flowSum.outTodayUsd - flowSum.inTodayUsd : null;
+
+    const dayFrom = day ? Date.parse(`${day}T00:00:00Z`) : 0;
+    const dayTo = day ? dayFrom + 86_400_000 : Infinity;
+    const inWindow = (ts: number) => ts >= dayFrom && ts < dayTo;
+
+    const history = state.trades
+      .filter((t) => t.success && inWindow(t.timestamp))
+      .sort((a, b) => b.timestamp - a.timestamp);
+    const trades = (day ? history : history.slice(0, 25)).map((t) => {
+      const buy = STABLE_SYMBOLS.has(t.fromToken.toUpperCase());
+      const fromAmt = Number(t.fromAmount) || 0;
+      const toAmt = Number(t.toAmount) || 0;
+      const px = t.priceAtExecution;
+      // Some backfilled trades carry only one side of the swap.
+      const qty = (buy ? toAmt : fromAmt) || (px > 0 ? (buy ? fromAmt : toAmt) / px : 0);
+      const usd = (buy ? fromAmt : toAmt) || qty * px;
+      return {
+        time: new Date(t.timestamp).toISOString(),
+        side: buy ? "buy" : "sell",
+        symbol: buy ? t.toToken : t.fromToken,
+        qty: round(qty, 4),
+        usd: round(usd, 2),
+        price: round(t.priceAtExecution, 4),
+        pnlUsd: t.realizedPnl != null ? round(t.realizedPnl, 2) : null,
+        ...(t.txHash ? { tx: t.txHash } : {}),
+      };
+    });
+    const closed = state.trades.filter((t) => t.success && t.realizedPnl != null);
+    const reviews = this.getDailyReviews();
+    const latest = reviews.find((r) => r.day !== day);
+
+    const ctx: OperatorContext = {
+      now: new Date(now).toISOString(),
+      mode: this.config.mode,
+      running: this.running,
+      wallet: {
+        navSource,
+        navUsd: round(nav, 2),
+        depositUsd: round(deposit, 2),
+        sentOutUsd: round(flowSum.outUsd, 2),
+        sentInUsd: round(flowSum.inUsd, 2),
+        totalPnlUsd: round(totalPnl, 2),
+        totalPnlPct: basis > 0 ? round((totalPnl / basis) * 100, 2) : 0,
+        dailyPnlUsd: dailyPnl != null ? round(dailyPnl, 2) : null,
+        cashUsd: cashUsd != null ? round(cashUsd, 2) : null,
+        gasUsd: gasUsd != null ? round(gasUsd, 2) : null,
+        navVerified: this.portfolio.isNavVerified,
+      },
+      positions,
+      transfers: flows
+        .filter((f) => !day || f.timestamp < dayTo)
+        .map((f) => ({
+          direction: f.direction,
+          symbol: f.symbol,
+          qty: round(f.qty, 4),
+          valueUsd: round(f.valueUsd, 2),
+          time: new Date(f.timestamp).toISOString(),
+          ...(f.note ? { note: f.note } : {}),
+        })),
+      trades,
+      stats: {
+        closedTrades: closed.length,
+        wins: closed.filter((t) => (t.realizedPnl ?? 0) > 0).length,
+        losses: closed.filter((t) => (t.realizedPnl ?? 0) < 0).length,
+        realizedPnlUsd: round(closed.reduce((s, t) => s + (t.realizedPnl ?? 0), 0), 2),
+      },
+      rules: {
+        stopLossPct: this.config.stopLossPct,
+        takeProfitPct: this.config.takeProfitPct,
+        trailingGivebackPct: this.config.trailingGivebackPct,
+        maxPositionSizeUsd: this.config.maxPositionSizeUsd,
+        maxPortfolioTokens: this.config.maxPortfolioTokens,
+        maxDrawdownPct: this.config.maxDrawdownPct,
+        sessionPolicy: this.config.sessionPolicy,
+      },
+      aiInsights: [...this.lastAiInsights.entries()].map(([symbol, ai]) => ({
+        symbol,
+        verdict: ai.verdict,
+        agrees: ai.agreesWithSignal,
+        summary: ai.summary,
+      })),
+      macro: getCmcMacro()?.summary ?? null,
+      studioReports: latestStudioReports().map((r) => ({
+        tickers: r.tickers,
+        time: new Date(r.at).toISOString(),
+      })),
+      recentEvents: this.operatorEvents
+        .filter((e) => inWindow(Date.parse(e.timestamp)))
+        .slice(-60)
+        .map((e) => ({
+          time: e.timestamp,
+          level: e.level,
+          event: e.narrative ?? e.event,
+          ...(e.data ? { detail: JSON.stringify(e.data).slice(0, 240) } : {}),
+        })),
+      ...(latest ? { latestReview: { day: latest.day, text: latest.text } } : {}),
+    };
+
+    if (day) {
+      const points = await getAgentStore().loadNavHistory(dayFrom).catch(() => []);
+      const inDay = points.filter((p) => p.timestamp < dayTo && p.totalValueUsd > 0);
+      if (inDay.length > 0) {
+        const open = inDay[0].totalValueUsd;
+        const close = inDay[inDay.length - 1].totalValueUsd;
+        const out = flows.filter((f) => f.direction === "out" && inWindow(f.timestamp)).reduce((s, f) => s + f.valueUsd, 0);
+        const inn = flows.filter((f) => f.direction === "in" && inWindow(f.timestamp)).reduce((s, f) => s + f.valueUsd, 0);
+        ctx.reviewDay = {
+          day,
+          openNavUsd: round(open, 2),
+          closeNavUsd: round(close, 2),
+          pnlUsd: round(close - open + out - inn, 2),
+          transfersOutUsd: round(out, 2),
+          transfersInUsd: round(inn, 2),
+        };
+      }
+    }
+    return ctx;
   }
 
   async switchWalletMode(mode: "local" | "walletconnect"): Promise<Record<string, unknown>> {
@@ -2998,11 +3436,12 @@ export class TradingAgent {
         ? { binancePositions: this._cachedWalletInfo.binancePositions }
         : {}),
       userBlacklisted,
+      externalFlows: this.portfolio.getExternalFlows(),
     };
     return value;
   }
 
-  /** Operator blacklist — blocks new entries; persisted to Neon when available. */
+  /** Operator blacklist — blocks new entries; persisted in SQLite. */
   async addUserBlacklistToken(symbol: string): Promise<{ ok: boolean; added: boolean; symbols: string[] }> {
     const added = addUserBlacklist(symbol);
     const symbols = getUserBlacklistedTokens();
@@ -3030,6 +3469,7 @@ export interface AgentState {
     maxDrawdownPct: number;
   }>;
   trades: import("./utils/types.js").TradeResult[];
+  externalFlows?: import("./risk/external-flows.js").ExternalFlow[];
   risk: Record<string, unknown>;
   watchlist: string[];
   prices: Record<string, number>;

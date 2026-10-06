@@ -7,9 +7,11 @@ import { initAgentStore } from "../src/db/store.js";
 
 async function main() {
   const store = await initAgentStore();
-  console.log("DB enabled:", store.enabled);
+  console.log("SQLite:", store.sqlitePath);
+  console.log("SQLite enabled:", store.enabled);
+  console.log("Neon backup:", store.backupEnabled);
   if (!store.enabled) {
-    console.log("Set DATABASE_URL in .env and retry.");
+    console.log("SQLite failed to open. Check SQLITE_PATH and file permissions.");
     process.exit(1);
   }
   const nav = await store.loadNavState();
@@ -21,7 +23,7 @@ async function main() {
   console.log("Nav state:", nav ?? "(empty — first run)");
   console.log("Recent trades in DB:", trades.length);
   console.log("Position entries:", entries && Object.keys(entries).length > 0 ? Object.keys(entries).join(", ") : "(none)");
-  console.log("OK — Neon connection working.");
+  console.log(store.backupEnabled ? "OK — SQLite live, Neon backup scheduled." : "OK — SQLite live. DATABASE_URL unset, Neon backup off.");
 }
 
 main().catch((err) => {

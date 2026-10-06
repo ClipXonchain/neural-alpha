@@ -15,6 +15,8 @@ const MAX_SSE_CLIENTS = 20;
 const ALLOWED_ORIGINS = (() => {
   const env = process.env.CORS_ORIGINS?.trim();
   const defaults = [
+    "https://neuralalpha.io",
+    "https://www.neuralalpha.io",
     "https://agents.clipx.app",
     "http://localhost:3000",
     "http://localhost:3847",
@@ -178,6 +180,10 @@ function safeErrorMessage(err: unknown): string {
   if (process.env.NODE_ENV === "production") return "Internal server error";
   return String(err);
 }
+
+const MAX_ASSISTANT_QUESTION = 500;
+const MAX_ASSISTANT_INFLIGHT = 2;
+let assistantInflight = 0;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -402,6 +408,72 @@ function handleApi(req: IncomingMessage, res: ServerResponse): boolean {
     return true;
   }
 
+  if (url === "/api/llm/status" && req.method === "GET") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    json(req, res, agentRef.getLlmStatus());
+    return true;
+  }
+
+  if (url === "/api/assistant" && req.method === "POST") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    if (!agentRef.getLlmStatus().enabled) {
+      return json(req, res, { error: "No LLM configured — set OPENAI_API_KEY in the agent .env" }, 503), true;
+    }
+    if (assistantInflight >= MAX_ASSISTANT_INFLIGHT) {
+      return json(req, res, { error: "Assistant is busy — try again in a moment" }, 429), true;
+    }
+    readBody(req)
+      .then((body) => {
+        let question = "";
+        try {
+          question = String((JSON.parse(body || "{}") as { question?: unknown }).question ?? "").trim();
+        } catch {
+          return json(req, res, { error: "Invalid JSON" }, 400);
+        }
+        if (!question) return json(req, res, { error: "Ask a question" }, 400);
+        if (question.length > MAX_ASSISTANT_QUESTION) {
+          return json(req, res, { error: `Keep questions under ${MAX_ASSISTANT_QUESTION} characters` }, 400);
+        }
+        assistantInflight++;
+        agentRef!.askAssistant(question)
+          .then((r) => json(req, res, r))
+          .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 502))
+          .finally(() => {
+            assistantInflight--;
+          });
+      })
+      .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 413));
+    return true;
+  }
+
+  if (url === "/api/reviews" && req.method === "GET") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    json(req, res, { reviews: agentRef.getDailyReviews(), llm: agentRef.getLlmStatus().enabled });
+    return true;
+  }
+
+  if (url === "/api/reviews/run" && req.method === "POST") {
+    if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
+    if (!agentRef.getLlmStatus().enabled) {
+      return json(req, res, { error: "No LLM configured — set OPENAI_API_KEY in the agent .env" }, 503), true;
+    }
+    readBody(req)
+      .then((body) => {
+        let day: string | undefined;
+        try {
+          const parsed = JSON.parse(body || "{}") as { day?: unknown };
+          if (typeof parsed.day === "string" && parsed.day) day = parsed.day;
+        } catch {
+          return json(req, res, { error: "Invalid JSON" }, 400);
+        }
+        agentRef!.runDailyReview(day)
+          .then((review) => json(req, res, { review }))
+          .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 502));
+      })
+      .catch((e) => json(req, res, { error: safeErrorMessage(e) }, 413));
+    return true;
+  }
+
   if (url === "/api/blacklist" && req.method === "GET") {
     if (!agentRef) return json(req, res, { error: "Agent not initialized" }, 503), true;
     const snap = agentRef.getStateSnapshot();
@@ -612,7 +684,8 @@ export function startDashboard(agent: TradingAgent) {
       logger.warn(`Agent API on port ${port} (${DASHBOARD_PORT} was in use)`);
     }
     console.log(`\n\x1b[1;36m  ▸ Agent API: http://127.0.0.1:${port}/api\x1b[0m`);
-    console.log(`\x1b[1;32m  ▸ Dashboard: https://agents.clipx.app\x1b[0m\n`);
+    const publicUrl = process.env.PUBLIC_DASHBOARD_URL?.trim() || "https://neuralalpha.io";
+    console.log(`\x1b[1;32m  ▸ Dashboard: ${publicUrl}\x1b[0m\n`);
   });
 
   // Bind to localhost only — Nginx reverse proxy handles external access

@@ -6,8 +6,8 @@ export type CmcTapeRegime = "risk_on" | "risk_off" | "neutral";
 
 /**
  * Cheap CMC MCP overlay (~$0.01/call). Do NOT hit this on the 10s quote pulse.
- * Interval: CMC_X402_INTERVAL_MS (fallback CMC_MACRO_REFRESH_MS, default 4h).
- * Open portfolio slots force a global-metrics refresh immediately.
+ * Interval: CMC_X402_INTERVAL_MS (fallback CMC_MACRO_REFRESH_MS, default 2h).
+ * The agent only calls this when free USDT is above X402_MIN_FREE_USDT.
  *
  * Campaign-eligible tools only:
  *   get_global_metrics_latest  — risk-on / risk-off tape
@@ -253,7 +253,7 @@ async function doRefresh(force = false): Promise<CmcMacroSnapshot | null> {
   return cache;
 }
 
-/** Refresh when TTL expired. `force` bypasses the global-metrics interval (open-slot path). */
+/** Refresh when TTL expired. `force` bypasses the global-metrics interval. */
 export async function refreshCmcMacro(opts?: { force?: boolean }): Promise<CmcMacroSnapshot | null> {
   if (!cmcMacroEnabled()) return cache;
   if (inflight) return inflight;

@@ -81,7 +81,7 @@ The script sets `READONLY=true` and `NEXT_PUBLIC_READONLY=true` on the VPS (bake
 | `PAYMENT_TOKEN` | YES (live) | USDT / USDC / U / USD1 / BNB |
 | `CAMPAIGN_REGISTERED` | YES (live) | `true` after Join Now |
 | `AGENT_MODE` | YES | `live` or `paper` |
-| `DATABASE_URL` | Recommended | Neon Postgres |
+| `DATABASE_URL` | Optional | Neon Postgres backup of the local SQLite database, every hour |
 | `CORS_ORIGINS` | Optional | Defaults to `https://agents.clipx.app,http://localhost:3000` |
 
 ### Binance Agentic Wallet on VPS (live)

@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Neural Alpha — 5 marks</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif:wght@600&display=swap" rel="stylesheet" />
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #070809; color: #f4f7f5; font-family: Inter, ui-sans-serif, sans-serif; padding: 28px 32px 48px; }
+  h1 { margin: 0 0 6px; font-size: 13px; letter-spacing: .16em; font-weight: 600; color: #8b97a3; }
+  p.lead { margin: 0 0 22px; color: #6e7b86; font-size: 12px; }
+  .grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; }
+  article { background: #0c0e10; border: 1px solid rgba(255,255,255,.08); border-radius: 16px; padding: 16px 14px 14px; }
+  .num { font-size: 10px; letter-spacing: .14em; color: #e4b15a; font-weight: 700; }
+  h2 { margin: 6px 0 0; font-size: 14px; font-weight: 650; letter-spacing: -.01em; }
+  .idea { margin: 6px 0 12px; color: #7e8a97; font-size: 11px; line-height: 1.4; min-height: 30px; }
+  .stage { background: #080a0c; border-radius: 12px; display: grid; place-items: center; height: 168px; }
+  .small { margin-top: 10px; display: flex; align-items: center; gap: 8px; color: #8b97a3; font-size: 10px; letter-spacing: .08em; }
+</style>
+</head>
+<body>
+  <h1>NEURAL ALPHA</h1>
+  <p class="lead">Five marks. Each one is an N plus the alpha sign.</p>
+  <div class="grid">
+    <article>
+      <div class="num">01</div>
+      <h2>Pair</h2>
+      <p class="idea">Ivory N beside a brass alpha.</p>
+      <div class="stage"><svg width="132" height="132" viewBox="0 0 80 80"><use href="#s1"/></svg></div>
+      <div class="small"><svg width="36" height="36" viewBox="0 0 80 80"><use href="#s1"/></svg> 36px</div>
+    </article>
+    <article>
+      <div class="num">02</div>
+      <h2>Superscript</h2>
+      <p class="idea">N with alpha set as the power.</p>
+      <div class="stage"><svg width="132" height="132" viewBox="0 0 80 80"><use href="#s2"/></svg></div>
+      <div class="small"><svg width="36" height="36" viewBox="0 0 80 80"><use href="#s2"/></svg> 36px</div>
+    </article>
+    <article>
+      <div class="num">03</div>
+      <h2>Ligature</h2>
+      <p class="idea">The green diagonal runs into the alpha.</p>
+      <div class="stage"><svg width="132" height="132" viewBox="0 0 80 80"><use href="#s3"/></svg></div>
+      <div class="small"><svg width="36" height="36" viewBox="0 0 80 80"><use href="#s3"/></svg> 36px</div>
+    </article>
+    <article>
+      <div class="num">04</div>
+      <h2>Counter</h2>
+      <p class="idea">Alpha sits inside the N.</p>
+      <div class="stage"><svg width="132" height="132" viewBox="0 0 80 80"><use href="#s4"/></svg></div>
+      <div class="small"><svg width="36" height="36" viewBox="0 0 80 80"><use href="#s4"/></svg> 36px</div>
+    </article>
+    <article>
+      <div class="num">05</div>
+      <h2>Signal</h2>
+      <p class="idea">Node N, alpha at the live peak.</p>
+      <div class="stage"><svg width="132" height="132" viewBox="0 0 80 80"><use href="#s5"/></svg></div>
+      <div class="small"><svg width="36" height="36" viewBox="0 0 80 80"><use href="#s5"/></svg> 36px</div>
+    </article>
+  </div>
+
+  <svg width="0" height="0" style="position:absolute">
+    <defs>
+      <radialGradient id="glow" cx="40" cy="18" r="36" gradientUnits="userSpaceOnUse">
+        <stop stop-color="#12B264" stop-opacity=".2"/>
+        <stop offset="1" stop-color="#12B264" stop-opacity="0"/>
+      </radialGradient>
+      <clipPath id="tile"><rect width="80" height="80" rx="18"/></clipPath>
+      <symbol id="plate">
+        <g clip-path="url(#tile)">
+          <rect width="80" height="80" fill="#0C1210"/>
+          <rect width="80" height="80" fill="url(#glow)"/>
+        </g>
+        <rect x="1.2" y="1.2" width="77.6" height="77.6" rx="17" fill="none" stroke="#12B264" stroke-opacity=".65" stroke-width="1.6"/>
+      </symbol>
+      <symbol id="n" viewBox="0 0 36 44">
+        <path fill="#F4F7F5" d="M2 42V4h8.2l13.4 22.2V4H34v38h-8.2L12.4 19.8V42H2Z"/>
+      </symbol>
+      <symbol id="a" viewBox="0 0 46 52">
+        <text x="24" y="42" text-anchor="middle" font-family="Noto Serif, Georgia, serif" font-size="50" font-weight="600" fill="#E4B15A">α</text>
+      </symbol>
+
+      <symbol id="s1" viewBox="0 0 80 80">
+        <use href="#plate"/>
+        <use href="#n" x="5" y="19" width="32" height="40"/>
+        <use href="#a" x="40" y="17" width="34" height="40"/>
+      </symbol>
+      <symbol id="s2" viewBox="0 0 80 80">
+        <use href="#plate"/>
+        <use href="#n" x="7" y="26" width="38" height="46"/>
+        <use href="#a" x="48" y="3" width="26" height="30"/>
+      </symbol>
+      <symbol id="s3" viewBox="0 0 80 80">
+        <use href="#plate"/>
+        <path d="M16 62V26" stroke="#F4F7F5" stroke-width="7" stroke-linecap="round"/>
+        <path d="M16 28 36 52" stroke="#12B264" stroke-width="6.2" stroke-linecap="round"/>
+        <use href="#a" x="32" y="8" width="42" height="48"/>
+      </symbol>
+      <symbol id="s4" viewBox="0 0 80 80">
+        <use href="#plate"/>
+        <path d="M14 62V20h7.4l15.2 24.6V20H58v42h-7.4L35.4 37.4V62H14Z" fill="none" stroke="#F4F7F5" stroke-width="2.3" stroke-linejoin="round"/>
+        <use href="#a" x="26" y="22" width="28" height="32"/>
+      </symbol>
+      <symbol id="s5" viewBox="0 0 80 80">
+        <use href="#plate"/>
+        <path d="M18 62V34" stroke="#F4F7F5" stroke-width="3.3" stroke-linecap="round"/>
+        <path d="M18 34 40 58" stroke="#12B264" stroke-width="3.3" stroke-linecap="round"/>
+        <circle cx="18" cy="62" r="3.1" fill="#12B264"/>
+        <circle cx="18" cy="34" r="3.1" fill="#F4F7F5"/>
+        <circle cx="40" cy="58" r="3.1" fill="#F4F7F5"/>
+        <use href="#a" x="36" y="6" width="38" height="44"/>
+      </symbol>
+    </defs>
+  </svg>
+</body>
+</html>

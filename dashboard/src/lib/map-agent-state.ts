@@ -1,11 +1,18 @@
 import type { Track1Snapshot, LogEntry, WalletSnapshot, AutonomousStatus } from "./agent-api";
-import type { AgentState, Signal, Trade, ActivityItem } from "./mock-data";
+import type { AgentState, Signal, Trade, ActivityItem, ExternalFlow } from "./mock-data";
 import { mapActivityLogs } from "./brain-narrative";
 import { roundNum, normalizeTokenIconUrl, roundTokenPrice, isPlausibleLivePrice } from "./utils";
 import { isScannableToken } from "./tradable-filter";
 
 /** Match backend MIN_POSITION_VALUE_USD — hide dust in the dashboard. */
 const MIN_POSITION_USD = 1;
+
+/** Agent book vs wallet scan — beyond this the agent's Daily mark is not comparable. */
+const NAV_AGREE_TOLERANCE = 0.02;
+
+/** Curve points outside this band of the live wallet NAV are bookkeeping errors. */
+const CURVE_MIN_RATIO = 0.5;
+const CURVE_MAX_RATIO = 1.5;
 
 /** Native gas coin on BSC — tracked separately, never a tradeable position. */
 const GAS_SYMBOL = "BNB";
@@ -32,6 +39,35 @@ function looksLikeBstock(token: string): boolean {
 function utcDayStartMs(now = Date.now()): number {
   const d = new Date(now);
   return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+function flowTotals(flows: ExternalFlow[] = [], now = Date.now()) {
+  const dayStart = utcDayStartMs(now);
+  const t = { outUsd: 0, inUsd: 0, outTodayUsd: 0, inTodayUsd: 0 };
+  for (const f of flows) {
+    const today = f.timestamp >= dayStart;
+    if (f.direction === "out") {
+      t.outUsd += f.valueUsd;
+      if (today) t.outTodayUsd += f.valueUsd;
+    } else {
+      t.inUsd += f.valueUsd;
+      if (today) t.inTodayUsd += f.valueUsd;
+    }
+  }
+  return t;
+}
+
+/** Lifetime PnL with operator transfers removed: NAV + sent out − sent in − deposit. */
+function lifetimePnl(
+  nav: number,
+  deposit: number,
+  flows: ExternalFlow[] = []
+): { pnl: number; pct: number } | null {
+  const t = flowTotals(flows);
+  const basis = deposit + t.inUsd;
+  if (!(deposit > 0) || !Number.isFinite(nav)) return null;
+  const pnl = nav + t.outUsd - basis;
+  return { pnl, pct: (pnl / basis) * 100 };
 }
 
 function navVsBasis(
@@ -617,6 +653,7 @@ export function enrichStateWithWallet(
   if (!positions || positions.length === 0) return state;
 
   let gasUsd = 0;
+  let gasPct24h = 0;
   let cashUsd = 0;
   const tokens: Array<{
     symbol: string;
@@ -624,6 +661,7 @@ export function enrichStateWithWallet(
     qty: number;
     price: number;
     pct24h: number;
+    avgPrice: number;
   }> = [];
 
   const prevBySymbol = new Map(state.positions.map((p) => [p.symbol, p]));
@@ -633,6 +671,7 @@ export function enrichStateWithWallet(
     const value = p.valueUsd > 0 ? p.valueUsd : p.remainQty * p.price;
     if (symbol === GAS_SYMBOL) {
       gasUsd += value;
+      gasPct24h = p.percentChange24h ?? 0;
       continue;
     }
     if (CASH_SYMBOLS.has(symbol)) {
@@ -647,6 +686,7 @@ export function enrichStateWithWallet(
       qty: p.remainQty,
       price: p.price,
       pct24h: p.percentChange24h ?? 0,
+      avgPrice: p.avgPrice && p.avgPrice > 0 ? p.avgPrice : 0,
     });
   }
 
@@ -660,7 +700,7 @@ export function enrichStateWithWallet(
       const fromTrades = inferEntryFromDashboardTrades(state.trades, t.symbol);
       const fromAgent =
         prev?.entryPrice && prev.entryPrice > 0 ? prev.entryPrice : 0;
-      const entryPrice = fromTrades || fromAgent || 0;
+      const entryPrice = fromTrades || fromAgent || t.avgPrice || 0;
       const entryUnknown = entryPrice <= 0;
 
       const effectiveEntry = entryUnknown ? t.price : entryPrice;
@@ -702,41 +742,86 @@ export function enrichStateWithWallet(
       };
     });
 
-  // Reconcile the equity curve with the real wallet NAV. The agent's internal
-  // snapshots track its own bookkeeping value, but the headline Portfolio Value
-  // is the on-chain scan (nav). Shift the whole curve by the delta so the latest
-  // point equals Portfolio Value while preserving the curve's shape and PnL.
+  // History points are real recorded NAVs — keep their shape, drop any that
+  // can't belong to this wallet (placeholder cash / phantom positions), and
+  // end the curve at the live wallet NAV.
   const initialNav = state.initialNavUsd > 0 ? state.initialNavUsd : 0;
-  const lastVal = state.equityCurve[state.equityCurve.length - 1]?.value;
-  const offset = lastVal !== undefined ? nav - lastVal : 0;
-  const equityCurve =
-    Math.abs(offset) > 0.005
-      ? state.equityCurve.map((p) => ({
-          ...p,
-          value: roundNum(p.value + offset, 2),
-          pnl: initialNav > 0 ? roundNum(p.value + offset - initialNav, 2) : 0,
-        }))
-      : state.equityCurve.map((p) => ({
-          ...p,
-          pnl: initialNav > 0 ? roundNum(p.value - initialNav, 2) : 0,
-        }));
+  const now = Date.now();
+  const history = state.equityCurve.filter((p) => {
+    if (!(nav > 0)) return true;
+    const ratio = p.value / nav;
+    return ratio >= CURVE_MIN_RATIO && ratio <= CURVE_MAX_RATIO && (p.ts ?? 0) < now;
+  });
+  const equityCurve = [
+    ...history,
+    ...(nav > 0
+      ? [{
+          time: new Date(now).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" }),
+          value: roundNum(nav, 2),
+          pnl: 0,
+          ts: now,
+        }]
+      : []),
+  ].map((p) => ({ ...p, pnl: initialNav > 0 ? roundNum(p.value - initialNav, 2) : 0 }));
 
   const unrealizedPnl = mapped.reduce(
     (sum, p) => sum + (p.entryUnknown ? 0 : p.pnl),
     0
   );
   const realizedPnl = roundNum(state.realizedPnl || 0, 2);
-  const depositPnl = navVsBasis(nav, initialNav);
+  const depositPnl = lifetimePnl(nav, initialNav, state.externalFlows);
   const totalPnl = depositPnl ? roundNum(depositPnl.pnl, 2) : roundNum(realizedPnl + unrealizedPnl, 2);
   const totalPnlPct = depositPnl ? roundNum(depositPnl.pct, 2) : 0;
 
-  const dayStartNav =
+  // The agent's Daily mark is only comparable to the wallet NAV when both
+  // books agree; otherwise (stale cash, phantom positions) derive the day
+  // move from the wallet's own 24h marks plus today's trades.
+  const agentNav = state.portfolioValue;
+  const booksAgree =
+    agentNav > 0 && nav > 0 && Math.abs(agentNav - nav) / nav <= NAV_AGREE_TOLERANCE;
+  const agentDayStart =
     state.dayStartNavUsd && state.dayStartNavUsd > 0
       ? state.dayStartNavUsd
       : resolveDayStartNav(state.equityCurve);
-  const vsYesterday = navVsBasis(nav, dayStartNav);
-  const dailyPnl = vsYesterday ? vsYesterday.pnl : 0;
-  const dailyPnlPct = vsYesterday ? vsYesterday.pct : 0;
+  const vsYesterday = booksAgree ? navVsBasis(nav, agentDayStart) : null;
+  const todayFlows = flowTotals(state.externalFlows);
+  const todayFlowUsd = todayFlows.outTodayUsd - todayFlows.inTodayUsd;
+  const daily = vsYesterday
+    ? {
+        dailyPnl: vsYesterday.pnl + todayFlowUsd,
+        dailyPnlPct: ((vsYesterday.pnl + todayFlowUsd) / agentDayStart) * 100,
+      }
+    : computeDailyPnl({
+        nav,
+        trades: state.trades,
+        open: [
+          ...tokens.map((t) => {
+            const p = mapped.find((m) => m.symbol === t.symbol);
+            return {
+              symbol: t.symbol,
+              value: t.value,
+              qty: t.qty,
+              price: t.price,
+              entryPrice: p?.entryPrice ?? 0,
+              entryUnknown: p?.entryUnknown ?? true,
+              pct24h: t.pct24h,
+            };
+          }),
+          ...(gasUsd > 0
+            ? [{
+                symbol: GAS_SYMBOL,
+                value: gasUsd,
+                qty: 0,
+                price: 0,
+                entryPrice: 0,
+                entryUnknown: true,
+                pct24h: gasPct24h,
+              }]
+            : []),
+        ],
+      });
+  const { dailyPnl, dailyPnlPct } = daily;
+  const dayStartNav = nav - dailyPnl;
 
   return {
     ...state,
@@ -783,8 +868,10 @@ export function mapTrack1ToDashboard(
   const nav = snap.portfolio.totalValueUsd;
   const initialNav = snap.portfolio.initialNavUsd ?? 0;
   const dayStartNav = resolveDayStartNav(snap.snapshots, snap.portfolio.dayStartNavUsd);
-  const depositPnl = navVsBasis(nav, initialNav);
-  const vsYesterday = navVsBasis(nav, dayStartNav);
+  const depositPnl = lifetimePnl(nav, initialNav, snap.externalFlows);
+  const todayFlows = flowTotals(snap.externalFlows);
+  const navForDay = nav + todayFlows.outTodayUsd - todayFlows.inTodayUsd;
+  const vsYesterday = navVsBasis(navForDay, dayStartNav);
 
   const mappedTrades = mapTrades(snap, closedStats.sellPnlByOrderId);
   const mappedPositions = snap.portfolio.positions
@@ -803,6 +890,7 @@ export function mapTrack1ToDashboard(
     cashBalance: roundNum(snap.portfolio.cashUsd, 2),
     initialNavUsd: roundNum(initialNav, 2),
     dayStartNavUsd: roundNum(dayStartNav, 2),
+    externalFlows: snap.externalFlows ?? [],
     totalPnl: roundNum(depositPnl ? depositPnl.pnl : assetPnl, 2),
     totalPnlPct: roundNum(depositPnl ? depositPnl.pct : assetPnlPct, 2),
     realizedPnl: roundNum(closedStats.realizedPnl, 2),

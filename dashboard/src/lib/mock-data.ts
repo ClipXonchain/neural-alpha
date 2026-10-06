@@ -75,6 +75,16 @@ export interface ActivityItem {
   detail?: string;
 }
 
+export interface ExternalFlow {
+  direction: "out" | "in";
+  symbol: string;
+  qty: number;
+  valueUsd: number;
+  timestamp: number;
+  txHash?: string;
+  note?: string;
+}
+
 export interface AgentState {
   status: "running" | "paused" | "stopped";
   mode: "live" | "paper";
@@ -86,6 +96,8 @@ export interface AgentState {
   initialNavUsd: number;
   /** Yesterday's UTC close NAV — Daily = current − this. */
   dayStartNavUsd?: number;
+  /** Non-swap transfers out of / into the wallet — excluded from PnL. */
+  externalFlows?: ExternalFlow[];
   totalPnl: number;
   totalPnlPct: number;
   realizedPnl: number;

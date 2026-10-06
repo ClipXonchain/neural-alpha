@@ -2,6 +2,7 @@ import type { PortfolioSnapshot, PortfolioPosition, TradeResult, RiskExit } from
 import { MIN_GAS_RESERVE_USD, MIN_POSITION_VALUE_USD } from "../config.js";
 import { getLatestPrice } from "../data/market.js";
 import { logger } from "../utils/logger.js";
+import { summarizeExternalFlows, type ExternalFlow } from "./external-flows.js";
 import {
   classifyAssetTrade,
   dedupeAndCleanTradeResults,
@@ -12,6 +13,20 @@ import {
 
 /** Cap in-memory NAV history so dashboard SSE cannot grow without bound. */
 const MAX_NAV_POINTS = 240;
+/** Last 24h kept denser than older history so the 1D chart has shape. */
+const RECENT_NAV_WINDOW_MS = 86_400_000;
+const MAX_RECENT_NAV_POINTS = 288;
+
+/** Evenly sample `max` points, always keeping the newest. */
+function downsample<T>(points: T[], max: number): T[] {
+  const n = points.length;
+  if (n <= max) return points;
+  const step = n / max;
+  const out: T[] = [];
+  for (let i = 0; i < max - 1; i++) out.push(points[Math.floor(i * step)]!);
+  out.push(points[n - 1]!);
+  return out;
+}
 
 /** TP % arms the trail. Falls back to the legacy activate field. */
 export function resolveTrailArmPct(takeProfitPct: number, trailingActivatePct?: number): number {
@@ -86,7 +101,10 @@ export class PortfolioTracker {
   /** Frozen NAV at UTC midnight (yesterday's close) for Daily PnL. */
   private dayStartNavUsd = 0;
   private dayStartUtcDate = "";
-  /** Cost basis restored from Neon when trade replay is incomplete. */
+  /** Live mode: NAV only counts for the Daily mark after a successful wallet read. */
+  private navVerified: boolean;
+  private externalFlows: ExternalFlow[] = [];
+  /** Cost basis restored from SQLite when trade replay is incomplete. */
   private persistedEntries = new Map<string, { avgEntryPrice: number; peakPnlPct?: number }>();
   /** Operator USDT/stable deposit. Baseline = deposit + gas at lock. */
   private configuredDepositUsd: number | null = null;
@@ -98,6 +116,50 @@ export class PortfolioTracker {
     // Live mode defers the baseline until the real on-chain NAV is known,
     // so a placeholder config value can't cause a false 100% drawdown.
     this.baselineInitialized = !deferBaseline;
+    this.navVerified = !deferBaseline;
+  }
+
+  get isNavVerified(): boolean {
+    return this.navVerified;
+  }
+
+  /** Operator transfers in/out of the wallet that are not swaps. */
+  setExternalFlows(flows: ExternalFlow[]) {
+    this.externalFlows = [...flows].sort((a, b) => a.timestamp - b.timestamp);
+    for (const sym of new Set(flows.filter((f) => f.direction === "out").map((f) => f.symbol))) {
+      const pos = this.positions.get(sym);
+      if (!pos) continue;
+      const { qty } = this.replaySymbolLedger(sym);
+      if (qty * (getLatestPrice(sym) ?? pos.avgEntryPrice) < MIN_POSITION_VALUE_USD) {
+        this.positions.delete(sym);
+        this.peakPnlPct.delete(sym);
+        this.lots.delete(sym);
+      }
+    }
+  }
+
+  getExternalFlows(): ExternalFlow[] {
+    return [...this.externalFlows];
+  }
+
+  markNavVerified() {
+    this.navVerified = true;
+  }
+
+  /**
+   * A >50% day move on a bStock book is a data error (placeholder cash,
+   * phantom positions) — re-anchor the Daily mark to the verified NAV.
+   */
+  resetDayStartIfImplausible(navUsd: number) {
+    if (!(navUsd > 0) || !(this.dayStartNavUsd > 0)) return;
+    const ratio = navUsd / this.dayStartNavUsd;
+    if (ratio >= 0.5 && ratio <= 1.5) return;
+    logger.warn("Daily NAV mark discarded — diverges from wallet NAV", {
+      dayStartNavUsd: Math.round(this.dayStartNavUsd * 100) / 100,
+      navUsd: Math.round(navUsd * 100) / 100,
+    });
+    this.dayStartNavUsd = navUsd;
+    this.dayStartUtcDate = utcDateKey();
   }
 
   get cash(): number {
@@ -168,7 +230,7 @@ export class PortfolioTracker {
     return this.peakValueUsd;
   }
 
-  /** Restore peak / baseline from Neon after agent restart. */
+  /** Restore peak / baseline from SQLite after agent restart. */
   restorePersistedNav(state: {
     peakNavUsd: number;
     initialNavUsd: number;
@@ -332,7 +394,7 @@ export class PortfolioTracker {
     };
   }
 
-  /** Merge confirmed trades loaded from Neon or on-chain backfill (survives restarts). */
+  /** Merge confirmed trades loaded from SQLite or on-chain backfill (survives restarts). */
   hydrateTradeHistory(trades: import("../utils/types.js").TradeResult[]) {
     if (trades.length === 0) return;
     const merged = dedupeAndCleanTradeResults([...this.tradeHistory, ...trades]);
@@ -342,7 +404,7 @@ export class PortfolioTracker {
     logger.info("Trade history hydrated from database", { count: trades.length });
   }
 
-  /** Restore saved entry prices / peak PnL from Neon (survives restarts). */
+  /** Restore saved entry prices / peak PnL from SQLite (survives restarts). */
   restorePersistedEntries(entries: Record<string, { avgEntryPrice: number; peakPnlPct?: number }>) {
     for (const [symbol, entry] of Object.entries(entries)) {
       if (entry.avgEntryPrice > 0) {
@@ -351,7 +413,27 @@ export class PortfolioTracker {
     }
   }
 
-  /** Export open-position cost basis for Neon persistence. */
+  /**
+   * Fill cost basis for held tokens whose buy never reached the ledger,
+   * using Binance Web3 average buy price. Recorded trades still take priority.
+   */
+  seedMissingEntries(avgPrices: Map<string, number>): string[] {
+    const seeded: string[] = [];
+    for (const [symbol, avg] of avgPrices) {
+      const sym = symbol.toUpperCase();
+      const pos = this.positions.get(sym);
+      if (!pos || pos.avgEntryPrice > 0 || !(avg > 0)) continue;
+      pos.avgEntryPrice = avg;
+      this.persistedEntries.set(sym, { ...this.persistedEntries.get(sym), avgEntryPrice: avg });
+      seeded.push(sym);
+    }
+    if (seeded.length > 0) {
+      logger.info("Cost basis seeded from Binance Web3 average price", { symbols: seeded });
+    }
+    return seeded;
+  }
+
+  /** Export open-position cost basis for SQLite persistence. */
   exportPositionEntries(): Record<string, { avgEntryPrice: number; peakPnlPct?: number }> {
     const out: Record<string, { avgEntryPrice: number; peakPnlPct?: number }> = {};
     for (const [symbol, pos] of this.positions) {
@@ -607,8 +689,24 @@ export class PortfolioTracker {
     let costBasis = 0;
 
     const trades = [...this.tradeHistory].sort((a, b) => a.timestamp - b.timestamp);
+    const flows = this.externalFlows.filter((f) => f.symbol === sym);
+    let flowIdx = 0;
+    const applyFlowsUntil = (ts: number) => {
+      while (flowIdx < flows.length && flows[flowIdx]!.timestamp <= ts) {
+        const f = flows[flowIdx++]!;
+        if (f.direction === "in") {
+          costBasis += f.valueUsd;
+          qty += f.qty;
+        } else if (qty > 0) {
+          const avg = costBasis / qty;
+          qty = Math.max(0, qty - f.qty);
+          costBasis = avg * qty;
+        }
+      }
+    };
     for (const t of trades) {
       if (!t.success) continue;
+      applyFlowsUntil(t.timestamp);
       const from = t.fromToken.toUpperCase();
       const to = t.toToken.toUpperCase();
       const price = t.priceAtExecution > 0 ? t.priceAtExecution : 0;
@@ -643,8 +741,9 @@ export class PortfolioTracker {
         costBasis = 0;
       }
     }
+    applyFlowsUntil(Infinity);
 
-    if (qty <= 0 || costBasis <= 0) return { qty: 0, avgEntryPrice: 0 };
+    if (qty <= 1e-12 || costBasis <= 0) return { qty: 0, avgEntryPrice: 0 };
     return { qty, avgEntryPrice: costBasis / qty };
   }
 
@@ -1036,12 +1135,43 @@ export class PortfolioTracker {
       takeProfitPct: number;
       trailingActivatePct?: number;
       trailingGivebackPct?: number;
-    }
+    },
+    chartNavUsd?: number
   ): PortfolioSnapshot {
     const snap = this.buildSnapshot(currentPrices, exitRules);
-    this.snapshots.push(this.toNavPoint(snap));
+    if (chartNavUsd != null && chartNavUsd > 0) {
+      this.snapshots.push({ ...this.toNavPoint(snap), totalValueUsd: chartNavUsd });
+    } else if (this.navVerified) {
+      this.snapshots.push(this.toNavPoint(snap));
+    }
     this.trimSnapshots();
     return snap;
+  }
+
+  /** Seed the equity curve from persisted NAV rows after a restart. */
+  hydrateChartHistory(
+    points: Array<{ timestamp: number; totalValueUsd: number; maxDrawdownPct: number }>
+  ) {
+    const firstLive = this.snapshots[0]?.timestamp ?? Infinity;
+    const restored: PortfolioSnapshot[] = points
+      .filter((p) => p.totalValueUsd > 0 && p.timestamp < firstLive)
+      .sort((a, b) => a.timestamp - b.timestamp)
+      .map((p) => ({
+        timestamp: p.timestamp,
+        totalValueUsd: p.totalValueUsd,
+        cashUsd: 0,
+        positions: [],
+        dailyPnl: 0,
+        totalPnl: 0,
+        totalPnlPct: 0,
+        realizedPnl: 0,
+        gasReserveUsd: 0,
+        maxDrawdownPct: p.maxDrawdownPct,
+        tradeCount: 0,
+      }));
+    if (restored.length === 0) return;
+    this.snapshots = [...restored, ...this.snapshots];
+    this.trimSnapshots();
   }
 
   /** Live NAV / exits without appending to the equity-curve history. */
@@ -1118,8 +1248,10 @@ export class PortfolioTracker {
     }
 
     const totalValueUsd = this.cashUsd + this.gasReserveUsd + positionsValueUsd;
-    this.observeDayNav(totalValueUsd);
-    this.lastNavUsd = totalValueUsd;
+    if (this.navVerified) {
+      this.observeDayNav(totalValueUsd);
+      this.lastNavUsd = totalValueUsd;
+    }
 
     for (const p of positionSnapshots) {
       p.weight = totalValueUsd > 0 ? ((p.amount * p.currentPrice) / totalValueUsd) * 100 : 0;
@@ -1139,8 +1271,9 @@ export class PortfolioTracker {
     const tradedCost = costOpen + closed.costClosed;
     const assetPnl = closed.realizedPnl + unrealizedPnl;
 
-    const deposit = this.baselineInitialized ? this.initialValueUsd : 0;
-    const totalPnl = deposit > 0 ? totalValueUsd - deposit : assetPnl;
+    const flows = summarizeExternalFlows(this.externalFlows);
+    const deposit = this.baselineInitialized ? this.initialValueUsd + flows.inUsd : 0;
+    const totalPnl = deposit > 0 ? totalValueUsd + flows.outUsd - deposit : assetPnl;
     const totalPnlPct =
       deposit > 0
         ? (totalPnl / deposit) * 100
@@ -1148,7 +1281,9 @@ export class PortfolioTracker {
           ? (assetPnl / tradedCost) * 100
           : 0;
     const dailyPnl =
-      this.dayStartNavUsd > 0 ? totalValueUsd - this.dayStartNavUsd : closed.dailyRealizedPnl;
+      this.dayStartNavUsd > 0
+        ? totalValueUsd - this.dayStartNavUsd + flows.outTodayUsd - flows.inTodayUsd
+        : closed.dailyRealizedPnl;
     const dailyPnlPct =
       this.dayStartNavUsd > 0 ? (dailyPnl / this.dayStartNavUsd) * 100 : 0;
 
@@ -1196,20 +1331,21 @@ export class PortfolioTracker {
     const compact = (s: PortfolioSnapshot) =>
       s.positions.length > 0 ? this.toNavPoint(s) : s;
 
-    if (n <= MAX_NAV_POINTS) {
+    const cutoff = Date.now() - RECENT_NAV_WINDOW_MS;
+    const older = this.snapshots.filter((s) => s.timestamp < cutoff);
+    const recent = this.snapshots.filter((s) => s.timestamp >= cutoff);
+
+    if (older.length <= MAX_NAV_POINTS && recent.length <= MAX_RECENT_NAV_POINTS) {
       if (this.snapshots.some((s) => s.positions.length > 0)) {
         this.snapshots = this.snapshots.map(compact);
       }
       return;
     }
 
-    const step = n / MAX_NAV_POINTS;
-    const next: PortfolioSnapshot[] = [];
-    for (let i = 0; i < MAX_NAV_POINTS - 1; i++) {
-      next.push(compact(this.snapshots[Math.min(n - 1, Math.floor(i * step))]!));
-    }
-    next.push(compact(this.snapshots[n - 1]!));
-    this.snapshots = next;
+    this.snapshots = [
+      ...downsample(older, MAX_NAV_POINTS),
+      ...downsample(recent, MAX_RECENT_NAV_POINTS),
+    ].map(compact);
   }
 
   /** Downsampled equity points for the dashboard chart — never full position history. */

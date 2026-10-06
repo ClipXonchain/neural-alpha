@@ -1,4 +1,6 @@
+import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { logger } from "../utils/logger.js";
 
 export const BAW_BINANCE_CHAIN_ID = "56";
 
@@ -20,9 +22,19 @@ export interface BawRunOptions {
   env?: Record<string, string>;
 }
 
+let warnedMissingCli = false;
+
 function bawBinary(): { file: string; prefixArgs: string[] } {
   const configured = process.env.BAW_CLI?.trim();
-  if (configured) return { file: configured, prefixArgs: [] };
+  if (!configured) return { file: "baw", prefixArgs: [] };
+  const looksLikePath = configured.includes("/") || configured.includes("\\");
+  if (!looksLikePath || existsSync(configured)) {
+    return { file: configured, prefixArgs: [] };
+  }
+  if (!warnedMissingCli) {
+    warnedMissingCli = true;
+    logger.warn("BAW_CLI path is not on this machine, using baw on PATH", { configured });
+  }
   return { file: "baw", prefixArgs: [] };
 }
 

@@ -151,6 +151,7 @@ export interface Track1Snapshot {
     { price: number; change24hPct: number; updatedAt: number }
   >;
   userBlacklisted?: string[];
+  externalFlows?: import("./mock-data").ExternalFlow[];
   binancePositions?: Array<{
     symbol: string;
     name: string;
@@ -160,6 +161,7 @@ export interface Track1Snapshot {
     valueUsd: number;
     contractAddress: string;
     icon?: string;
+    avgPrice?: number;
   }>;
 }
 
@@ -193,6 +195,7 @@ export interface WalletSnapshot {
     valueUsd: number;
     contractAddress: string;
     icon?: string;
+    avgPrice?: number;
   }>;
 }
 
@@ -300,6 +303,43 @@ export async function runCampaignAiTasks(
   return agentFetchLong("/campaign/ai-tasks", {
     method: "POST",
     body: JSON.stringify(opts),
+  });
+}
+
+export interface LlmStatus {
+  enabled: boolean;
+  model: string | null;
+  reasoningModel: string | null;
+  studioReports: { tickers: string[]; at: number }[];
+}
+
+export interface DailyReview {
+  day: string;
+  text: string;
+  model: string;
+  generatedAt: number;
+  partial: boolean;
+}
+
+export async function fetchLlmStatus(): Promise<LlmStatus> {
+  return agentFetch("/llm/status");
+}
+
+export async function askAssistant(question: string): Promise<{ answer: string; model: string }> {
+  return agentFetchLong("/assistant", {
+    method: "POST",
+    body: JSON.stringify({ question }),
+  });
+}
+
+export async function fetchDailyReviews(): Promise<{ reviews: DailyReview[]; llm: boolean }> {
+  return agentFetch("/reviews");
+}
+
+export async function runDailyReview(day?: string): Promise<{ review: DailyReview }> {
+  return agentFetchLong("/reviews/run", {
+    method: "POST",
+    body: JSON.stringify(day ? { day } : {}),
   });
 }
 
