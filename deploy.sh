@@ -11,7 +11,7 @@ set -euo pipefail
 #
 # Menu:
 #   1  Fresh deploy — Node, .env, build, Nginx, Certbot, PM2 start
-#   2  Update       — git pull, rebuild, pm2 restart (Nginx/SSL left as-is)
+#   2  Update       — git pull, rebuild, pm2 restart, nginx reload
 #
 # Usage (on the VPS, from this repo):
 #   bash deploy.sh                         # interactive menu
@@ -45,7 +45,7 @@ Neural Alpha — ${DOMAIN}
 
   bash deploy.sh              Interactive menu
   bash deploy.sh 1            Fresh deploy (Nginx, Certbot, PM2 start)
-  bash deploy.sh 2            Update (git pull, rebuild, pm2 restart)
+  bash deploy.sh 2            Update (git pull, rebuild, pm2 restart, nginx reload)
   bash deploy.sh fresh|update Same as 1 or 2
 
   --branch <name>   Branch to fetch (default: dashboard)
@@ -248,7 +248,7 @@ choose_mode() {
     echo ""
     echo "  2) Update"
     echo "     git pull origin/${BRANCH}, rebuild, pm2 restart"
-    echo "     (keeps Nginx, SSL, and .env)"
+    echo "     reloads Nginx for ${DOMAIN} only"
     echo ""
     echo "  q) Quit"
     echo ""
@@ -478,22 +478,75 @@ build_dashboard() {
   echo "  ✓ Dashboard built (public read-only)"
 }
 
+patch_nginx_ports() {
+  local file="$1"
+  node -e '
+    const fs = require("fs");
+    const file = process.argv[1];
+    const ports = {
+      neuralalpha_dashboard: process.argv[2],
+      neuralalpha_agent_api: process.argv[3],
+    };
+    const lines = fs.readFileSync(file, "utf8").split("\n");
+    const found = new Set();
+    let changed = 0;
+    let upstream = null;
+    for (let i = 0; i < lines.length; i++) {
+      const open = lines[i].match(/^\s*upstream\s+(\S+)\s*\{/);
+      if (open) upstream = open[1];
+      if (upstream && ports[upstream] && /^\s*server\s+127\.0\.0\.1:\d+/.test(lines[i])) {
+        const next = lines[i].replace(/127\.0\.0\.1:\d+/, "127.0.0.1:" + ports[upstream]);
+        if (next !== lines[i]) changed += 1;
+        lines[i] = next;
+        found.add(upstream);
+        upstream = null;
+      }
+      if (upstream && /^\s*\}/.test(lines[i])) upstream = null;
+    }
+    for (const name of Object.keys(ports)) {
+      if (!found.has(name)) {
+        console.error("missing upstream " + name);
+        process.exit(2);
+      }
+    }
+    fs.writeFileSync(file, lines.join("\n"));
+    process.stdout.write(String(changed));
+  ' "$file" "$WEB_PORT" "$AGENT_PORT"
+}
+
 install_nginx() {
   if [[ "$SKIP_NGINX" -eq 1 ]]; then
     return
   fi
+  if ! command -v nginx &>/dev/null; then
+    echo "  ✗ nginx not found (or pass --skip-nginx)"
+    exit 1
+  fi
   echo ""
-  echo "▸ Nginx (${DOMAIN}, ${WWW_DOMAIN})..."
-  local nginx_conf tmp_conf
+  echo "▸ Nginx (${DOMAIN} → 127.0.0.1:${WEB_PORT}, agent → 127.0.0.1:${AGENT_PORT})..."
+  local nginx_conf tmp_conf patched
   nginx_conf="/etc/nginx/sites-available/${DOMAIN}"
   tmp_conf="$(mktemp /tmp/neuralalpha.nginx.XXXXXX)"
-  write_nginx "$tmp_conf"
   if [[ ! -f "$nginx_conf" ]]; then
+    write_nginx "$tmp_conf"
     run_root cp "$tmp_conf" "$nginx_conf"
     run_root ln -sf "$nginx_conf" /etc/nginx/sites-enabled/
     echo "  ✓ Nginx site installed"
   else
-    echo "  → Existing $nginx_conf left untouched (certbot SSL stays intact)"
+    run_root cp "$nginx_conf" "$tmp_conf"
+    run_root chown "$(id -u):$(id -g)" "$tmp_conf"
+    if patched="$(patch_nginx_ports "$tmp_conf")"; then
+      run_root cp "$tmp_conf" "$nginx_conf"
+      if [[ "$patched" == "0" ]]; then
+        echo "  ✓ ${DOMAIN} already proxies ${WEB_PORT} and ${AGENT_PORT}"
+      else
+        echo "  ✓ ${DOMAIN} upstreams set to ${WEB_PORT} and ${AGENT_PORT} (other sites untouched)"
+      fi
+    else
+      echo "  ✗ ${nginx_conf} has no neuralalpha upstreams — not rewriting it"
+      rm -f "$tmp_conf"
+      exit 1
+    fi
   fi
   rm -f "$tmp_conf"
   run_root nginx -t
@@ -640,6 +693,7 @@ update_deploy() {
   install_deps
   build_dashboard
   pm2_restart_update
+  install_nginx
   health_check
   print_done "Update complete"
 }
