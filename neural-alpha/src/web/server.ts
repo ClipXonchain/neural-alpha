@@ -658,7 +658,9 @@ export function startDashboard(agent: TradingAgent) {
   const MAX_PORT_RETRIES = 5;
 
   server.on("error", (err: NodeJS.ErrnoException) => {
-    if (err.code === "EADDRINUSE" && port < DASHBOARD_PORT + MAX_PORT_RETRIES) {
+    // On a shared VPS, do not walk onto the next port — another site may own it.
+    const allowPortRetry = process.env.NODE_ENV !== "production";
+    if (allowPortRetry && err.code === "EADDRINUSE" && port < DASHBOARD_PORT + MAX_PORT_RETRIES) {
       logger.warn(`Port ${port} in use — trying ${port + 1}`);
       port++;
       server.listen(port, "127.0.0.1");

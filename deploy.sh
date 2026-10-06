@@ -4,8 +4,10 @@ set -euo pipefail
 # Neural Alpha — production deploy for neuralalpha.io
 #
 # PM2 apps (only these; never `pm2 restart all`):
-#   neural-agent       trading loop + API on 127.0.0.1:3847
-#   neural-dashboard   Next.js on 127.0.0.1:3000 (public read-only)
+#   neural-agent       trading loop + API on 127.0.0.1:3006
+#   neural-dashboard   Next.js on 127.0.0.1:3005 (public read-only)
+#
+# 3000 stays free for other sites already on this VPS.
 #
 # Menu:
 #   1  Fresh deploy — Node, .env, build, Nginx, Certbot, PM2 start
@@ -25,6 +27,8 @@ set -euo pipefail
 APP_DIR="$(cd "$(dirname "$0")" && pwd)"
 DOMAIN="${DOMAIN:-neuralalpha.io}"
 WWW_DOMAIN="${WWW_DOMAIN:-www.${DOMAIN}}"
+WEB_PORT="${WEB_PORT:-3005}"
+AGENT_PORT="${AGENT_PORT:-3006}"
 BRANCH="${BRANCH:-dashboard}"
 MODE=""
 RESET=0
@@ -154,12 +158,12 @@ write_nginx() {
 # Upstream names are unique so this file can sit beside other sites.
 
 upstream neuralalpha_dashboard {
-    server 127.0.0.1:3000;
+    server 127.0.0.1:${WEB_PORT};
     keepalive 16;
 }
 
 upstream neuralalpha_agent_api {
-    server 127.0.0.1:3847;
+    server 127.0.0.1:${AGENT_PORT};
     keepalive 8;
 }
 
@@ -398,9 +402,10 @@ prepare_env() {
     "http://localhost:3000")"
   echo "  ✓ CORS_ORIGINS=${cors_value}"
 
-  if [[ -z "$(env_get AGENT_API_URL)" ]]; then
-    env_upsert AGENT_API_URL "http://127.0.0.1:3847"
-  fi
+  env_upsert DASHBOARD_PORT "$AGENT_PORT"
+  env_upsert DASHBOARD_NEXT_PORT "$WEB_PORT"
+  env_upsert AGENT_API_URL "http://127.0.0.1:${AGENT_PORT}"
+  echo "  ✓ Ports: dashboard ${WEB_PORT}, agent API ${AGENT_PORT} (localhost only)"
 
   mkdir -p dashboard
   node -e '
@@ -575,13 +580,13 @@ health_check() {
   echo ""
   echo "▸ Health check..."
   sleep 3
-  if curl -fsS --max-time 5 http://127.0.0.1:3847/api/health >/dev/null; then
-    echo "  ✓ Agent API  http://127.0.0.1:3847/api/health"
+  if curl -fsS --max-time 5 "http://127.0.0.1:${AGENT_PORT}/api/health" >/dev/null; then
+    echo "  ✓ Agent API  http://127.0.0.1:${AGENT_PORT}/api/health"
   else
     echo "  ⚠ Agent API not up yet — check: pm2 logs neural-agent --lines 80"
   fi
-  if curl -fsS --max-time 5 -o /dev/null http://127.0.0.1:3000/; then
-    echo "  ✓ Dashboard  http://127.0.0.1:3000"
+  if curl -fsS --max-time 5 -o /dev/null "http://127.0.0.1:${WEB_PORT}/"; then
+    echo "  ✓ Dashboard  http://127.0.0.1:${WEB_PORT}"
   else
     echo "  ⚠ Dashboard not up yet — check: pm2 logs neural-dashboard --lines 50"
   fi
@@ -595,7 +600,7 @@ print_done() {
   echo "║                                                  ║"
   echo "║   Public (read-only):  https://${DOMAIN}"
   echo "║   WWW:                 https://${WWW_DOMAIN}"
-  echo "║   Agent API (local):   http://127.0.0.1:3847/api ║"
+  echo "║   Agent API (local):   http://127.0.0.1:${AGENT_PORT}/api ║"
   echo "║   Health:              https://${DOMAIN}/api/health"
   echo "║                                                  ║"
   echo "║   pm2 status                                     ║"

@@ -2,8 +2,10 @@
  * PM2 Ecosystem — Neural Alpha (public read-only dashboard)
  *
  * Manages ONLY:
- *   neural-agent       — trading loop + localhost API :3847
- *   neural-dashboard   — Next.js :3000 (READONLY)
+ *   neural-agent       — trading loop + localhost API :3006
+ *   neural-dashboard   — Next.js :3005 (READONLY)
+ *
+ * 3000 is left free for other sites on the same VPS.
  *
  * Never start this file with `pm2 restart all` on a shared VPS.
  */
@@ -31,6 +33,7 @@ module.exports = {
       interpreter: "none",
       env: {
         NODE_ENV: "production",
+        DASHBOARD_PORT: "3006",
       },
       instances: 1,
       exec_mode: "fork",
@@ -50,11 +53,12 @@ module.exports = {
       name: "neural-dashboard",
       cwd: path.join(ROOT, "dashboard"),
       script: bin("next"),
-      args: "start -p 3000",
+      args: "start -H 127.0.0.1 -p 3005",
       interpreter: "none",
       env: {
         NODE_ENV: "production",
-        PORT: "3000",
+        PORT: "3005",
+        AGENT_API_URL: "http://127.0.0.1:3006",
         READONLY: "true",
         NEXT_PUBLIC_READONLY: "true",
       },
