@@ -172,6 +172,9 @@ server {
     listen [::]:80;
     server_name ${DOMAIN} ${WWW_DOMAIN};
 
+    # Marks this vhost. If a response lacks this header, Nginx sent it to another site.
+    add_header X-Neural-Alpha-Site neuralalpha always;
+
     gzip on;
     gzip_vary on;
     gzip_proxied any;
@@ -487,9 +490,13 @@ patch_nginx_ports() {
       neuralalpha_dashboard: process.argv[2],
       neuralalpha_agent_api: process.argv[3],
     };
-    const lines = fs.readFileSync(file, "utf8").split("\n");
+    let raw = fs.readFileSync(file, "utf8");
+    const swapped = raw
+      .replace(/127\.0\.0\.1:3000\b/g, "127.0.0.1:" + ports.neuralalpha_dashboard)
+      .replace(/127\.0\.0\.1:3847\b/g, "127.0.0.1:" + ports.neuralalpha_agent_api);
+    const lines = swapped.split("\n");
     const found = new Set();
-    let changed = 0;
+    let changed = raw === swapped ? 0 : 1;
     let upstream = null;
     for (let i = 0; i < lines.length; i++) {
       const open = lines[i].match(/^\s*upstream\s+(\S+)\s*\{/);
@@ -549,9 +556,29 @@ install_nginx() {
     fi
   fi
   rm -f "$tmp_conf"
+  run_root ln -sf "$nginx_conf" "/etc/nginx/sites-enabled/${DOMAIN}"
   run_root nginx -t
   run_root systemctl reload nginx
-  echo "  ✓ Nginx reloaded"
+  echo "  ✓ Nginx reloaded (${DOMAIN} only)"
+}
+
+verify_public_site() {
+  echo ""
+  echo "▸ Checking ${DOMAIN} is not the other site..."
+  local body=""
+  body="$(curl -sS --max-time 10 --resolve "${DOMAIN}:80:127.0.0.1" "http://${DOMAIN}/" || true)"
+  if ! grep -q "Neural Alpha" <<<"$body"; then
+    body="$(curl -kfsS --max-time 10 --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/" || true)"
+  fi
+  if grep -q "Neural Alpha" <<<"$body"; then
+    echo "  ✓ http://${DOMAIN} serves Neural Alpha on 127.0.0.1:${WEB_PORT}"
+    return
+  fi
+  echo "  ✗ ${DOMAIN} is still served by another site (ClipX)."
+  echo "    This app listens on 127.0.0.1:${WEB_PORT}. The other sites were not changed."
+  echo "    Active Nginx names:"
+  run_root nginx -T 2>/dev/null | grep -n "server_name" | head -40 || true
+  exit 1
 }
 
 install_ssl() {
@@ -643,6 +670,7 @@ health_check() {
   else
     echo "  ⚠ Dashboard not up yet — check: pm2 logs neural-dashboard --lines 50"
   fi
+  verify_public_site
 }
 
 print_done() {
