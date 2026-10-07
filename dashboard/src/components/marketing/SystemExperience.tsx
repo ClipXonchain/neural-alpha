@@ -2,7 +2,7 @@
 
 import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import Image from "next/image";
-import { motion, useReducedMotion, useScroll, useSpring, useTransform } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion, useScroll, useSpring, useTransform } from "framer-motion";
 import { Search, ShieldCheck, Sparkles, Wallet } from "lucide-react";
 import {
   fetchAgentState,
@@ -16,18 +16,49 @@ import {
 import type { AgentState, Position, Signal, Trade } from "@/lib/mock-data";
 import { enrichStateWithWallet, mapTrack1ToDashboard } from "@/lib/map-agent-state";
 import { timeAgo } from "@/lib/utils";
+import ParticleText from "./ParticleText";
+import RotatingText from "./RotatingText";
+import AnimatedContent from "./AnimatedContent";
+import SplitText from "./SplitText";
+import TrueFocus from "./TrueFocus";
+import GooeyNav from "./GooeyNav";
+import BorderGlow from "./BorderGlow";
 import "./system.css";
+
+const edgeGlow = {
+  edgeSensitivity: 30,
+  glowColor: "40 80 80",
+  backgroundColor: "#120F17",
+  glowRadius: 40,
+  glowIntensity: 1,
+  coneSpread: 25,
+  animated: false,
+  colors: ["#c084fc", "#f472b6", "#38bdf8"],
+};
+
+const cardEntrance = {
+  distance: 100,
+  direction: "vertical" as const,
+  reverse: false,
+  duration: 0.8,
+  ease: "power3.out",
+  initialOpacity: 0,
+  animateOpacity: true,
+  scale: 1,
+  threshold: 0.1,
+  delay: 0,
+};
 
 type LiveQuote = { symbol: string; price: number | null; change24hPct: number | null; icon?: string };
 type RangeKey = "1D" | "1W" | "1M" | "ALL";
-type Feature = { id: "portfolio" | "agent" | "signals" | "ledger" | "wallet"; label: string; title: string; accent: string; description: string };
+type Feature = { id: "portfolio" | "agent" | "signals" | "ledger" | "wallet"; title: string; phrases: string[]; description: string; paired?: boolean };
 
 const features: Feature[] = [
-  { id: "portfolio", label: "Portfolio", title: "See the shape", accent: "of the book.", description: "Track allocation, open exposure, and NAV history together. Select a holding to focus its share of the portfolio." },
-  { id: "agent", label: "Agent and risk", title: "Every cycle has", accent: "clear guardrails.", description: "See how the agent screens opportunities, checks portfolio risk, and only then considers a route." },
-  { id: "signals", label: "Market signals", title: "Read the market", accent: "name by name.", description: "Filter live bStock signals, compare technical readings, and open a row for its current context." },
-  { id: "ledger", label: "Positions and fills", title: "Keep every position", accent: "in view.", description: "Move between open exposure and confirmed fills, then inspect the price, size, and realized result." },
-  { id: "wallet", label: "Wallet", title: "Know what sits", accent: "behind the strategy.", description: "Explore a sample wallet with available balances and bStock holdings, arranged like the dashboard." },
+  { id: "portfolio", title: "Portfolio", phrases: ["NAV History", "Open Position"], paired: true, description: "Track allocation, open exposure, and NAV history together. Select a holding to focus its share of the portfolio." },
+  { id: "agent", title: "Risk checks", phrases: ["before a route", "screens the book", "checks risk"], description: "See how the agent screens opportunities, checks portfolio risk, and only then considers a route." },
+  { id: "signals", title: "Signals", phrases: ["for every bStock", "live readings", "current context"], description: "Filter live bStock signals, compare technical readings, and open a row for its current context." },
+  { id: "ledger", title: "Positions", phrases: ["and confirmed fills", "open exposure", "price and size"], description: "Move between open exposure and confirmed fills, then inspect the price, size, and realized result." },
+  { id: "wallet", title: "Wallet", phrases: ["balances on hand", "bStock holdings", "sample account"], description: "Explore a sample wallet with available balances and bStock holdings, arranged like the dashboard." },
 ];
 const defaultSymbols = ["NVDAB", "AAPLB", "MSFTB", "TSLAB"];
 const ranges: RangeKey[] = ["1D", "1W", "1M", "ALL"];
@@ -230,19 +261,53 @@ function Hero({ state, snapshot, quotes, selected, onSelect }: {
       </motion.div>
       <div className="hero-layout">
         <motion.div className="hero-copy" initial={reduce ? false : { opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .65, ease: [.22, .7, .3, 1] }}>
-          <a className="winner-kicker" href="#winner">1st · BNB Hack Track 1</a>
-          <h1>Trading logic<br /><em>you can see.</em></h1>
-          <p className="hero-summary">A live bStock desk that reads the market, checks risk, and records every move.</p>
-          <div className="hero-links">
-            <a className="primary-link" href="#features">About the desk <span aria-hidden="true">↓</span></a>
-            <a className="text-link" href="/">Open dashboard <span aria-hidden="true">↗</span></a>
-          </div>
+          <h1>
+            <TrueFocus
+              sentence="Trading logic you can see"
+              manualMode={false}
+              blurAmount={2}
+              borderColor="#ea4eff"
+              animationDuration={0.5}
+              pauseBetweenAnimations={1}
+            />
+          </h1>
+          <SplitText
+            text="Trade bStocks with Binance Agentic Wallet while you are sleeping"
+            className="hero-summary"
+            delay={50}
+            duration={1.25}
+            ease="power3.out"
+            splitType="words"
+            from={{ opacity: 0, y: 40 }}
+            to={{ opacity: 1, y: 0 }}
+            threshold={0.1}
+            rootMargin="-100px"
+            textAlign="start"
+            emphasis={{ text: "while you are sleeping", className: "hero-payoff" }}
+          />
+          <GooeyNav
+            items={[
+              { label: "About the desk", href: "#features" },
+              { label: "Open dashboard", href: "/" },
+            ]}
+            particleCount={15}
+            particleDistances={[90, 10]}
+            particleR={100}
+            initialActiveIndex={0}
+            animationTime={600}
+            timeVariance={300}
+            colors={[1, 2, 3, 1, 2, 3, 1, 4]}
+          />
         </motion.div>
 
-        <motion.div className="market-card" initial={reduce ? false : { opacity: 0, y: 24, scale: .975 }} animate={{ opacity: 1, y: 0, scale: 1 }} transition={{ duration: .8, delay: .12, ease: [.22, .7, .3, 1] }}>
+        <AnimatedContent {...cardEntrance}>
+          <BorderGlow {...edgeGlow} borderRadius={24}>
+          <div className="market-card">
           <div className="market-card-head"><div><span className="eyebrow">Portfolio value</span><strong>{money(state?.portfolioValue ?? snapshot?.portfolio.totalValueUsd, 2)}</strong></div><div className={`market-delta ${tone}`}><span>{selectedQuote?.symbol ?? selected}</span><b>{price(selectedQuote?.price)}</b><small>{percent(selectedQuote?.change24hPct)}</small></div></div>
           <TickerPulse quotes={quotes} selected={selected} onSelect={onSelect} />
-        </motion.div>
+          </div>
+          </BorderGlow>
+        </AnimatedContent>
       </div>
       <a className="scroll-cue" href="#features"><span className="scroll-line" />Scroll to explore</a>
     </section>
@@ -252,33 +317,168 @@ function Hero({ state, snapshot, quotes, selected, onSelect }: {
 const TRACK1_POST = "https://x.com/BNBChainDevs/status/2074807300632858776";
 
 function WinnerShowcase() {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const reduce = useReducedMotion();
+
+  useEffect(() => {
+    const root = mountRef.current;
+    if (!root) return;
+    let cancelled = false;
+    const render = () => {
+      const twttr = (window as Window & { twttr?: { widgets?: { load: (el?: HTMLElement) => void } } }).twttr;
+      if (!cancelled) twttr?.widgets?.load(root);
+    };
+    const existing = document.querySelector<HTMLScriptElement>('script[data-na-twitter="1"]');
+    if ((window as Window & { twttr?: { widgets?: unknown } }).twttr?.widgets) {
+      render();
+      return () => { cancelled = true; };
+    }
+    if (existing) {
+      existing.addEventListener("load", render);
+      return () => {
+        cancelled = true;
+        existing.removeEventListener("load", render);
+      };
+    }
+    const script = document.createElement("script");
+    script.src = "https://platform.twitter.com/widgets.js";
+    script.async = true;
+    script.dataset.naTwitter = "1";
+    script.addEventListener("load", render);
+    document.body.appendChild(script);
+    return () => {
+      cancelled = true;
+      script.removeEventListener("load", render);
+    };
+  }, []);
+
   return (
     <section className="winner-band" id="winner" aria-labelledby="winner-title">
       <div className="winner-inner">
-        <div className="winner-copy">
-          <p className="eyebrow">BNB Hack · Track 1</p>
-          <h2 id="winner-title">Neural Alpha placed <em>first.</em></h2>
-          <p>The ranking is the post from BNB Chain Developers. Neural Alpha by ClipX is first on Track 1.</p>
-        </div>
-        <div className="winner-embed">
-          <iframe
-            title="BNB Chain Developers on X: Track 1 Autonomous Trading Agents"
-            src="https://platform.twitter.com/embed/Tweet.html?id=2074807300632858776&theme=dark&dnt=true"
-            loading="lazy"
-            referrerPolicy="strict-origin-when-cross-origin"
-          />
+        <motion.div
+          className="winner-copy"
+          initial={reduce ? false : { opacity: 0, y: 24 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, amount: .35 }}
+          transition={{ duration: .72, ease: [.22, .7, .3, 1] }}
+        >
+          <h2 id="winner-title" aria-label="BNBCHAIN Hackathon Champion">
+            <ParticleText
+              text="BNBCHAIN"
+              particleSize={3.6}
+              density={4}
+              color="#EAB308"
+              highlightColor="#ffed22"
+              scatter={190}
+              gatherDuration={1200}
+              stagger={330}
+              pointerRepel={42}
+              repelRadius={40}
+              idleDrift={0.7}
+              trigger="mount"
+              fontSize="clamp(3.5rem, 13vw, 9rem)"
+              fontWeight={800}
+              fontFamily="inherit"
+              glow
+            />
+            <RotatingText
+              texts={["Hackathon Champion", "First place"]}
+              mainClassName="winner-champion px-2 md:px-3 bg-cyan-300 text-black overflow-hidden py-1 md:py-2 justify-center rounded-lg"
+              staggerFrom="last"
+              initial={{ y: "100%" }}
+              animate={{ y: 0 }}
+              exit={{ y: "-120%" }}
+              staggerDuration={0.025}
+              splitLevelClassName="winner-rotate-split overflow-hidden pb-1"
+              transition={{ type: "spring", damping: 30, stiffness: 400 }}
+              rotationInterval={2000}
+              splitBy="characters"
+              auto={!reduce}
+              loop
+            />
+          </h2>
+          <p className="winner-summary">Neural Alpha by ClipX took first place in the autonomous trading agents track.</p>
+        </motion.div>
+        <AnimatedContent {...cardEntrance}>
+        <BorderGlow {...edgeGlow} borderRadius={20}>
+        <div className="winner-embed-wrap">
+        <div className="winner-embed" ref={mountRef}>
+          <blockquote className="twitter-tweet" data-theme="dark" data-dnt="true" data-conversation="none">
+            <a href={TRACK1_POST}>Track 1: Autonomous Trading Agents, from BNB Chain Developers</a>
+          </blockquote>
           <a className="winner-source" href={TRACK1_POST} target="_blank" rel="noreferrer">Open this post on X <span aria-hidden="true">↗</span></a>
         </div>
+        </div>
+        </BorderGlow>
+        </AnimatedContent>
       </div>
     </section>
   );
 }
 
-function FeatureHeading({ feature }: { feature: Feature }) {
+const morphEase = [0.25, 0.46, 0.45, 0.94] as const;
+
+function MorphingLine({ words, delay = 0, slide = false }: { words: string[]; delay?: number; slide?: boolean }) {
+  const reduce = useReducedMotion();
+  const [index, setIndex] = useState(0);
+
+  useEffect(() => {
+    if (reduce || words.length < 2) return;
+    let timer = window.setTimeout(function tick() {
+      setIndex((prev) => (prev + 1) % words.length);
+      timer = window.setTimeout(tick, 3200);
+    }, 2800 + delay);
+    return () => window.clearTimeout(timer);
+  }, [reduce, words, delay]);
+
+  const word = words[reduce ? 0 : index] ?? words[0];
+  return (
+    <span className="feature-morph" aria-hidden="true">
+      <AnimatePresence mode={slide ? "sync" : "wait"} initial={false}>
+        <motion.span
+          key={word}
+          className="feature-morph-word"
+          initial={reduce ? false : slide ? { y: "110%" } : { opacity: 0, filter: "blur(10px)", scale: 0.8, rotateX: -90 }}
+          animate={slide ? { y: "0%" } : { opacity: 1, filter: "blur(0px)", scale: 1, rotateX: 0 }}
+          exit={reduce ? undefined : slide ? { y: "-110%" } : { opacity: 0, filter: "blur(10px)", scale: 1.2, rotateX: 90 }}
+          transition={{ duration: reduce ? 0 : slide ? 0.45 : 0.8, ease: morphEase }}
+          style={slide ? undefined : { transformStyle: "preserve-3d" }}
+        >
+          {word}
+        </motion.span>
+      </AnimatePresence>
+    </span>
+  );
+}
+
+function FeatureHeading({ feature, index }: { feature: Feature; index: number }) {
+  const reduce = useReducedMotion();
   return (
     <div className="feature-heading">
-      <div><p className="feature-label">{feature.label}</p><h2>{feature.title} <em>{feature.accent}</em></h2></div>
-      <p className="feature-description">{feature.description}</p>
+      <div>
+        <h2 className={feature.paired ? "feature-pair" : undefined} aria-label={feature.paired ? `${feature.title}: ${feature.phrases.join(", ")}` : `${feature.title} ${feature.phrases[0]}`}>
+          <motion.span
+            className="feature-title-line"
+            initial={reduce || feature.paired ? false : { opacity: 0, filter: "blur(10px)", scale: 0.8, rotateX: -90 }}
+            whileInView={{ opacity: 1, filter: "blur(0px)", scale: 1, rotateX: 0 }}
+            viewport={{ once: true, amount: 0.6 }}
+            transition={{ duration: reduce || feature.paired ? 0 : 0.8, ease: morphEase }}
+            style={feature.paired ? undefined : { transformStyle: "preserve-3d" }}
+          >
+            {feature.title}
+          </motion.span>
+          <MorphingLine words={feature.phrases} delay={index * 280} slide={feature.paired} />
+        </h2>
+      </div>
+      <motion.p
+        className="feature-description"
+        initial={reduce ? false : { opacity: 0, y: 10 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, amount: 0.7 }}
+        transition={{ duration: reduce ? 0 : 0.55, delay: reduce ? 0 : 0.16, ease: morphEase }}
+      >
+        {feature.description}
+      </motion.p>
     </div>
   );
 }
@@ -338,11 +538,17 @@ function PortfolioFeature({ state, snapshot, quotes }: { state: AgentState | nul
   const focusPosition = sorted.find((position) => position.symbol === focus);
   return (
     <div className="feature-grid portfolio-grid">
+      <AnimatedContent {...cardEntrance}>
+      <BorderGlow {...edgeGlow} borderRadius={24}>
       <div className="surface-card portfolio-main">
         <div className="panel-topline"><div><span className="eyebrow">Portfolio performance</span><p>Value over time</p></div><span className="subtle-value">{state ? `${state.positions.length} holdings` : "Waiting for data"}</span></div>
         <InteractiveAreaChart snapshot={snapshot} range={range} onRange={setRange} />
         <div className="allocation-foot"><span>Allocation focus</span><strong>{focusPosition?.symbol ?? "All holdings"}</strong><span>{focusPosition ? percent(focusPosition.weight, 1) : "Select a holding"}</span></div>
       </div>
+      </BorderGlow>
+      </AnimatedContent>
+      <AnimatedContent {...cardEntrance} delay={0.12}>
+      <BorderGlow {...edgeGlow} borderRadius={24}>
       <div className="surface-card positions-card">
         <div className="panel-topline"><div><span className="eyebrow">Open positions</span><p>Current exposure</p></div><strong className="position-count">{positions.length.toString().padStart(2, "0")}</strong></div>
         <div className="position-list">
@@ -359,6 +565,8 @@ function PortfolioFeature({ state, snapshot, quotes }: { state: AgentState | nul
         </div>
         <div className="positions-total"><span>Unrealized P&amp;L</span><strong className={(state?.unrealizedPnl ?? 0) < 0 ? "negative" : "positive"}>{money(state?.unrealizedPnl)}</strong></div>
       </div>
+      </BorderGlow>
+      </AnimatedContent>
     </div>
   );
 }
@@ -371,6 +579,7 @@ function RiskFeature({ state }: { state: AgentState | null }) {
   const stepIndex = state?.status === "running" ? (phase.includes("risk") ? 2 : phase.includes("trade") || phase.includes("route") ? 3 : phase.includes("rank") ? 1 : 0) : -1;
   return (
     <div className="feature-grid risk-grid">
+      <BorderGlow {...edgeGlow} borderRadius={24}>
       <div className="surface-card cycle-card">
         <div className="panel-topline"><div><span className="eyebrow">Decision cycle</span><p>From scan to execution</p></div><span className={`agent-state ${state?.status === "running" ? "running" : "paused"}`}><i />{state?.status === "running" ? "Running" : "Standby"}</span></div>
         <div className="cycle-track">
@@ -381,6 +590,8 @@ function RiskFeature({ state }: { state: AgentState | null }) {
         <div className="cycle-note"><Sparkles size={16} /><div><strong>{auto?.headline ?? "Market analysis is ready when the agent connects."}</strong><span>{auto?.sessionLabel ?? "Waiting for session"}{auto?.nextCycleInSec != null ? ` · next scan in ${auto.nextCycleInSec}s` : ""}</span></div></div>
         <div className="cycle-controls"><button type="button" className={view === "cycle" ? "active" : ""} onClick={() => setView("cycle")}>Decision flow</button><button type="button" className={view === "guide" ? "active" : ""} onClick={() => setView("guide")}>Risk guide</button></div>
       </div>
+      </BorderGlow>
+      <BorderGlow {...edgeGlow} borderRadius={24}>
       <div className="surface-card risk-detail">
         {view === "cycle" ? <>
           <div className="panel-topline"><div><span className="eyebrow">Risk review</span><p>Checks that gate a route</p></div><ShieldCheck size={18} /></div>
@@ -400,6 +611,7 @@ function RiskFeature({ state }: { state: AgentState | null }) {
           </div>
         </>}
       </div>
+      </BorderGlow>
     </div>
   );
 }
@@ -420,6 +632,8 @@ function SignalFeature({ state, quotes }: { state: AgentState | null; quotes: Li
   const activeQuote = quotes.find((quote) => quote.symbol === active?.symbol);
   return (
     <div className="feature-grid signal-grid">
+      <AnimatedContent {...cardEntrance}>
+      <BorderGlow {...edgeGlow} borderRadius={24}>
       <div className="surface-card signal-browser">
         <div className="signal-tools"><div className="signal-filters">{(["all", "buy", "hold", "sell"] as const).map((item) => <button type="button" key={item} onClick={() => setFilter(item)} className={filter === item ? "active" : ""}>{item === "all" ? "All signals" : `${item[0].toUpperCase()}${item.slice(1)}s`}<span>{item === "all" ? signals.length : signals.filter((signal) => signal.action === item).length}</span></button>)}</div><label className="signal-search"><Search size={15} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Find a ticker" aria-label="Find a ticker" /></label></div>
         <div className="signal-list">
@@ -438,6 +652,10 @@ function SignalFeature({ state, quotes }: { state: AgentState | null; quotes: Li
         </div>
         <div className="signal-list-foot"><span>Updated {elapsed(state?.lastSignalRefreshAt)}</span><span>{state?.signalRefreshSec ?? 10}s refresh</span></div>
       </div>
+      </BorderGlow>
+      </AnimatedContent>
+      <AnimatedContent {...cardEntrance} delay={0.12}>
+      <BorderGlow {...edgeGlow} borderRadius={24}>
       <div className="surface-card signal-detail">
         {active ? <>
           <div className="signal-detail-title"><TokenLogo symbol={active.symbol} src={active.icon ?? activeQuote?.icon} large /><div><span className="eyebrow">Selected bStock</span><h3>{active.symbol}</h3></div><span className={`signal-action ${active.action}`}>{active.action}</span></div>
@@ -457,6 +675,8 @@ function SignalFeature({ state, quotes }: { state: AgentState | null; quotes: Li
           />
         </> : <div className="empty-state">Signal details appear when market data is available.</div>}
       </div>
+      </BorderGlow>
+      </AnimatedContent>
     </div>
   );
 }
@@ -529,19 +749,27 @@ function WalletMiniChart() {
 function WalletFeature({ quotes }: { quotes: LiveQuote[] }) {
   const holdings = sampleWalletHoldings.map((holding) => ({ ...holding, icon: quotes.find((quote) => quote.symbol === holding.symbol)?.icon }));
   return (
+    <AnimatedContent {...cardEntrance}>
+    <BorderGlow {...edgeGlow} borderRadius={24}>
     <div className="feature-grid wallet-grid">
+      <BorderGlow {...edgeGlow} borderRadius={24}>
       <div className="surface-card wallet-account">
         <div className="panel-topline"><div><span className="eyebrow">Agentic wallet</span><p>Example account overview</p></div><Wallet size={18} /></div>
         <div className="balance-cards"><div><span>Available to trade</span><strong>$825.00</strong><small>USDT</small></div><div><span>Gas reserve</span><strong>0.0800</strong><small>BNB</small></div></div>
         <WalletMiniChart />
         <div className="account-bottom"><span>Sample account</span><span>Illustrative data</span></div>
       </div>
+      </BorderGlow>
+      <BorderGlow {...edgeGlow} borderRadius={24}>
       <div className="surface-card wallet-side">
         <div className="panel-topline"><div><span className="eyebrow">Token holdings</span><p>Example positions</p></div><span className="eyebrow">Sample view</span></div>
         <div className="holding-list">{holdings.map((holding) => <div className="holding-row" key={holding.symbol}><TokenLogo symbol={holding.symbol} src={holding.icon} /><span><strong>{holding.symbol}</strong><small>{quantity(holding.remainQty)}</small></span><span className={holding.percentChange24h < 0 ? "negative" : "positive"}>{percent(holding.percentChange24h, 1)}</span><strong>{money(holding.valueUsd)}</strong></div>)}{!holdings.length && <p className="empty-state">Token holdings will appear here.</p>}</div>
         <div className="wallet-holdings-total"><span>Example holdings value</span><strong>$1,225.84</strong></div>
       </div>
+      </BorderGlow>
     </div>
+    </BorderGlow>
+    </AnimatedContent>
   );
 }
 
@@ -560,10 +788,18 @@ function FeatureChapter({ feature, index, children }: { feature: Feature; index:
     <section className={`feature-chapter feature-${feature.id}`} id={index === 0 ? "features" : feature.id} ref={ref}>
       <motion.div className="feature-brain-layer" style={reduce ? undefined : { y: brainY, scale: brainScale, opacity: brainOpacity }} aria-hidden="true"><NeuralBackdrop /></motion.div>
       <motion.div className="feature-inner" style={reduce ? undefined : { scale, y, opacity }}>
-        <motion.div className="feature-heading-reveal" initial={reduce ? false : { opacity: 0, y: 20, filter: "blur(5px)" }} whileInView={{ opacity: 1, y: 0, filter: "blur(0px)" }} viewport={{ once: true, amount: .16 }} transition={{ duration: .78, ease: [.2, .72, .22, 1] }}>
-          <FeatureHeading feature={feature} />
+        <motion.div className="feature-heading-reveal" initial={reduce ? false : { opacity: 0 }} whileInView={{ opacity: 1 }} viewport={{ once: true, amount: .16 }} transition={{ duration: .35, ease: [.2, .72, .22, 1] }}>
+          <FeatureHeading feature={feature} index={index} />
         </motion.div>
-        <motion.div className="feature-content" initial={reduce ? false : { opacity: 0, y: 24, scale: .99, filter: "blur(3px)" }} whileInView={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }} viewport={{ once: true, amount: .1 }} transition={{ duration: .82, delay: .08, ease: [.2, .72, .22, 1] }}>{children}</motion.div>
+        {feature.id === "ledger" ? (
+          <AnimatedContent {...cardEntrance}>
+            <BorderGlow {...edgeGlow} borderRadius={24}>
+              <div className="feature-content">{children}</div>
+            </BorderGlow>
+          </AnimatedContent>
+        ) : (
+          <motion.div className="feature-content" initial={reduce ? false : { opacity: 0, y: 24, scale: .99, filter: "blur(3px)" }} whileInView={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }} viewport={{ once: true, amount: .1 }} transition={{ duration: .82, delay: .08, ease: [.2, .72, .22, 1] }}>{children}</motion.div>
+        )}
       </motion.div>
     </section>
   );
@@ -580,7 +816,7 @@ export function SystemExperience() {
   return (
     <main className="system-page">
       <motion.div className="page-progress" style={{ scaleX: progress }} />
-      <header className="system-header"><a className="system-brand" href="/" aria-label="Neural Alpha dashboard"><BrandLogo priority /></a><nav aria-label="Page navigation"><a href="#features">About</a><a href="#winner">1st place</a><a href="/" className="header-cta">Dashboard <span>↗</span></a></nav></header>
+      <header className="system-header"><a className="system-brand" href="/" aria-label="Neural Alpha home"><BrandLogo priority /></a><nav aria-label="Page navigation"><a href="/">Home</a><a href="/" className="header-cta">Dashboard <span>↗</span></a></nav></header>
       <Hero state={state} snapshot={snapshot} quotes={quotes} selected={selected} onSelect={setSelected} />
       <WinnerShowcase />
       <FeatureChapter feature={features[0]} index={0}><PortfolioFeature state={state} snapshot={snapshot} quotes={quotes} /></FeatureChapter>
