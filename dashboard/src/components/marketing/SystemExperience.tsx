@@ -249,13 +249,7 @@ function Hero({ state, snapshot, quotes, selected, onSelect }: {
   );
 }
 
-const track1Places = [
-  { place: "1st", name: "Neural Alpha", by: "ClipX" },
-  { place: "2nd", name: "Genesis" },
-  { place: "3rd", name: "Gridora" },
-  { place: "4th", name: "Guarded Alpha" },
-  { place: "5th", name: "Superagente007" },
-];
+const TRACK1_POST = "https://x.com/BNBChainDevs/status/2074807300632858776";
 
 function WinnerShowcase() {
   return (
@@ -264,18 +258,17 @@ function WinnerShowcase() {
         <div className="winner-copy">
           <p className="eyebrow">BNB Hack · Track 1</p>
           <h2 id="winner-title">Neural Alpha placed <em>first.</em></h2>
-          <p>BNB Chain Developers ranked the autonomous trading agents. Five addresses shared a $24,000 pool. Neural Alpha by ClipX took the top spot.</p>
-          <a className="winner-source" href="https://x.com/BNBChainDevs/status/2074807300632858776" target="_blank" rel="noreferrer">Announcement on X <span aria-hidden="true">↗</span></a>
+          <p>The ranking is the post from BNB Chain Developers. Neural Alpha by ClipX is first on Track 1.</p>
         </div>
-        <ol className="winner-board">
-          {track1Places.map((entry) => (
-            <li key={entry.place} className={entry.place === "1st" ? "is-first" : undefined}>
-              <span>{entry.place}</span>
-              <strong>{entry.name}</strong>
-              {entry.by ? <small>by {entry.by}</small> : null}
-            </li>
-          ))}
-        </ol>
+        <div className="winner-embed">
+          <iframe
+            title="BNB Chain Developers on X: Track 1 Autonomous Trading Agents"
+            src="https://platform.twitter.com/embed/Tweet.html?id=2074807300632858776&theme=dark&dnt=true"
+            loading="lazy"
+            referrerPolicy="strict-origin-when-cross-origin"
+          />
+          <a className="winner-source" href={TRACK1_POST} target="_blank" rel="noreferrer">Open this post on X <span aria-hidden="true">↗</span></a>
+        </div>
       </div>
     </section>
   );
