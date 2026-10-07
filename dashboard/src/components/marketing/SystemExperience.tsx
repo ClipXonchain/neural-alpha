@@ -361,7 +361,7 @@ function GatewayFlow({ reduce }: { reduce: boolean }) {
 
       for (const side of [-1, 1] as const) {
         for (let index = 0; index < perSide; index++) {
-          const t = perSide === 1 ? 0.5 : index / (perSide - 1);
+          const t = index / (perSide - 1);
           const y0 = height * (0.03 + t * 0.94);
           const x0 = side < 0 ? width * -0.03 : width * 1.03;
           const x1 = side < 0 ? focalX - width * 0.48 : focalX + width * 0.48;
