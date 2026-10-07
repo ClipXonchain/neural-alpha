@@ -46,16 +46,7 @@ type Particle = {
   rotate: number;
 };
 
-type ParticleStyle = CSSProperties & {
-  "--start-x": string;
-  "--start-y": string;
-  "--end-x": string;
-  "--end-y": string;
-  "--time": string;
-  "--scale": string;
-  "--color": string;
-  "--rotate": string;
-};
+type CssVarStyle = CSSProperties & Record<`--${string}`, string | number>;
 
 function noise(amount = 1) {
   return amount / 2 - Math.random() * amount;
@@ -255,28 +246,25 @@ export default function GooeyNav({
             }
           />
         )}
-        {particles.map((particle) => (
-          <span
-            key={particle.id}
-            className="gooey-particle"
-            style={
-              {
-                left: particle.cx,
-                top: particle.cy,
-                "--start-x": `${particle.startX}px`,
-                "--start-y": `${particle.startY}px`,
-                "--end-x": `${particle.endX}px`,
-                "--end-y": `${particle.endY}px`,
-                "--time": `${particle.time}ms`,
-                "--scale": String(particle.scale),
-                "--color": particle.color,
-                "--rotate": `${particle.rotate}deg`,
-              } satisfies ParticleStyle
-            }
-          >
-            <span className="gooey-particle-point" />
-          </span>
-        ))}
+        {particles.map((particle) => {
+          const style: CssVarStyle = {
+            left: particle.cx,
+            top: particle.cy,
+            "--start-x": `${particle.startX}px`,
+            "--start-y": `${particle.startY}px`,
+            "--end-x": `${particle.endX}px`,
+            "--end-y": `${particle.endY}px`,
+            "--time": `${particle.time}ms`,
+            "--scale": String(particle.scale),
+            "--color": particle.color,
+            "--rotate": `${particle.rotate}deg`,
+          };
+          return (
+            <span key={particle.id} className="gooey-particle" style={style}>
+              <span className="gooey-particle-point" />
+            </span>
+          );
+        })}
       </div>
       <ul className="gooey-nav-list">
         {items.map((item, index) => (

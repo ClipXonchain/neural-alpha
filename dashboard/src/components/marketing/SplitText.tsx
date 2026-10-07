@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { motion, useReducedMotion } from "framer-motion";
 
 type SplitOffset = { opacity?: number; y?: number | string; x?: number | string };
@@ -116,6 +116,9 @@ export default function SplitText({
 }: SplitTextProps) {
   const reduce = useReducedMotion() === true;
   const rootRef = useRef<HTMLElement | null>(null);
+  const setRoot = useCallback((node: HTMLElement | null) => {
+    rootRef.current = node;
+  }, []);
   const emphasisRef = useRef<HTMLElement | null>(null);
   const finished = useRef(false);
   const [inView, setInView] = useState(false);
@@ -219,10 +222,10 @@ export default function SplitText({
     </>
   );
   const style: CSSProperties = { textAlign, position: "relative" };
-  if (tag === "span") return <span ref={rootRef} className={className} style={style}>{body}</span>;
-  if (tag === "h1") return <h1 ref={rootRef} className={className} style={style}>{body}</h1>;
-  if (tag === "h2") return <h2 ref={rootRef} className={className} style={style}>{body}</h2>;
-  if (tag === "h3") return <h3 ref={rootRef} className={className} style={style}>{body}</h3>;
-  if (tag === "div") return <div ref={rootRef} className={className} style={style}>{body}</div>;
-  return <p ref={rootRef} className={className} style={style}>{body}</p>;
+  if (tag === "span") return <span ref={setRoot} className={className} style={style}>{body}</span>;
+  if (tag === "h1") return <h1 ref={setRoot} className={className} style={style}>{body}</h1>;
+  if (tag === "h2") return <h2 ref={setRoot} className={className} style={style}>{body}</h2>;
+  if (tag === "h3") return <h3 ref={setRoot} className={className} style={style}>{body}</h3>;
+  if (tag === "div") return <div ref={setRoot} className={className} style={style}>{body}</div>;
+  return <p ref={setRoot} className={className} style={style}>{body}</p>;
 }

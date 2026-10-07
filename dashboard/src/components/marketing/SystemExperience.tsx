@@ -25,6 +25,12 @@ import GooeyNav from "./GooeyNav";
 import BorderGlow from "./BorderGlow";
 import "./system.css";
 
+type CssVarStyle = CSSProperties & Record<`--${string}`, string | number>;
+
+function cssVars(style: CssVarStyle): CssVarStyle {
+  return style;
+}
+
 const edgeGlow = {
   edgeSensitivity: 30,
   glowColor: "40 80 80",
@@ -142,7 +148,8 @@ function TokenLogo({ symbol, src, large = false }: { symbol: string; src?: strin
   const [failed, setFailed] = useState(false);
   const short = symbol.replace(/[^A-Z0-9]/gi, "").replace(/B$/i, "").slice(0, 1) || "•";
   if (src && !failed) return <img className={`token-mark${large ? " large" : ""}`} src={src} alt="" onError={() => setFailed(true)} loading="lazy" referrerPolicy="no-referrer" />;
-  return <span className={`token-mark fallback${large ? " large" : ""}`} style={{ "--token-tone": tokenTone(symbol) } as CSSProperties} aria-hidden="true">{short}</span>;
+  const tone: CssVarStyle = { "--token-tone": tokenTone(symbol) };
+  return <span className={`token-mark fallback${large ? " large" : ""}`} style={tone} aria-hidden="true">{short}</span>;
 }
 function BrandLogo({ className = "", priority = false }: { className?: string; priority?: boolean }) {
   return (
@@ -228,7 +235,7 @@ function TickerPulse({ quotes, selected, onSelect }: { quotes: LiveQuote[]; sele
           <button className={`pulse-column ${selected === quote.symbol ? "selected" : ""}`} type="button" key={quote.symbol} onClick={() => onSelect(quote.symbol)} aria-pressed={selected === quote.symbol}>
             <span className={`pulse-change ${change < 0 ? "down" : "up"}`}>{percent(change)}</span>
             <TokenLogo symbol={quote.symbol} src={quote.icon} />
-            <span className={`pulse-bar ${change < 0 ? "down" : ""}`} style={{ "--bar-height": `${height}px`, "--bar-tone": tokenTone(quote.symbol), "--bar-order": index } as CSSProperties} />
+            <span className={`pulse-bar ${change < 0 ? "down" : ""}`} style={cssVars({ "--bar-height": `${height}px`, "--bar-tone": tokenTone(quote.symbol), "--bar-order": index })} />
             <span className="pulse-symbol">{quote.symbol}</span>
           </button>
         );
@@ -557,7 +564,7 @@ function PortfolioFeature({ state, snapshot, quotes }: { state: AgentState | nul
             return <button className={`position-item ${focus === position.symbol ? "active" : ""}`} key={position.symbol} onClick={() => setFocus(focus === position.symbol ? null : position.symbol)} type="button">
               <TokenLogo symbol={position.symbol} src={quote?.icon} />
               <span className="position-name"><strong>{position.symbol}</strong><small>{quantity(position.amount)} shares</small></span>
-              <span className="position-meter"><i style={{ "--weight": `${Math.max(5, Math.min(position.weight, 100))}%`, "--tone": tokenTone(position.symbol) } as CSSProperties} /><small>{percent(position.weight, 1)} of book</small></span>
+              <span className="position-meter"><i style={cssVars({ "--weight": `${Math.max(5, Math.min(position.weight, 100))}%`, "--tone": tokenTone(position.symbol) })} /><small>{percent(position.weight, 1)} of book</small></span>
               <span className={`position-pnl ${position.pnl < 0 ? "negative" : "positive"}`}>{money(position.pnl)}<small>{percent(position.pnlPct)}</small></span>
             </button>;
           })}

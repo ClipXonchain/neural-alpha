@@ -19,6 +19,8 @@ export type BorderGlowProps = {
   fillOpacity?: number;
 };
 
+type CssVarStyle = CSSProperties & Record<`--${string}`, string | number>;
+
 function parseHSL(hslStr: string): { h: number; s: number; l: number } {
   const match = hslStr.match(/([\d.]+)\s*([\d.]+)%?\s*([\d.]+)%?/);
   if (!match) return { h: 40, s: 80, l: 80 };
@@ -180,6 +182,16 @@ export default function BorderGlow({
   }, [animated, reduce]);
 
   const classes = ["border-glow-card", reduce ? "border-glow-static" : "", className].filter(Boolean).join(" ");
+  const style: CssVarStyle = {
+    "--card-bg": backgroundColor,
+    "--edge-sensitivity": edgeSensitivity,
+    "--border-radius": `${borderRadius}px`,
+    "--glow-padding": `${glowRadius}px`,
+    "--cone-spread": coneSpread,
+    "--fill-opacity": fillOpacity,
+    ...buildGlowVars(glowColor, glowIntensity),
+    ...buildGradientVars(colors),
+  };
 
   return (
     <div
@@ -189,16 +201,7 @@ export default function BorderGlow({
       onPointerDown={handlePointer}
       onPointerLeave={handlePointerLeave}
       className={classes}
-      style={{
-        "--card-bg": backgroundColor,
-        "--edge-sensitivity": edgeSensitivity,
-        "--border-radius": `${borderRadius}px`,
-        "--glow-padding": `${glowRadius}px`,
-        "--cone-spread": coneSpread,
-        "--fill-opacity": fillOpacity,
-        ...buildGlowVars(glowColor, glowIntensity),
-        ...buildGradientVars(colors),
-      } as CSSProperties}
+      style={style}
     >
       <span className="edge-light" aria-hidden="true" />
       <span className="edge-cone" aria-hidden="true">
