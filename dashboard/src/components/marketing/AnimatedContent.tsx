@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, type CSSProperties, type ReactNode } from "react";
+import { useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { motion, useInView, useReducedMotion } from "framer-motion";
 
 export type AnimatedContentProps = {
@@ -48,7 +48,9 @@ export default function AnimatedContent({
   const ref = useRef<HTMLDivElement>(null);
   const reduce = useReducedMotion() === true;
   const inView = useInView(ref, { once: true, amount: threshold });
-  const classes = ["animated-content", className].filter(Boolean).join(" ");
+  const [sharp, setSharp] = useState(false);
+  const done = reduce || sharp;
+  const classes = ["animated-content", done ? "paint-sharp" : "", className].filter(Boolean).join(" ");
 
   if (reduce) {
     return (
@@ -59,22 +61,28 @@ export default function AnimatedContent({
   }
 
   const offset = reverse ? -distance : distance;
-  const hidden = {
-    x: direction === "horizontal" ? offset : 0,
-    y: direction === "vertical" ? offset : 0,
+  const hidden: { opacity: number; x?: number; y?: number; scale?: number } = {
     opacity: animateOpacity ? initialOpacity : 1,
-    scale,
   };
-  const shown = { x: 0, y: 0, opacity: 1, scale: 1 };
+  if (direction === "horizontal") hidden.x = offset;
+  else hidden.y = offset;
+  if (scale !== 1) hidden.scale = scale;
+  const shown = done ? { opacity: 1 } : { x: 0, y: 0, opacity: 1, ...(scale !== 1 ? { scale: 1 } : {}) };
 
   return (
     <motion.div
       ref={ref}
       className={classes}
       style={layoutStyle}
-      initial={hidden}
+      initial={done ? false : hidden}
       animate={inView ? shown : hidden}
-      transition={{ duration, delay, ease: resolveEase(ease) }}
+      transition={{ duration: done ? 0 : duration, delay: done ? 0 : delay, ease: resolveEase(ease) }}
+      onAnimationComplete={() => {
+        const node = ref.current;
+        if (!inView) return;
+        if (node && Number(getComputedStyle(node).opacity) < 0.99) return;
+        setSharp(true);
+      }}
     >
       {children}
     </motion.div>

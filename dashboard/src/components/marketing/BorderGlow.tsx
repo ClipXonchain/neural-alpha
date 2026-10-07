@@ -53,41 +53,7 @@ function buildGradientVars(colors: string[]): Record<string, string> {
   return vars;
 }
 
-function easeOutCubic(x: number) {
-  return 1 - Math.pow(1 - x, 3);
-}
-function easeInCubic(x: number) {
-  return x * x * x;
-}
-
-type AnimateOpts = {
-  start?: number;
-  end?: number;
-  duration?: number;
-  delay?: number;
-  ease?: (t: number) => number;
-  onUpdate: (v: number) => void;
-  onEnd?: () => void;
-};
-
-function animateValue({ start = 0, end = 100, duration = 1000, delay = 0, ease = easeOutCubic, onUpdate, onEnd }: AnimateOpts) {
-  let frame = 0;
-  const timeout = window.setTimeout(() => {
-    const t0 = performance.now();
-    const tick = (now: number) => {
-      const t = Math.min((now - t0) / duration, 1);
-      onUpdate(start + (end - start) * ease(t));
-      if (t < 1) frame = requestAnimationFrame(tick);
-      else onEnd?.();
-    };
-    frame = requestAnimationFrame(tick);
-  }, delay);
-
-  return () => {
-    window.clearTimeout(timeout);
-    cancelAnimationFrame(frame);
-  };
-}
+const ORBIT_MS = 7000;
 
 export default function BorderGlow({
   children,
@@ -104,6 +70,7 @@ export default function BorderGlow({
   fillOpacity = 0.5,
 }: BorderGlowProps) {
   const cardRef = useRef<HTMLDivElement>(null);
+  const steerUntil = useRef(0);
   const reduce = useReducedMotion() === true;
 
   const writeFromPoint = useCallback((clientX: number, clientY: number) => {
@@ -128,6 +95,7 @@ export default function BorderGlow({
     }
     card.style.setProperty("--edge-proximity", (edge * 100).toFixed(3));
     card.style.setProperty("--cursor-angle", `${angle.toFixed(3)}deg`);
+    steerUntil.current = performance.now() + 180;
   }, [reduce]);
 
   const handlePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -136,48 +104,32 @@ export default function BorderGlow({
 
   const handlePointerLeave = useCallback(() => {
     if (reduce) return;
-    cardRef.current?.style.setProperty("--edge-proximity", "0");
-  }, [reduce]);
+    steerUntil.current = 0;
+    cardRef.current?.style.setProperty("--edge-proximity", animated ? "100" : "0");
+  }, [animated, reduce]);
 
   useEffect(() => {
     if (!animated || reduce) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
     const card = cardRef.current;
     if (!card) return;
-    const angleStart = 110;
-    const angleEnd = 465;
-    card.classList.add("sweep-active");
-    card.style.setProperty("--cursor-angle", `${angleStart}deg`);
+    card.classList.add("border-glow-orbit");
+    card.style.setProperty("--edge-proximity", "100");
 
-    const stops = [
-      animateValue({ duration: 500, onUpdate: (v) => card.style.setProperty("--edge-proximity", `${v}`) }),
-      animateValue({
-        ease: easeInCubic,
-        duration: 1500,
-        end: 50,
-        onUpdate: (v) => card.style.setProperty("--cursor-angle", `${(angleEnd - angleStart) * (v / 100) + angleStart}deg`),
-      }),
-      animateValue({
-        ease: easeOutCubic,
-        delay: 1500,
-        duration: 2250,
-        start: 50,
-        end: 100,
-        onUpdate: (v) => card.style.setProperty("--cursor-angle", `${(angleEnd - angleStart) * (v / 100) + angleStart}deg`),
-      }),
-      animateValue({
-        ease: easeInCubic,
-        delay: 2500,
-        duration: 1500,
-        start: 100,
-        end: 0,
-        onUpdate: (v) => card.style.setProperty("--edge-proximity", `${v}`),
-        onEnd: () => card.classList.remove("sweep-active"),
-      }),
-    ];
+    let frame = 0;
+    const tick = (now: number) => {
+      if (now >= steerUntil.current) {
+        const angle = ((now % ORBIT_MS) / ORBIT_MS) * 360;
+        card.style.setProperty("--cursor-angle", `${angle.toFixed(3)}deg`);
+        card.style.setProperty("--edge-proximity", "100");
+      }
+      frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
 
     return () => {
-      card.classList.remove("sweep-active");
-      stops.forEach((stop) => stop());
+      cancelAnimationFrame(frame);
+      card.classList.remove("border-glow-orbit");
     };
   }, [animated, reduce]);
 

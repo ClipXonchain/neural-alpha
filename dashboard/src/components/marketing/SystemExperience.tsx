@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type PointerEvent } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState, type CSSProperties, type PointerEvent } from "react";
 import Image from "next/image";
-import { AnimatePresence, motion, useReducedMotion, useScroll, useSpring, useTransform } from "framer-motion";
+import { AnimatePresence, motion, useIsPresent, useReducedMotion, useScroll, useSpring, useTransform } from "framer-motion";
 import { Search, ShieldCheck, Sparkles, Wallet } from "lucide-react";
 import {
   fetchAgentState,
@@ -34,13 +34,24 @@ function cssVars(style: CssVarStyle): CssVarStyle {
 const edgeGlow = {
   edgeSensitivity: 30,
   glowColor: "40 80 80",
-  backgroundColor: "#120F17",
   glowRadius: 40,
   glowIntensity: 1,
   coneSpread: 25,
-  animated: false,
+  animated: true,
   colors: ["#c084fc", "#f472b6", "#38bdf8"],
 };
+
+function usePaintSharp<T extends HTMLElement>() {
+  const reduce = useReducedMotion() === true;
+  const ref = useRef<T>(null);
+  const [sharp, setSharp] = useState(false);
+  const onAnimationComplete = useCallback(() => {
+    const node = ref.current;
+    if (node && Number(getComputedStyle(node).opacity) < 0.99) return;
+    setSharp(true);
+  }, []);
+  return { ref, done: reduce || sharp, onAnimationComplete };
+}
 
 const cardEntrance = {
   distance: 100,
@@ -245,12 +256,225 @@ function TickerPulse({ quotes, selected, onSelect }: { quotes: LiveQuote[]; sele
   );
 }
 
+type GatewayPoint = { x: number; y: number };
+type GatewayStream = {
+  x0: number; y0: number; x1: number; y1: number; x2: number; y2: number; x3: number; y3: number;
+  rgb: string;
+  phase: number;
+  speed: number;
+  pts: GatewayPoint[];
+};
+
+function gatewayPoint(x0: number, y0: number, x1: number, y1: number, x2: number, y2: number, x3: number, y3: number, t: number): GatewayPoint {
+  const m = 1 - t;
+  return {
+    x: m * m * m * x0 + 3 * m * m * t * x1 + 3 * m * t * t * x2 + t * t * t * x3,
+    y: m * m * m * y0 + 3 * m * m * t * y1 + 3 * m * t * t * y2 + t * t * t * y3,
+  };
+}
+
+function resampleGateway(raw: GatewayPoint[], gap: number): GatewayPoint[] {
+  const out: GatewayPoint[] = [raw[0]];
+  let acc = 0;
+  for (let i = 1; i < raw.length; i++) {
+    let x = raw[i - 1].x;
+    let y = raw[i - 1].y;
+    const nx = raw[i].x;
+    const ny = raw[i].y;
+    let dx = nx - x;
+    let dy = ny - y;
+    let dist = Math.hypot(dx, dy);
+    if (dist === 0) continue;
+    while (acc + dist >= gap) {
+      const t = (gap - acc) / dist;
+      x += dx * t;
+      y += dy * t;
+      out.push({ x, y });
+      dx = nx - x;
+      dy = ny - y;
+      dist = Math.hypot(dx, dy);
+      acc = 0;
+      if (dist < 0.01) break;
+    }
+    acc += dist;
+  }
+  return out;
+}
+
+function gatewayTextFade(x: number, width: number, narrow: boolean) {
+  if (narrow) return Math.min(1, Math.max(0, (x / width - 0.68) / 0.18));
+  return Math.min(1, Math.max(0, (x / width - 0.4) / 0.16));
+}
+
+function GatewayFlow({ reduce }: { reduce: boolean }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    const layer = canvas?.parentElement;
+    if (!canvas || !layer) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const field = document.createElement("canvas");
+    const fieldCtx = field.getContext("2d");
+    if (!fieldCtx) return;
+
+    let alive = true;
+    let raf = 0;
+    let originX = 78;
+    let originY = 22;
+    let builtW = -1;
+    let builtH = -1;
+    let builtNarrow = false;
+    let streams: GatewayStream[] = [];
+    const narrowQuery = window.matchMedia("(max-width: 560px)");
+    const reduceQuery = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const still = () => reduce || reduceQuery.matches;
+
+    const readOrigin = () => {
+      const styles = getComputedStyle(layer);
+      const x = parseFloat(styles.getPropertyValue("--gateway-x"));
+      const y = parseFloat(styles.getPropertyValue("--gateway-y"));
+      if (Number.isFinite(x)) originX = x;
+      if (Number.isFinite(y)) originY = y;
+    };
+
+    const buildField = (width: number, height: number, dpr: number, narrow: boolean) => {
+      const focalX = (originX / 100) * width;
+      const focalY = (originY / 100) * height;
+      const perSide = narrow ? 8 : 24;
+      const gap = narrow ? 9 : 5.5;
+      const core = narrow ? 18 : 34;
+      const feather = narrow ? 56 : 108;
+      const next: GatewayStream[] = [];
+      field.width = Math.round(width * dpr);
+      field.height = Math.round(height * dpr);
+      fieldCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      fieldCtx.clearRect(0, 0, width, height);
+
+      const glow = fieldCtx.createRadialGradient(focalX, focalY, 0, focalX, focalY, narrow ? 72 : 150);
+      glow.addColorStop(0, "rgba(61,220,151,0.16)");
+      glow.addColorStop(0.42, "rgba(59,158,255,0.05)");
+      glow.addColorStop(1, "rgba(7,8,9,0)");
+      fieldCtx.fillStyle = glow;
+      fieldCtx.fillRect(0, 0, width, height);
+
+      for (const side of [-1, 1] as const) {
+        for (let index = 0; index < perSide; index++) {
+          const t = perSide === 1 ? 0.5 : index / (perSide - 1);
+          const y0 = height * (0.03 + t * 0.94);
+          const x0 = side < 0 ? width * -0.03 : width * 1.03;
+          const x1 = side < 0 ? focalX - width * 0.48 : focalX + width * 0.48;
+          const y1 = y0;
+          const x2 = focalX + side * (narrow ? 16 : 26);
+          const y2 = focalY + (y0 - focalY) * 0.035;
+          const raw: GatewayPoint[] = [];
+          for (let step = 0; step <= 80; step++) raw.push(gatewayPoint(x0, y0, x1, y1, x2, y2, focalX, focalY, step / 80));
+          const pts = resampleGateway(raw, gap);
+          const rgb = t < 0.5
+            ? (index % 2 === 0 ? "97,176,255" : "59,158,255")
+            : (index % 2 === 0 ? "61,220,151" : "18,178,100");
+          next.push({ x0, y0, x1, y1, x2, y2, x3: focalX, y3: focalY, rgb, phase: index * 0.073 + (side < 0 ? 0.2 : 0), speed: 0.085 + (index % 5) * 0.012, pts });
+
+          pts.forEach((point, dot) => {
+            const dist = Math.hypot(point.x - focalX, point.y - focalY);
+            if (dist < core) return;
+            const into = Math.min(1, (dist - core) / feather);
+            const fade = gatewayTextFade(point.x, width, narrow);
+            const alpha = (narrow ? 0.34 : 0.5) * into * fade * (dot % 5 === 0 ? 1 : 0.72);
+            if (alpha < 0.035 || point.x < -4 || point.x > width + 4) return;
+            const accent = !narrow && Math.abs(t - 0.5) < 0.06 && dot > pts.length * 0.8 && dot % 6 === 0;
+            fieldCtx.fillStyle = accent ? `rgba(234,78,255,${Math.min(0.45, alpha)})` : `rgba(${rgb},${Math.min(0.8, alpha)})`;
+            fieldCtx.beginPath();
+            fieldCtx.arc(point.x, point.y, narrow ? 0.75 : dot % 5 === 0 ? 1.25 : 1, 0, Math.PI * 2);
+            fieldCtx.fill();
+          });
+        }
+      }
+      return next;
+    };
+
+    const paint = (now: number) => {
+      if (!alive) return;
+      const width = layer.clientWidth;
+      const height = layer.clientHeight;
+      const narrow = narrowQuery.matches || width < 640;
+      const dpr = Math.min(window.devicePixelRatio || 1, narrow ? 1.25 : 1.75);
+      if (width > 1 && height > 1 && (width !== builtW || height !== builtH || narrow !== builtNarrow)) {
+        readOrigin();
+        canvas.width = Math.round(width * dpr);
+        canvas.height = Math.round(height * dpr);
+        streams = buildField(width, height, dpr, narrow);
+        builtW = width;
+        builtH = height;
+        builtNarrow = narrow;
+      }
+      if (width < 2 || height < 2) {
+        if (!still()) raf = requestAnimationFrame(paint);
+        return;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      ctx.drawImage(field, 0, 0, width, height);
+      if (!still()) {
+        const focalX = (originX / 100) * width;
+        const focalY = (originY / 100) * height;
+        const core = narrow ? 20 : 36;
+        streams.forEach((stream) => {
+          const sparks = narrow ? 1 : 2;
+          for (let spark = 0; spark < sparks; spark++) {
+            const u = ((now / 1000) * stream.speed + stream.phase + spark * 0.47) % 1;
+            const point = gatewayPoint(stream.x0, stream.y0, stream.x1, stream.y1, stream.x2, stream.y2, stream.x3, stream.y3, u);
+            const dist = Math.hypot(point.x - focalX, point.y - focalY);
+            const fade = gatewayTextFade(point.x, width, narrow);
+            if (dist < core || fade < 0.2 || point.x < 0 || point.x > width) continue;
+            ctx.beginPath();
+            ctx.fillStyle = `rgba(${stream.rgb},${narrow ? 0.16 : 0.22})`;
+            ctx.arc(point.x, point.y, narrow ? 2.2 : 3.1, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.fillStyle = "rgba(244,247,248,0.92)";
+            ctx.arc(point.x, point.y, narrow ? 0.9 : 1.25, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        });
+        raf = requestAnimationFrame(paint);
+      }
+    };
+
+    const kick = () => {
+      builtW = -1;
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(paint);
+    };
+
+    paint(performance.now());
+    const observer = new ResizeObserver(() => {
+      if (still()) kick();
+      else builtW = -1;
+    });
+    observer.observe(layer);
+    narrowQuery.addEventListener("change", kick);
+    reduceQuery.addEventListener("change", kick);
+    return () => {
+      alive = false;
+      cancelAnimationFrame(raf);
+      observer.disconnect();
+      narrowQuery.removeEventListener("change", kick);
+      reduceQuery.removeEventListener("change", kick);
+    };
+  }, [reduce]);
+
+  return <canvas ref={canvasRef} className="gateway-flow" aria-hidden="true" />;
+}
+
 function Hero({ state, snapshot, quotes, selected, onSelect }: {
   state: AgentState | null; snapshot: Track1Snapshot | null;
   quotes: LiveQuote[]; selected: string; onSelect: (symbol: string) => void;
 }) {
   const ref = useRef<HTMLElement>(null);
   const reduce = useReducedMotion();
+  const copy = usePaintSharp<HTMLDivElement>();
   const { scrollYProgress } = useScroll({ target: ref, offset: ["start start", "end start"] });
   const artY = useTransform(scrollYProgress, [0, 1], [0, -58]);
   const artScale = useTransform(scrollYProgress, [0, 1], [1, .95]);
@@ -261,13 +485,13 @@ function Hero({ state, snapshot, quotes, selected, onSelect }: {
       <motion.div className="hero-color-orb orb-blue" style={reduce ? undefined : { y: artY, scale: artScale }} />
       <motion.div className="hero-color-orb orb-peach" style={reduce ? undefined : { y: useTransform(scrollYProgress, [0, 1], [0, -28]) }} />
       <motion.div className="hero-brain-layer" style={reduce ? undefined : { y: artY, scale: artScale }} aria-hidden="true">
+        <GatewayFlow reduce={reduce === true} />
         <div className="hero-brand-brain">
           <Image src="/brand/na-hero-brain.png" alt="" width={723} height={278} sizes="(max-width: 820px) 100vw, 92vw" style={{ width: "100%", height: "auto" }} />
         </div>
-        <NeuralBackdrop />
       </motion.div>
       <div className="hero-layout">
-        <motion.div className="hero-copy" initial={reduce ? false : { opacity: 0, y: 18 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: .65, ease: [.22, .7, .3, 1] }}>
+        <motion.div ref={copy.ref} className={copy.done ? "hero-copy paint-sharp" : "hero-copy"} initial={copy.done ? false : { opacity: 0, y: 18 }} animate={copy.done ? { opacity: 1 } : { opacity: 1, y: 0 }} transition={{ duration: copy.done ? 0 : .65, ease: [.22, .7, .3, 1] }} onAnimationComplete={copy.onAnimationComplete}>
           <h1>
             <TrueFocus
               sentence="Trading logic you can see"
@@ -326,6 +550,7 @@ const TRACK1_POST = "https://x.com/BNBChainDevs/status/2074807300632858776";
 function WinnerShowcase() {
   const mountRef = useRef<HTMLDivElement>(null);
   const reduce = useReducedMotion();
+  const copy = usePaintSharp<HTMLDivElement>();
 
   useEffect(() => {
     const root = mountRef.current;
@@ -363,11 +588,13 @@ function WinnerShowcase() {
     <section className="winner-band" id="winner" aria-labelledby="winner-title">
       <div className="winner-inner">
         <motion.div
-          className="winner-copy"
-          initial={reduce ? false : { opacity: 0, y: 24 }}
-          whileInView={{ opacity: 1, y: 0 }}
+          ref={copy.ref}
+          className={copy.done ? "winner-copy paint-sharp" : "winner-copy"}
+          initial={copy.done ? false : { opacity: 0, y: 24 }}
+          whileInView={copy.done ? { opacity: 1 } : { opacity: 1, y: 0 }}
           viewport={{ once: true, amount: .35 }}
-          transition={{ duration: .72, ease: [.22, .7, .3, 1] }}
+          transition={{ duration: copy.done ? 0 : .72, ease: [.22, .7, .3, 1] }}
+          onAnimationComplete={copy.onAnimationComplete}
         >
           <h2 id="winner-title" aria-label="BNBCHAIN Hackathon Champion">
             <ParticleText
@@ -425,9 +652,33 @@ function WinnerShowcase() {
 
 const morphEase = [0.25, 0.46, 0.45, 0.94] as const;
 
+function MorphWord({ word, slide, reduce, onRest }: { word: string; slide: boolean; reduce: boolean; onRest: () => void }) {
+  const present = useIsPresent();
+  const [resting, setResting] = useState(reduce);
+  const sharp = (reduce || resting) && present;
+  return (
+    <motion.span
+      className={sharp ? "feature-morph-word paint-sharp" : "feature-morph-word"}
+      initial={reduce ? false : slide ? { y: "110%" } : { opacity: 0, filter: "blur(10px)", scale: 0.8, rotateX: -90 }}
+      animate={sharp ? { opacity: 1 } : slide ? { y: "0%" } : { opacity: 1, filter: "blur(0px)", scale: 1, rotateX: 0 }}
+      exit={reduce ? undefined : slide ? { y: "-110%" } : { opacity: 0, filter: "blur(10px)", scale: 1.2, rotateX: 90 }}
+      transition={{ duration: sharp ? 0 : reduce ? 0 : slide ? 0.45 : 0.8, ease: morphEase }}
+      style={!sharp && !reduce && !slide ? { transformStyle: "preserve-3d" } : undefined}
+      onAnimationComplete={() => {
+        if (!present) return;
+        setResting(true);
+        onRest();
+      }}
+    >
+      {word}
+    </motion.span>
+  );
+}
+
 function MorphingLine({ words, delay = 0, slide = false }: { words: string[]; delay?: number; slide?: boolean }) {
-  const reduce = useReducedMotion();
+  const reduce = useReducedMotion() === true;
   const [index, setIndex] = useState(0);
+  const [restWord, setRestWord] = useState<string | null>(reduce ? words[0] ?? null : null);
 
   useEffect(() => {
     if (reduce || words.length < 2) return;
@@ -439,38 +690,33 @@ function MorphingLine({ words, delay = 0, slide = false }: { words: string[]; de
   }, [reduce, words, delay]);
 
   const word = words[reduce ? 0 : index] ?? words[0];
+  const lineResting = reduce || restWord === word;
   return (
-    <span className="feature-morph" aria-hidden="true">
+    <span className="feature-morph" aria-hidden="true" style={!lineResting && !slide ? { perspective: "900px" } : undefined}>
       <AnimatePresence mode={slide ? "sync" : "wait"} initial={false}>
-        <motion.span
-          key={word}
-          className="feature-morph-word"
-          initial={reduce ? false : slide ? { y: "110%" } : { opacity: 0, filter: "blur(10px)", scale: 0.8, rotateX: -90 }}
-          animate={slide ? { y: "0%" } : { opacity: 1, filter: "blur(0px)", scale: 1, rotateX: 0 }}
-          exit={reduce ? undefined : slide ? { y: "-110%" } : { opacity: 0, filter: "blur(10px)", scale: 1.2, rotateX: 90 }}
-          transition={{ duration: reduce ? 0 : slide ? 0.45 : 0.8, ease: morphEase }}
-          style={slide ? undefined : { transformStyle: "preserve-3d" }}
-        >
-          {word}
-        </motion.span>
+        <MorphWord key={word} word={word} slide={slide} reduce={reduce} onRest={() => setRestWord(word)} />
       </AnimatePresence>
     </span>
   );
 }
 
 function FeatureHeading({ feature, index }: { feature: Feature; index: number }) {
-  const reduce = useReducedMotion();
+  const title = usePaintSharp<HTMLSpanElement>();
+  const description = usePaintSharp<HTMLParagraphElement>();
+  const titleDone = Boolean(feature.paired) || title.done;
   return (
     <div className="feature-heading">
       <div>
-        <h2 className={feature.paired ? "feature-pair" : undefined} aria-label={feature.paired ? `${feature.title}: ${feature.phrases.join(", ")}` : `${feature.title} ${feature.phrases[0]}`}>
+        <h2 className={feature.paired ? "feature-pair" : undefined} style={!titleDone ? { perspective: "900px" } : undefined} aria-label={feature.paired ? `${feature.title}: ${feature.phrases.join(", ")}` : `${feature.title} ${feature.phrases[0]}`}>
           <motion.span
-            className="feature-title-line"
-            initial={reduce || feature.paired ? false : { opacity: 0, filter: "blur(10px)", scale: 0.8, rotateX: -90 }}
-            whileInView={{ opacity: 1, filter: "blur(0px)", scale: 1, rotateX: 0 }}
+            ref={title.ref}
+            className={titleDone ? "feature-title-line paint-sharp" : "feature-title-line"}
+            initial={titleDone ? false : { opacity: 0, filter: "blur(10px)", scale: 0.8, rotateX: -90 }}
+            whileInView={titleDone ? { opacity: 1 } : { opacity: 1, filter: "blur(0px)", scale: 1, rotateX: 0 }}
             viewport={{ once: true, amount: 0.6 }}
-            transition={{ duration: reduce || feature.paired ? 0 : 0.8, ease: morphEase }}
-            style={feature.paired ? undefined : { transformStyle: "preserve-3d" }}
+            transition={{ duration: titleDone ? 0 : 0.8, ease: morphEase }}
+            style={titleDone ? undefined : { transformStyle: "preserve-3d" }}
+            onAnimationComplete={title.onAnimationComplete}
           >
             {feature.title}
           </motion.span>
@@ -478,11 +724,13 @@ function FeatureHeading({ feature, index }: { feature: Feature; index: number })
         </h2>
       </div>
       <motion.p
-        className="feature-description"
-        initial={reduce ? false : { opacity: 0, y: 10 }}
-        whileInView={{ opacity: 1, y: 0 }}
+        ref={description.ref}
+        className={description.done ? "feature-description paint-sharp" : "feature-description"}
+        initial={description.done ? false : { opacity: 0, y: 10 }}
+        whileInView={description.done ? { opacity: 1 } : { opacity: 1, y: 0 }}
         viewport={{ once: true, amount: 0.7 }}
-        transition={{ duration: reduce ? 0 : 0.55, delay: reduce ? 0 : 0.16, ease: morphEase }}
+        transition={{ duration: description.done ? 0 : 0.55, delay: description.done ? 0 : 0.16, ease: morphEase }}
+        onAnimationComplete={description.onAnimationComplete}
       >
         {feature.description}
       </motion.p>
@@ -783,19 +1031,18 @@ function WalletFeature({ quotes }: { quotes: LiveQuote[] }) {
 function FeatureChapter({ feature, index, children }: { feature: Feature; index: number; children: React.ReactNode }) {
   const ref = useRef<HTMLElement>(null);
   const reduce = useReducedMotion();
+  const head = usePaintSharp<HTMLDivElement>();
+  const content = usePaintSharp<HTMLDivElement>();
   const { scrollYProgress } = useScroll({ target: ref, offset: ["start end", "end start"] });
   const progress = useSpring(scrollYProgress, { stiffness: 64, damping: 32, mass: .7 });
-  const scale = useTransform(progress, [0, .42, 1], [.965, 1, .985]);
-  const y = useTransform(progress, [0, .5, 1], [24, 0, -18]);
-  const opacity = useTransform(progress, [0, .16, .84, 1], [.56, 1, 1, .72]);
   const brainY = useTransform(progress, [0, .5, 1], [72, 0, -72]);
   const brainScale = useTransform(progress, [0, .5, 1], [.84, 1.08, .96]);
   const brainOpacity = useTransform(progress, [0, .2, .78, 1], [.12, .32, .32, .14]);
   return (
     <section className={`feature-chapter feature-${feature.id}`} id={index === 0 ? "features" : feature.id} ref={ref}>
       <motion.div className="feature-brain-layer" style={reduce ? undefined : { y: brainY, scale: brainScale, opacity: brainOpacity }} aria-hidden="true"><NeuralBackdrop /></motion.div>
-      <motion.div className="feature-inner" style={reduce ? undefined : { scale, y, opacity }}>
-        <motion.div className="feature-heading-reveal" initial={reduce ? false : { opacity: 0 }} whileInView={{ opacity: 1 }} viewport={{ once: true, amount: .16 }} transition={{ duration: .35, ease: [.2, .72, .22, 1] }}>
+      <div className="feature-inner">
+        <motion.div ref={head.ref} className={head.done ? "feature-heading-reveal paint-sharp" : "feature-heading-reveal"} initial={head.done ? false : { opacity: 0 }} whileInView={{ opacity: 1 }} viewport={{ once: true, amount: .16 }} transition={{ duration: head.done ? 0 : .35, ease: [.2, .72, .22, 1] }} onAnimationComplete={head.onAnimationComplete}>
           <FeatureHeading feature={feature} index={index} />
         </motion.div>
         {feature.id === "ledger" ? (
@@ -805,9 +1052,9 @@ function FeatureChapter({ feature, index, children }: { feature: Feature; index:
             </BorderGlow>
           </AnimatedContent>
         ) : (
-          <motion.div className="feature-content" initial={reduce ? false : { opacity: 0, y: 24, scale: .99, filter: "blur(3px)" }} whileInView={{ opacity: 1, y: 0, scale: 1, filter: "blur(0px)" }} viewport={{ once: true, amount: .1 }} transition={{ duration: .82, delay: .08, ease: [.2, .72, .22, 1] }}>{children}</motion.div>
+          <motion.div ref={content.ref} className={content.done ? "feature-content paint-sharp" : "feature-content"} initial={content.done ? false : { opacity: 0, y: 24 }} whileInView={content.done ? { opacity: 1 } : { opacity: 1, y: 0 }} viewport={{ once: true, amount: .1 }} transition={{ duration: content.done ? 0 : .82, delay: content.done ? 0 : .08, ease: [.2, .72, .22, 1] }} onAnimationComplete={content.onAnimationComplete}>{children}</motion.div>
         )}
-      </motion.div>
+      </div>
     </section>
   );
 }
@@ -823,7 +1070,23 @@ export function SystemExperience() {
   return (
     <main className="system-page">
       <motion.div className="page-progress" style={{ scaleX: progress }} />
-      <header className="system-header"><a className="system-brand" href="/" aria-label="Neural Alpha home"><BrandLogo priority /></a><nav aria-label="Page navigation"><a href="/">Home</a><a href="/" className="header-cta">Dashboard <span>↗</span></a></nav></header>
+      <header className="system-header">
+        <a className="system-brand" href="/" aria-label="Neural Alpha home"><BrandLogo priority /></a>
+        <GooeyNav
+          ariaLabel="Page navigation"
+          items={[
+            { label: "Home", href: "/" },
+            { label: "Dashboard", href: "/" },
+          ]}
+          particleCount={15}
+          particleDistances={[90, 10]}
+          particleR={100}
+          initialActiveIndex={0}
+          animationTime={600}
+          timeVariance={300}
+          colors={[1, 2, 3, 1, 2, 3, 1, 4]}
+        />
+      </header>
       <Hero state={state} snapshot={snapshot} quotes={quotes} selected={selected} onSelect={setSelected} />
       <WinnerShowcase />
       <FeatureChapter feature={features[0]} index={0}><PortfolioFeature state={state} snapshot={snapshot} quotes={quotes} /></FeatureChapter>

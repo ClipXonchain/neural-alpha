@@ -18,6 +18,7 @@ export type GooeyNavProps = {
   animationTime?: number;
   timeVariance?: number;
   colors?: number[];
+  ariaLabel?: string;
 };
 
 const PALETTE = ["#3ddc97", "#12b264", "#61b0ff", "#ea4eff"] as const;
@@ -112,6 +113,7 @@ export default function GooeyNav({
   animationTime = 600,
   timeVariance = 300,
   colors = [1, 2, 3, 1, 2, 3, 1, 4],
+  ariaLabel = "Hero",
 }: GooeyNavProps) {
   const rawId = useId();
   const filterId = `gooey-nav-${rawId.replace(/:/g, "")}`;
@@ -224,7 +226,7 @@ export default function GooeyNav({
   const stretched = (blob?.duration ?? 0) > 0;
 
   return (
-    <nav className="gooey-nav" aria-label="Hero" ref={rootRef}>
+    <nav className="gooey-nav" aria-label={ariaLabel} ref={rootRef}>
       <svg className="gooey-nav-svg" aria-hidden="true" focusable="false">
         <defs>
           <filter id={filterId} x="-120%" y="-450%" width="340%" height="1000%" colorInterpolationFilters="sRGB">

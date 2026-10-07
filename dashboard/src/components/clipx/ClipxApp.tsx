@@ -463,22 +463,6 @@ export function ClipxApp({
           ))}
         </nav>
         <div className="sidebar-bottom">
-          <div className="system-status">
-            <div className="status-row">
-              <i style={connected ? undefined : { background: "#f5b942", boxShadow: "0 0 0 4px rgba(245,185,66,.08)" }} />
-              <strong>System Status</strong>
-              {connected && (
-                <span className={`status-chip ${agentKind(state.autonomous.sessionLabel)}`}>{state.autonomous.sessionLabel}</span>
-              )}
-            </div>
-            <div className="status-line">
-              <span>{connected ? state.mode : "offline"}</span>
-              <div className="connection">
-                <span className="pulse" style={connected ? undefined : { background: "#f5b942", boxShadow: "0 0 0 3px rgba(245,185,66,.08)" }} />
-                <span>{connected ? "Agent connected" : "Reconnecting"}</span>
-              </div>
-            </div>
-          </div>
           <a className="about-link" href="/about">
             <Info size={18} />
             <span>About</span>

@@ -122,6 +122,7 @@ export default function SplitText({
   const emphasisRef = useRef<HTMLElement | null>(null);
   const finished = useRef(false);
   const [inView, setInView] = useState(false);
+  const [sharpKeys, setSharpKeys] = useState<ReadonlySet<string>>(new Set());
   const groups = buildGroups(text, splitType, emphasis);
   const lastIndex = groups.reduce((count, group) => count + group.units.length, 0) - 1;
   const show = reduce || inView;
@@ -177,30 +178,45 @@ export default function SplitText({
     onLetterAnimationComplete();
   };
 
+  const markSharp = (key: string) => {
+    setSharpKeys((current) => {
+      if (current.has(key)) return current;
+      const next = new Set(current);
+      next.add(key);
+      return next;
+    });
+  };
+
   const visual = groups.map((group) => {
-    const words = group.units.map((unit) => (
+    const words = group.units.map((unit) => {
+      const settled = reduce || sharpKeys.has(unit.key);
+      return (
       <span
         key={unit.key}
         className="split-word"
         style={{
           display: "inline-block",
-          overflow: "hidden",
+          overflow: settled ? "visible" : "hidden",
           verticalAlign: "bottom",
           marginRight: unit.gap ? "0.28em" : 0,
         }}
       >
         <motion.span
-          className="split-word-inner"
-          style={{ display: "inline-block" }}
-          initial={reduce ? to : from}
-          animate={show ? to : from}
-          transition={reduce ? { duration: 0 } : { duration, delay: (unit.index * delay) / 1000, ease: resolveEase(ease) }}
-          onAnimationComplete={() => finish(unit.index)}
+          className={settled ? "split-word-inner paint-sharp" : "split-word-inner"}
+          style={{ display: "inline-block", ...(settled ? { opacity: 1 } : {}) }}
+          initial={reduce ? { opacity: 1 } : from}
+          animate={settled ? { opacity: 1 } : show ? to : from}
+          transition={reduce || settled ? { duration: 0 } : { duration, delay: (unit.index * delay) / 1000, ease: resolveEase(ease) }}
+          onAnimationComplete={() => {
+            markSharp(unit.key);
+            finish(unit.index);
+          }}
         >
           {unit.text}
         </motion.span>
       </span>
-    ));
+      );
+    });
     if (group.className) {
       return (
         <em key={group.className} className={group.className} aria-hidden="true" ref={emphasisRef}>

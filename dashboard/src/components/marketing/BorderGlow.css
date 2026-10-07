@@ -18,7 +18,6 @@
   border-radius: var(--border-radius);
   /* The card underneath already paints its surface. This stays clear so charts and embeds are not covered. */
   background: transparent;
-  transform: translate3d(0, 0, 0.01px);
   overflow: visible;
 }
 
@@ -127,8 +126,12 @@
     0 0 50px 2px var(--glow-color-10, hsl(40deg 80% 80% / 10%));
 }
 
-.border-glow-card:not(:hover):not(.border-glow-static):not(.sweep-active) > .edge-cone,
-.border-glow-card:not(:hover):not(.border-glow-static):not(.sweep-active) > .edge-light {
+.border-glow-card.border-glow-orbit {
+  --edge-proximity: 100;
+}
+
+.border-glow-card:not(:hover):not(.border-glow-static):not(.sweep-active):not(.border-glow-orbit) > .edge-cone,
+.border-glow-card:not(:hover):not(.border-glow-static):not(.sweep-active):not(.border-glow-orbit) > .edge-light {
   opacity: 0;
   transition: opacity 0.75s ease-in-out;
 }
