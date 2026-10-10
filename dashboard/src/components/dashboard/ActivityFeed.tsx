@@ -1,362 +1,402 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  Brain,
-  ArrowLeftRight,
-  Radar,
-  ShieldAlert,
-  Info,
-  AlertTriangle,
-  ChevronDown,
-  ChevronRight,
-  Filter,
-  Pause,
-  Play,
-  Sparkles,
-} from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { motion, useReducedMotion } from "framer-motion";
+import { Pause, Play } from "lucide-react";
 import { cn, timeAgo } from "@/lib/utils";
-import type { ActivityItem } from "@/lib/mock-data";
+import type { ActivityItem, Signal, Trade } from "@/lib/mock-data";
 
-type LogLevel = ActivityItem["type"];
+const STAGE_MS = 2000;
 
-const LEVEL_CONFIG: Record<
-  LogLevel,
-  { icon: typeof Brain; label: string; color: string; bgColor: string }
-> = {
-  brain: {
-    icon: Sparkles,
-    label: "THINK",
-    color: "text-violet-300",
-    bgColor: "bg-violet-500/12",
-  },
-  trade: {
-    icon: ArrowLeftRight,
-    label: "TRADE",
-    color: "text-neon",
-    bgColor: "bg-neon/10",
-  },
-  signal: {
-    icon: Radar,
-    label: "SCAN",
-    color: "text-cyan",
-    bgColor: "bg-cyan/10",
-  },
-  risk: {
-    icon: ShieldAlert,
-    label: "RISK",
-    color: "text-warning",
-    bgColor: "bg-warning/10",
-  },
-  info: {
-    icon: Info,
-    label: "INFO",
-    color: "text-text-secondary",
-    bgColor: "bg-surface-overlay",
-  },
-  error: {
-    icon: AlertTriangle,
-    label: "ERROR",
-    color: "text-danger",
-    bgColor: "bg-danger/10",
-  },
+function BrainMark({ paused }: { paused: boolean }) {
+  return (
+    <svg className={cn("brain-mark", paused && "opacity-60")} viewBox="0 0 36 36" aria-hidden="true">
+      <circle className="brain-orbit" cx="18" cy="18" r="14" />
+      <path className="brain-trace" d="M8 21c2.5-7 5-8 7.5-2.5S20 25 23 19s4-8 6-2" />
+      <circle className="brain-node" cx="18" cy="18" r="2.1" />
+    </svg>
+  );
+}
+
+function TickerLogo({ symbol, src, size = "sm" }: { symbol: string; src?: string; size?: "sm" | "lg" }) {
+  const [failed, setFailed] = useState(false);
+  const letter = symbol.replace(/[^A-Z0-9]/gi, "").slice(0, 1) || "?";
+  if (src && !failed) {
+    return (
+      <img
+        className={cn("brain-logo", size === "lg" && "lg")}
+        src={src}
+        alt=""
+        width={size === "lg" ? 44 : 26}
+        height={size === "lg" ? 44 : 26}
+        loading="lazy"
+        referrerPolicy="no-referrer"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return <span className={cn("brain-logo-fallback", size === "lg" && "lg")}>{letter}</span>;
+}
+
+function iconFor(signal: Signal, icons?: ReadonlyMap<string, string>): string | undefined {
+  return signal.icon || icons?.get(signal.symbol.toUpperCase());
+}
+
+function markPrice(signal: Signal): number {
+  return signal.livePrice && signal.livePrice > 0 ? signal.livePrice : signal.price;
+}
+
+function money(price: number): string {
+  if (!Number.isFinite(price) || price <= 0) return "—";
+  if (price >= 1000) return `$${price.toLocaleString(undefined, { maximumFractionDigits: 0 })}`;
+  if (price >= 1) return `$${price.toFixed(2)}`;
+  return `$${price.toFixed(4)}`;
+}
+
+function moveLabel(change: number): string {
+  if (!Number.isFinite(change)) return "flat";
+  const sign = change > 0 ? "+" : "";
+  return `${sign}${change.toFixed(1)}%`;
+}
+
+function stretch(rsi: number): string {
+  if (!Number.isFinite(rsi)) return "no read on how stretched it is";
+  if (rsi >= 70) return `stretched at ${Math.round(rsi)}`;
+  if (rsi <= 35) return `washed out at ${Math.round(rsi)}`;
+  return `steady at ${Math.round(rsi)}`;
+}
+
+function byScore(a: Signal, b: Signal): number {
+  return (b.score ?? 0) - (a.score ?? 0);
+}
+
+type Thought = { step: string; title: string; body: string };
+
+function thoughtsFor(
+  signal: Signal,
+  side: "buy" | "sell",
+  owns: boolean,
+  blocked: boolean,
+  scanned: number,
+  buyCount: number,
+  sellCount: number,
+  armed: boolean
+): Thought[] {
+  const name = signal.symbol;
+  const price = money(markPrice(signal));
+  const move = moveLabel(signal.change24h);
+  const hold = owns ? "I already hold it" : "I don't hold it";
+  return [
+    {
+      step: "Scan",
+      title: "Reading the book",
+      body: `${scanned} names on the desk. ${buyCount} on the buy row, ${sellCount} on the sell row.`,
+    },
+    {
+      step: "Review",
+      title: `Looking at ${name}`,
+      body: `${price}, ${move} today, ${stretch(signal.rsi)}. ${hold}.`,
+    },
+    {
+      step: "Decide",
+      title: armed ? (side === "buy" ? "Call is buy" : "Call is sell") : "Still a watch",
+      body: armed
+        ? `${name} is strong enough. The call is ${side}.`
+        : `${name} leads the ${side} row, but it has not cleared the line for an order.`,
+    },
+    {
+      step: "Send",
+      title: !armed ? "No order" : blocked ? "Waiting" : "Sending",
+      body: !armed
+        ? `Nothing to send. I'll keep ${name} on the ${side} row and scan again.`
+        : blocked
+          ? `The ${side} for ${name} is ready at ${price}. The wallet isn't signed in, so the order waits.`
+          : `Sending the ${side} for ${name} at ${price}.`,
+    },
+  ];
+}
+
+type LogKind = "scan" | "buy" | "sell" | "note";
+
+type ExecLog = {
+  id: string;
+  kind: LogKind;
+  message: string;
+  timestamp: number;
 };
 
-const DEFAULT_FILTERS: LogLevel[] = ["brain", "trade", "signal", "risk", "error"];
-
-function BrainEntry({ item }: { item: ActivityItem }) {
-  const [expanded, setExpanded] = useState(false);
-  const config = LEVEL_CONFIG[item.type];
-  const Icon = config.icon;
-  const hasDetail = !!item.detail;
-  const isBrain = item.type === "brain";
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: -6 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.2 }}
-      className={cn(
-        "group flex gap-3 py-3 px-3 rounded-lg transition-colors border border-transparent",
-        "hover:bg-surface-overlay/50 hover:border-border-dim/60",
-        item.type === "error" && "bg-danger/[0.04] border-danger/10",
-        isBrain && "bg-violet-500/[0.04]"
-      )}
-    >
-      <div className="flex flex-col items-center gap-1 shrink-0 w-10 pt-0.5">
-        <span
-          className={cn(
-            "flex items-center justify-center size-7 rounded-lg",
-            config.bgColor
-          )}
-        >
-          <Icon className={cn("size-3.5", config.color)} />
-        </span>
-        <span
-          className="text-[9px] text-text-muted tabular-nums text-center leading-tight"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          {new Date(item.timestamp).toLocaleTimeString("en", {
-            hour: "2-digit",
-            minute: "2-digit",
-            hour12: false,
-          })}
-        </span>
-      </div>
-
-      <div className="flex-1 min-w-0">
-        <div className="flex items-start gap-1.5">
-          {hasDetail && (
-            <button
-              type="button"
-              onClick={() => setExpanded(!expanded)}
-              className="mt-1 shrink-0 text-text-muted hover:text-text-primary transition-colors"
-            >
-              {expanded ? (
-                <ChevronDown className="size-3.5" />
-              ) : (
-                <ChevronRight className="size-3.5" />
-              )}
-            </button>
-          )}
-          <p
-            className={cn(
-              "text-[13px] leading-relaxed",
-              item.type === "error" ? "text-danger" : "text-text-primary",
-              isBrain && "text-text-primary"
-            )}
-          >
-            {item.message}
-          </p>
-        </div>
-
-        {hasDetail && expanded && (
-          <motion.pre
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            className="mt-2 text-[10px] text-text-muted leading-relaxed p-2.5 rounded-md bg-surface-overlay/70 overflow-x-auto whitespace-pre-wrap break-all border border-border-dim/40"
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {formatDetail(item.detail!)}
-          </motion.pre>
-        )}
-
-        <span
-          className="text-[9px] text-text-muted mt-1 inline-block"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          {timeAgo(item.timestamp)}
-        </span>
-      </div>
-
-      {!isBrain && (
-        <span
-          className={cn(
-            "text-[8px] font-bold uppercase tracking-wider px-1.5 py-0.5 rounded shrink-0 h-fit mt-1",
-            config.bgColor,
-            config.color
-          )}
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          {config.label}
-        </span>
-      )}
-    </motion.div>
-  );
+function isNoise(message: string): boolean {
+  const text = message.trim();
+  if (!text || text.startsWith("{") || text.startsWith("[")) return true;
+  if (text.includes("{") && text.includes("}")) return true;
+  return /getlogs|gettokenbalance|baw wallet|baw stablecoin|fake-ticker/i.test(text);
 }
 
-function formatDetail(raw: string): string {
-  try {
-    const parsed = JSON.parse(raw);
-    return JSON.stringify(parsed, null, 2);
-  } catch {
-    return raw;
-  }
+function kindOf(message: string, type: ActivityItem["type"]): LogKind {
+  if (/\bsold\b|\bselling\b/i.test(message) || (type === "trade" && /\bsell\b/i.test(message))) return "sell";
+  if (/\bbought\b|\bbuying\b/i.test(message) || (type === "trade" && /\bbuy\b/i.test(message))) return "buy";
+  if (type === "brain" || type === "signal" || /\b(scanned|scanning|names on the desk)\b/i.test(message)) return "scan";
+  return "note";
 }
 
-export function ActivityFeed({ activity }: { activity: ActivityItem[] }) {
-  const [filters, setFilters] = useState<Set<LogLevel>>(new Set(DEFAULT_FILTERS));
+function tradeLog(trade: Trade): ExecLog {
+  const verb = trade.side === "buy" ? "Bought" : "Sold";
+  const notional = trade.total > 0 ? ` for $${trade.total.toFixed(2)}` : "";
+  const pnl =
+    trade.side === "sell" && trade.pnl != null
+      ? ` · ${trade.pnl >= 0 ? "+" : "−"}$${Math.abs(trade.pnl).toFixed(2)}`
+      : "";
+  return {
+    id: `trade-${trade.id}`,
+    kind: trade.side,
+    timestamp: trade.timestamp,
+    message: `${verb} ${trade.symbol} at ${money(trade.price)}${notional}${pnl}.`,
+  };
+}
+
+export function ActivityFeed({
+  activity,
+  signals,
+  held,
+  icons,
+  trades = [],
+}: {
+  activity: ActivityItem[];
+  signals: Signal[];
+  held: string[];
+  icons?: ReadonlyMap<string, string>;
+  trades?: Trade[];
+}) {
+  const reduce = useReducedMotion();
   const [paused, setPaused] = useState(false);
-  const [showFilters, setShowFilters] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [stage, setStage] = useState(0);
+  const [liveLog, setLiveLog] = useState<ExecLog[]>([]);
+  const heldSet = useMemo(() => new Set(held.map((symbol) => symbol.toUpperCase())), [held]);
 
-  const filteredItems = activity.filter((item) => filters.has(item.type));
+  const open = useMemo(() => signals.filter((signal) => !signal.blacklisted), [signals]);
+  const buys = useMemo(
+    () => open.filter((signal) => signal.action === "buy" || (signal.action !== "sell" && (signal.score ?? 0) > 0)).sort(byScore),
+    [open]
+  );
+  const sells = useMemo(
+    () =>
+      open
+        .filter((signal) => signal.action === "sell" || (signal.action !== "buy" && (signal.score ?? 0) < 0))
+        .sort((a, b) => (a.score ?? 0) - (b.score ?? 0)),
+    [open]
+  );
+  const lead = buys[0] ?? sells[0] ?? null;
+  const side: "buy" | "sell" = lead?.action === "sell" || (lead && (lead.score ?? 0) < 0) ? "sell" : "buy";
+  const armed = lead?.action === "buy" || lead?.action === "sell";
+  const owns = lead ? heldSet.has(lead.symbol.toUpperCase()) : false;
+  const leadKey = lead?.symbol ?? "";
+  const blocked = activity.some((item) => /isn.?t signed in|not logged in|can.?t send/i.test(item.message));
 
   useEffect(() => {
-    if (!paused && scrollRef.current) {
-      scrollRef.current.scrollTop = 0;
-    }
-  }, [activity.length, paused]);
+    setStage(0);
+  }, [leadKey]);
 
-  const toggleFilter = (level: LogLevel) => {
-    setFilters((prev) => {
-      const next = new Set(prev);
-      if (next.has(level)) {
-        if (next.size > 1) next.delete(level);
-      } else {
-        next.add(level);
-      }
-      return next;
-    });
+  useEffect(() => {
+    if (paused || reduce || !lead) return;
+    const id = window.setInterval(() => {
+      setStage((value) => (value + 1) % 4);
+    }, STAGE_MS);
+    return () => window.clearInterval(id);
+  }, [paused, reduce, lead]);
+
+  const lines = lead
+    ? thoughtsFor(lead, side, owns, blocked, signals.length, buys.length, sells.length, Boolean(armed))
+    : [];
+  const shown = reduce ? lines : lines.slice(0, stage + 1);
+  const logSnap = useRef({ body: "", step: "", kind: "scan" as LogKind, symbol: "" });
+  logSnap.current = {
+    body: lines[stage]?.body ?? "",
+    step: lines[stage]?.step ?? "",
+    kind: stage === 0 ? "scan" : armed && stage >= 2 ? side : "note",
+    symbol: leadKey,
   };
 
-  const levelCounts = activity.reduce(
-    (acc, item) => {
-      acc[item.type] = (acc[item.type] || 0) + 1;
-      return acc;
-    },
-    {} as Record<string, number>
-  );
+  useEffect(() => {
+    const snap = logSnap.current;
+    if (!snap.body || !snap.symbol || paused) return;
+    const stamp = Date.now();
+    setLiveLog((prev) => {
+      const recent = prev[0];
+      if (recent && recent.message === snap.body && stamp - recent.timestamp < 2500) return prev;
+      return [{ id: `${snap.symbol}-${snap.step}-${stamp}`, kind: snap.kind, message: snap.body, timestamp: stamp }, ...prev].slice(0, 8);
+    });
+  }, [stage, leadKey, paused]);
+
+  const recent = useMemo(() => {
+    const fromActivity: ExecLog[] = activity
+      .filter((item) => !isNoise(item.message))
+      .slice(0, 8)
+      .map((item) => ({
+        id: item.id,
+        kind: kindOf(item.message, item.type),
+        message: item.message,
+        timestamp: item.timestamp,
+      }));
+    const merged = [...liveLog, ...trades.slice(0, 6).map(tradeLog), ...fromActivity];
+    const seen = new Set<string>();
+    const out: ExecLog[] = [];
+    for (const row of merged.sort((a, b) => b.timestamp - a.timestamp)) {
+      const key = `${row.kind}\0${row.message}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+      if (out.length >= 8) break;
+    }
+    return out;
+  }, [activity, trades, liveLog]);
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }}
+      initial={{ opacity: 0, y: 16 }}
       animate={{ opacity: 1, y: 0 }}
-      transition={{ duration: 0.5, delay: 0.5 }}
-      className="glass-raised rounded-xl p-3 sm:p-5 flex flex-col min-w-0"
+      transition={{ duration: 0.4 }}
+      className={cn("agent-brain glass-raised flex min-w-0 flex-col rounded-xl p-3 sm:p-5", paused && "is-paused")}
     >
-      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-        <div className="flex items-center gap-2.5">
-          <div className="flex items-center justify-center size-7 rounded-lg bg-violet-500/12">
-            <Brain className="size-3.5 text-violet-300" />
-          </div>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <BrainMark paused={paused} />
           <div>
-            <h3
-              className="text-sm font-semibold tracking-wide"
-              style={{ fontFamily: "var(--font-display)" }}
-            >
-              Agent Brain
-            </h3>
-            <p className="text-[10px] text-text-muted mt-0.5">
-              Decisions & trades in plain language
+            <h3 className="text-sm font-semibold tracking-[-0.01em]">Agent Brain</h3>
+            <p className="mt-0.5 text-[11px] text-text-muted">
+              {paused ? "Paused" : lead ? `Thinking through ${lead.symbol}` : "Waiting for a signal"}
             </p>
           </div>
-          <span
-            className="text-[10px] text-text-muted tabular-nums ml-1"
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {filteredItems.length} shown
-          </span>
         </div>
-
-        <div className="flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setPaused(!paused)}
-            className={cn(
-              "flex items-center gap-1.5 min-h-9 px-2.5 py-1.5 rounded text-[10px] font-semibold transition-colors",
-              paused
-                ? "bg-warning/10 text-warning border border-warning/20"
-                : "bg-surface-overlay text-text-secondary hover:text-text-primary border border-border-dim"
-            )}
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            {paused ? <Play className="size-3" /> : <Pause className="size-3" />}
-            {paused ? "Resume" : "Pause"}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setShowFilters(!showFilters)}
-            className={cn(
-              "flex items-center gap-1.5 min-h-9 px-2.5 py-1.5 rounded text-[10px] font-semibold transition-colors border",
-              showFilters
-                ? "bg-cyan/10 text-cyan border-cyan/20"
-                : "bg-surface-overlay text-text-secondary hover:text-text-primary border-border-dim"
-            )}
-            style={{ fontFamily: "var(--font-mono)" }}
-          >
-            <Filter className="size-3" />
-            Filter
-          </button>
-
-          <div className="flex items-center gap-1.5 ml-1">
-            <span className="relative flex size-2">
-              <span
-                className={cn(
-                  "absolute inline-flex size-full rounded-full opacity-75",
-                  paused ? "bg-warning" : "animate-ping bg-violet-400"
-                )}
-              />
-              <span
-                className={cn(
-                  "relative inline-flex size-2 rounded-full",
-                  paused ? "bg-warning" : "bg-violet-400"
-                )}
-              />
-            </span>
-          </div>
-        </div>
+        <button
+          type="button"
+          onClick={() => setPaused((value) => !value)}
+          className={cn(
+            "flex min-h-9 items-center gap-1.5 rounded border px-2.5 py-1.5 text-[10px] font-semibold",
+            paused
+              ? "border-warning/20 bg-warning/10 text-warning"
+              : "border-border-dim bg-surface-overlay text-text-secondary hover:text-text-primary"
+          )}
+        >
+          {paused ? <Play className="size-3" /> : <Pause className="size-3" />}
+          {paused ? "Resume" : "Pause"}
+        </button>
       </div>
 
-      <AnimatePresence>
-        {showFilters && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            className="overflow-hidden"
-          >
-            <div className="flex flex-wrap items-center gap-2 py-3 border-b border-border-dim mb-2">
-              {(Object.keys(LEVEL_CONFIG) as LogLevel[]).map((level) => {
-                const cfg = LEVEL_CONFIG[level];
-                const active = filters.has(level);
-                const count = levelCounts[level] || 0;
-                return (
-                  <button
-                    key={level}
-                    type="button"
-                    onClick={() => toggleFilter(level)}
-                    className={cn(
-                      "flex items-center gap-1.5 px-2.5 py-1 rounded text-[10px] font-semibold transition-all border",
-                      active
-                        ? `${cfg.bgColor} ${cfg.color} border-current/20`
-                        : "bg-surface-overlay/50 text-text-muted border-border-dim opacity-50 hover:opacity-75"
-                    )}
-                    style={{ fontFamily: "var(--font-mono)" }}
-                  >
-                    {cfg.label}
-                    <span className="text-[9px] opacity-70">({count})</span>
-                  </button>
-                );
-              })}
+      <div className={cn("brain-exec rounded-xl px-4 py-4 sm:px-5", side)} aria-live="polite">
+        {lead ? (
+          <div className="relative z-[1] flex items-center gap-4">
+            <TickerLogo symbol={lead.symbol} src={iconFor(lead, icons)} size="lg" />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-[22px] font-semibold tracking-[-0.03em] text-text-primary">{lead.symbol}</p>
+                <span className={cn("brain-side", side)}>{side}</span>
+                {owns && <span className="brain-side hold">Holding</span>}
+              </div>
+              <p className="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-[13px] tabular-nums text-text-secondary">
+                <span>{money(markPrice(lead))}</span>
+                <span className={lead.change24h >= 0 ? "text-neon" : "text-danger"}>{moveLabel(lead.change24h)} today</span>
+                <span>{stretch(lead.rsi)}</span>
+              </p>
             </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-
-      <div
-        ref={scrollRef}
-        className="flex flex-col gap-1 max-h-[480px] overflow-y-auto pr-1 scroll-smooth mt-2"
-      >
-        {filteredItems.length === 0 ? (
-          <div className="flex flex-col items-center justify-center py-14 text-center gap-2">
-            <Brain className="size-8 text-text-muted/40" />
-            <span className="text-xs text-text-muted max-w-xs">
-              Waiting for the agent&apos;s next decision…
-            </span>
           </div>
         ) : (
-          filteredItems.map((item) => (
-            <BrainEntry key={item.id} item={item} />
-          ))
+          <p className="relative z-[1] text-[15px] text-text-secondary">No buy or sell is on the book yet.</p>
         )}
-      </div>
 
-      <div className="flex items-center justify-between mt-3 pt-3 border-t border-border-dim">
-        <span className="text-[10px] text-text-muted">
-          {paused ? "Paused — new thoughts still arrive" : "Live decision stream"}
-        </span>
-        <div
-          className="flex items-center gap-3 text-[9px] text-text-muted"
-          style={{ fontFamily: "var(--font-mono)" }}
-        >
-          <span>{levelCounts["brain"] || 0} thoughts</span>
-          <span>{levelCounts["trade"] || 0} trades</span>
-          <span>{levelCounts["error"] || 0} errors</span>
+        <div className="brain-thought relative z-[1]">
+          {shown.map((line, index) => (
+            <motion.div
+              key={`${leadKey}-${line.step}`}
+              className={cn("brain-line", index === shown.length - 1 && "is-on")}
+              initial={reduce ? false : { opacity: 0, y: 6 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.28 }}
+            >
+              <i />
+              <div>
+                <span>{line.step}</span>
+                <b>{line.title}</b>
+                <p>{line.body}</p>
+              </div>
+            </motion.div>
+          ))}
         </div>
       </div>
+
+      <SignalRow
+        label="Buy"
+        tone="buy"
+        rows={buys}
+        live={side === "buy" ? lead?.symbol : undefined}
+        icons={icons}
+      />
+      <SignalRow
+        label="Sell"
+        tone="sell"
+        rows={sells}
+        live={side === "sell" ? lead?.symbol : undefined}
+        icons={icons}
+      />
+
+      {recent.length > 0 && (
+        <div className="brain-log">
+          <p className="mb-1 text-[10px] font-semibold uppercase tracking-[0.16em] text-text-muted">Recent</p>
+          <ul>
+            {recent.map((row) => (
+              <li key={row.id} className={row.kind}>
+                <em>{row.kind}</em>
+                <span>{row.message}</span>
+                <time>{timeAgo(row.timestamp)}</time>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </motion.div>
+  );
+}
+
+function SignalRow({
+  label,
+  tone,
+  rows,
+  live,
+  icons,
+}: {
+  label: string;
+  tone: "buy" | "sell";
+  rows: Signal[];
+  live?: string;
+  icons?: ReadonlyMap<string, string>;
+}) {
+  return (
+    <div className="mt-4">
+      <div className="mb-2 flex items-baseline justify-between">
+        <p className={cn("text-[10px] font-semibold uppercase tracking-[0.16em]", tone === "buy" ? "text-neon" : "text-danger")}>
+          {label}
+        </p>
+        <p className="text-[11px] text-text-muted">{rows.length}</p>
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-[13px] text-text-muted">No {label.toLowerCase()} names this pass.</p>
+      ) : (
+        <div className="brain-row" aria-label={`${label} signals`}>
+          {rows.map((signal) => (
+            <div
+              key={signal.symbol}
+              className={cn("brain-pick", tone === "sell" && "is-down", signal.symbol === live && "is-live")}
+            >
+              <TickerLogo symbol={signal.symbol} src={iconFor(signal, icons)} />
+              <span className="min-w-0">
+                <b>{signal.symbol}</b>
+                <small className={signal.change24h >= 0 ? "up" : "down"}>
+                  {money(markPrice(signal))} · {moveLabel(signal.change24h)}
+                </small>
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }

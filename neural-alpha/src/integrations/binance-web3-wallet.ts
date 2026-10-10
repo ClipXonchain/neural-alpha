@@ -45,6 +45,32 @@ function parseNum(value: unknown): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Same token on the same chain. Contract wins; native coins (BNB) key off the symbol. */
+export function walletPositionKey(pos: {
+  symbol: string;
+  contractAddress?: string;
+  chainId?: string;
+}): string {
+  const contract = (pos.contractAddress ?? "").trim().toLowerCase();
+  const chain = pos.chainId ?? "";
+  return contract ? `${chain}:${contract}` : `${chain}:${pos.symbol.toUpperCase()}`;
+}
+
+/** Collapse repeated pages of the same holding so NAV is not summed once per copy. */
+export function dedupeWalletPositions<
+  T extends { symbol: string; contractAddress?: string; chainId?: string },
+>(positions: T[]): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const pos of positions) {
+    const key = walletPositionKey(pos);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(pos);
+  }
+  return out;
+}
+
 function parsePosition(row: Record<string, unknown>): BinanceWeb3Position | null {
   const symbol = String(row.symbol ?? row.tokenSymbol ?? "").toUpperCase();
   if (!symbol) return null;
@@ -81,6 +107,7 @@ export async function fetchWalletPositions(
   chainId: string = BSC_CHAIN_ID
 ): Promise<BinanceWeb3Position[]> {
   const all: BinanceWeb3Position[] = [];
+  const seen = new Set<string>();
   let offset = 0;
   const pageSize = 50;
 
@@ -102,12 +129,20 @@ export async function fetchWalletPositions(
     const list = json.data?.list ?? [];
     if (!Array.isArray(list) || list.length === 0) break;
 
+    let added = 0;
     for (const row of list) {
       const pos = parsePosition(row as Record<string, unknown>);
-      if (pos && pos.remainQty > 0) all.push(pos);
+      if (!pos || !(pos.remainQty > 0)) continue;
+      const key = walletPositionKey(pos);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      all.push(pos);
+      added++;
     }
 
-    if (list.length < pageSize) break;
+    // active-position-list ignores `offset` and repeats page 1. A full page
+    // used to be fetched until the 500-row cap — 11 copies, and NAV ×11.
+    if (added === 0 || list.length < pageSize) break;
     offset += list.length;
     if (offset > 500) break; // safety cap
   }

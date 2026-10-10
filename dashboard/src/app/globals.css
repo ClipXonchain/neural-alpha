@@ -132,3 +132,289 @@ body {
 nextjs-portal {
   display: none !important;
 }
+
+.brain-mark { width: 32px; height: 32px; display: block; }
+.brain-orbit { fill: none; stroke: rgba(59, 158, 255, 0.45); stroke-width: 1; }
+.brain-trace {
+  fill: none;
+  stroke: #12b264;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-dasharray: 32;
+  stroke-dashoffset: 32;
+  animation: brain-draw 3.2s ease-in-out infinite;
+}
+.brain-node { fill: #3b9eff; transform-origin: 18px 18px; animation: brain-node 3.2s ease-in-out infinite; }
+.agent-brain.is-paused .brain-trace,
+.agent-brain.is-paused .brain-node,
+.agent-brain.is-paused .brain-now::after,
+.agent-brain.is-paused .brain-exec::after,
+.agent-brain.is-paused .brain-rail.is-live::after,
+.agent-brain.is-paused .brain-line.is-on i,
+.agent-brain.is-paused .brain-pick.is-live { animation-play-state: paused; }
+
+.brain-now {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(59, 158, 255, 0.22);
+  background:
+    radial-gradient(120% 90% at 0% 0%, rgba(59, 158, 255, 0.14), transparent 52%),
+    linear-gradient(180deg, rgba(18, 178, 100, 0.07), transparent 42%),
+    #0e1216;
+}
+.brain-now::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 32%, rgba(255, 255, 255, 0.07) 50%, transparent 68%);
+  transform: translateX(-130%);
+  animation: brain-sweep 5.5s ease-in-out infinite;
+  pointer-events: none;
+}
+.brain-rail { position: relative; }
+.brain-rail::before {
+  content: "";
+  position: absolute;
+  left: 15px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: linear-gradient(180deg, rgba(59, 158, 255, 0.55), rgba(18, 178, 100, 0.2) 46%, transparent);
+}
+.brain-rail.is-live::after {
+  content: "";
+  position: absolute;
+  left: 13px;
+  width: 5px;
+  height: 16px;
+  border-radius: 4px;
+  background: #3b9eff;
+  animation: brain-drop 3.4s ease-in-out infinite;
+  pointer-events: none;
+}
+
+@keyframes brain-draw {
+  0% { stroke-dashoffset: 32; opacity: 0.35; }
+  42% { stroke-dashoffset: 0; opacity: 1; }
+  100% { stroke-dashoffset: -32; opacity: 0.3; }
+}
+@keyframes brain-node {
+  0%, 100% { transform: scale(0.85); opacity: 0.55; }
+  42% { transform: scale(1.15); opacity: 1; }
+}
+@keyframes brain-sweep {
+  0%, 58% { transform: translateX(-130%); }
+  100% { transform: translateX(130%); }
+}
+@keyframes brain-drop {
+  0% { top: 0; opacity: 0; }
+  18% { opacity: 0.9; }
+  100% { top: calc(100% - 16px); opacity: 0; }
+}
+
+.brain-exec {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid rgba(18, 178, 100, 0.28);
+  background:
+    radial-gradient(90% 80% at 0% 0%, rgba(18, 178, 100, 0.16), transparent 55%),
+    linear-gradient(180deg, rgba(59, 158, 255, 0.06), transparent 40%),
+    #0e1216;
+}
+.brain-exec.sell {
+  border-color: rgba(255, 77, 94, 0.32);
+  background:
+    radial-gradient(90% 80% at 0% 0%, rgba(255, 77, 94, 0.14), transparent 55%),
+    #0e1216;
+}
+.brain-exec::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(105deg, transparent 30%, rgba(255, 255, 255, 0.06) 48%, transparent 66%);
+  transform: translateX(-120%);
+  animation: brain-sweep 4.8s ease-in-out infinite;
+  pointer-events: none;
+}
+.brain-side {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+.brain-side.buy { color: #3dce8a; background: rgba(18, 178, 100, 0.14); }
+.brain-side.sell { color: #ff8b96; background: rgba(255, 77, 94, 0.14); }
+
+.brain-side.hold { color: #8ec8ff; background: rgba(59, 158, 255, 0.12); }
+
+.brain-thought {
+  position: relative;
+  margin-top: 14px;
+  padding-left: 18px;
+}
+.brain-thought::before {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: linear-gradient(180deg, rgba(59, 158, 255, 0.7), rgba(18, 178, 100, 0.15));
+}
+.brain-line {
+  position: relative;
+  padding: 7px 0 8px;
+}
+.brain-line i {
+  position: absolute;
+  left: -18px;
+  top: 12px;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #101214;
+  border: 1px solid rgba(18, 178, 100, 0.55);
+}
+.brain-line.is-on i {
+  background: #3b9eff;
+  border-color: #9fd0ff;
+  box-shadow: 0 0 0 4px rgba(59, 158, 255, 0.18);
+  animation: brain-pulse 1.2s ease-in-out infinite;
+}
+.brain-line span {
+  display: block;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #66727e;
+}
+.brain-line.is-on span { color: #9fd0ff; }
+.brain-line b {
+  display: block;
+  margin-top: 2px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: #f1f5f9;
+}
+.brain-line p {
+  margin-top: 2px;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #aeb8c2;
+}
+
+.brain-row {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 2px 6px;
+}
+.brain-pick, .brain-sell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-radius: 12px;
+  background: #101214;
+}
+.brain-pick {
+  flex: 0 0 auto;
+  min-width: 148px;
+  padding: 10px 12px;
+  border: 1px solid rgba(18, 178, 100, 0.22);
+}
+.brain-pick.is-down { border-color: rgba(255, 77, 94, 0.28); }
+.brain-pick.is-down.is-live {
+  border-color: rgba(255, 77, 94, 0.7);
+  background: rgba(255, 77, 94, 0.08);
+  box-shadow: 0 0 0 1px rgba(255, 77, 94, 0.2);
+}
+.brain-pick.is-live {
+  border-color: rgba(18, 178, 100, 0.7);
+  background: rgba(18, 178, 100, 0.1);
+  box-shadow: 0 0 0 1px rgba(18, 178, 100, 0.2), 0 10px 28px rgba(18, 178, 100, 0.08);
+  animation: brain-live 1.8s ease-in-out infinite;
+}
+.brain-pick b, .brain-sell p { letter-spacing: -0.02em; }
+.brain-pick b { display: block; font-size: 13px; font-weight: 600; color: #e8eef3; }
+.brain-pick small { font-size: 11px; font-variant-numeric: tabular-nums; }
+.brain-pick small.up { color: #3dce8a; }
+.brain-pick small.down { color: #ff8b96; }
+.brain-sell {
+  padding: 12px 14px;
+  border: 1px solid rgba(255, 77, 94, 0.28);
+  background: rgba(255, 77, 94, 0.05);
+}
+.brain-sell.is-live { box-shadow: 0 0 0 1px rgba(255, 77, 94, 0.25); }
+
+.brain-logo, .brain-logo-fallback {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  flex: none;
+  background: #182433;
+}
+.brain-logo { object-fit: cover; display: block; }
+.brain-logo-fallback {
+  display: grid;
+  place-items: center;
+  color: #8fd0ff;
+  font-size: 11px;
+  font-weight: 700;
+}
+.brain-logo.lg, .brain-logo-fallback.lg { width: 46px; height: 46px; font-size: 16px; }
+
+.brain-log {
+  margin-top: 16px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  padding-top: 12px;
+}
+.brain-log ul { display: flex; flex-direction: column; }
+.brain-log li {
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: baseline;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+.brain-log li:last-child { border-bottom: 0; }
+.brain-log em {
+  font-style: normal;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: #f5b942;
+}
+.brain-log .scan em { color: #9fd0ff; }
+.brain-log .buy em { color: #3dce8a; }
+.brain-log .sell em { color: #ff8b96; }
+.brain-log li span {
+  font-size: 13px;
+  line-height: 1.4;
+  color: #c5ced6;
+}
+.brain-log time {
+  font-size: 11px;
+  color: #66727e;
+  white-space: nowrap;
+}
+
+@keyframes brain-pulse {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.25); }
+}
+@keyframes brain-live {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .brain-trace, .brain-node, .brain-now::after, .brain-exec::after, .brain-rail.is-live::after, .brain-line.is-on i, .brain-pick.is-live { animation: none; }
+  .brain-trace { stroke-dashoffset: 0; opacity: 1; }
+  .brain-stage-fill { transition: none; }
+}

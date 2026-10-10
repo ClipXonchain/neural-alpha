@@ -90,7 +90,7 @@ img.token-logo.sm,.token-logo.sm{width:24px;height:24px}
 @media(max-width:500px){.stats-grid.five{grid-template-columns:1fr}}
 
 /* AI desk — operator assistant + daily review (Intelligence page) */
-.ai-desk{display:grid;grid-template-columns:repeat(auto-fit,minmax(360px,1fr));gap:12px;margin-bottom:12px}
+.ai-desk{display:grid;grid-template-columns:minmax(0,1fr);gap:12px;margin-bottom:12px}
 .ai-panel{display:flex;flex-direction:column}
 .ai-panel .section-header h2{display:flex;align-items:center;gap:8px}
 .ai-panel .section-header h2 svg{color:var(--green)}
@@ -118,13 +118,18 @@ img.token-logo.sm,.token-logo.sm{width:24px;height:24px}
 .ai-input button{width:36px;border:0;border-radius:8px;background:var(--green);color:#001b12;display:grid;place-items:center}
 .ai-input button:disabled{opacity:.4}
 .ai-days{display:flex;flex-wrap:wrap;gap:6px;padding:0 16px 10px}
-.ai-review{flex:1;padding:0 16px 16px;overflow-y:auto;max-height:480px}
+.ai-review{flex:1;padding:0 16px 16px}
+.review-sections{display:grid;border:1px solid var(--border);border-radius:10px;overflow:hidden}
+.review-section{display:grid;grid-template-columns:168px minmax(0,1fr);gap:14px;align-items:start;padding:13px 14px;border-bottom:1px solid var(--border);background:rgba(255,255,255,.015)}
+.review-section:last-child{border-bottom:0}
+.review-section h3{margin:2px 0 0;color:#8fd9b0;font-size:10px;font-weight:700;letter-spacing:.08em;line-height:1.35;text-transform:uppercase}
+.review-section .ai-md{color:#dbe3ea;font-size:13px;line-height:1.55}
 .ai-meta{margin-top:12px;font-family:var(--mono);font-size:9px;color:var(--muted-2)}
 .ai-empty{padding:0 16px 18px;color:var(--muted);font-size:11px;line-height:1.7}
 .ai-empty code{font-family:var(--mono);font-size:10px;color:var(--text-secondary);background:var(--surface-2);border-radius:4px;padding:1px 4px}
 .spin{animation:ai-spin 1s linear infinite}
 @keyframes ai-spin{to{transform:rotate(360deg)}}
-@media(max-width:500px){.ai-desk{grid-template-columns:1fr}}
+@media(max-width:700px){.review-section{grid-template-columns:minmax(0,1fr);gap:6px}}
 
 .main-col,.side-col,.panel,.chart-panel,.trade-table-wrap,.positions-table,.content-grid,.portfolio-grid{min-width:0;max-width:100%}
 .sidebar{overflow:hidden}.sidebar-bottom{flex-shrink:0}

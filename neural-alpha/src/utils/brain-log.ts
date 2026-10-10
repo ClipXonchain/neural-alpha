@@ -7,7 +7,21 @@ export function brain(message: string, data?: Record<string, unknown>, txHash?: 
 }
 
 function fmtSignal(s: TradeSignal): string {
-  return `${s.symbol} (${s.strength.replace(/_/g, " ")}, ${Math.round(s.score)})`;
+  return `${s.symbol} ${Math.round(s.score)}`;
+}
+
+function uniqueBySymbol(list: TradeSignal[]): TradeSignal[] {
+  const seen = new Set<string>();
+  return list.filter((s) => {
+    if (seen.has(s.symbol)) return false;
+    seen.add(s.symbol);
+    return true;
+  });
+}
+
+function joinNames(list: string[]): string {
+  if (list.length <= 1) return list[0] ?? "";
+  return `${list.slice(0, -1).join(", ")} and ${list[list.length - 1]}`;
 }
 
 export function brainCycleStart(cycleId: number, tokenCount: number, fullScan: boolean) {
@@ -89,15 +103,13 @@ export function brainSignalPulse(
   tokenCount: number,
   signals: TradeSignal[]
 ) {
-  const buys = signals.filter((s) => s.action === "buy").slice(0, 3);
-  const label = fullScan ? "Full market pulse" : "Market pulse";
+  const buys = uniqueBySymbol(signals.filter((s) => s.action === "buy")).slice(0, 3);
+  const look = fullScan ? "Full look" : "Quick look";
   if (buys.length === 0) {
-    brain(`${label} — ${tokenCount} tokens updated, no strong buys yet.`);
+    brain(`${look} at ${tokenCount} names. Nothing strong enough to buy.`);
     return;
   }
-  brain(
-    `${label} — ${tokenCount} tokens updated. Leading buys: ${buys.map(fmtSignal).join(", ")}.`
-  );
+  brain(`${look} at ${tokenCount} names. Strongest buys: ${joinNames(buys.map(fmtSignal))}.`);
 }
 
 export function brainQueuedTrades(trades: TradeSignal[]) {

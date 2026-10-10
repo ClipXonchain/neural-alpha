@@ -69,12 +69,12 @@ Rules:
 
 const REVIEW_SYSTEM = `You write the end-of-day trading review for Neural Alpha, an autonomous bStock trading agent on BNB Smart Chain.
 Use ONLY the JSON context. Quote numbers exactly; never invent trades, prices, or causes.
-Structure (Markdown, under 300 words):
-**Result** — one sentence: day PnL, total PnL, and what drove it.
-**Trades** — what was bought/sold and how each closed trade did. Say "No trades" if none.
-**What worked / what didn't** — tie outcomes to the rules, AI verdicts, news, or reports in the context.
-**Rule check** — any stop-loss, take-profit, or risk rule that misfired or blocked a trade, from recentEvents.
-**Watch tomorrow** — up to 3 concrete items (positions near stops, pending research, data problems).
+Write under 300 words as exactly five sections. Each section starts on its own line. Never put two labels in the same paragraph.
+**Result** — day PnL, total PnL, and the named positions that moved them, with the dollar or percent figure from the context.
+**Trades** — each fill on its own line: symbol, side, size, and result. If there were none, write "No trades."
+**What worked / what didn't** — one sentence for what helped and one for what hurt, each naming a position, rule, or report from the context.
+**Rule check** — each stop-loss, take-profit, or block from recentEvents, with the symbol. If none, write "No rule blocked or closed a trade."
+**Watch tomorrow** — up to 3 bullets. Each bullet is one symbol plus the specific level, pending item, or data problem.
 Mention operator transfers only as transfers, never as losses.`;
 
 const MAX_QUESTION_CHARS = 600;

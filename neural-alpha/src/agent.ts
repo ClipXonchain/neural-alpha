@@ -69,7 +69,7 @@ import {
   isOnChainTxHash as isRealTxHash,
   tradeDedupeKey,
 } from "./utils/trade-dedupe.js";
-import { fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
+import { dedupeWalletPositions, fetchBinanceWeb3Holdings, fetchWalletPositions, type BinanceWeb3Position } from "./integrations/binance-web3-wallet.js";
 import { fetchRawBinancePositions } from "./integrations/binance-web3-trade-history.js";
 import {
   enrichSymbolsFromBinance,
@@ -1848,7 +1848,9 @@ export class TradingAgent {
    * rule as the dashboard. Undefined when the scan is missing or stale.
    */
   private freshWalletNavUsd(): number | undefined {
-    const rows = this._cachedWalletInfo?.binancePositions;
+    const rows = this._cachedWalletInfo?.binancePositions
+      ? dedupeWalletPositions(this._cachedWalletInfo.binancePositions)
+      : undefined;
     if (!rows?.length || Date.now() - this._walletPositionsAt > WALLET_NAV_MAX_AGE_MS) {
       return undefined;
     }
@@ -2419,10 +2421,13 @@ export class TradingAgent {
       holdings: {} as Record<string, number>,
       rediscovered: 0,
     };
-    if (!this.mcp.getPortfolio) return empty;
-
-    const holdings = await this.mcp.getPortfolio(BSC_CHAIN);
-    if (!holdings) return empty;
+    // baw returns null when the CLI is logged out. Binance Web3 still has the
+    // wallet — bailing here left cash at the $2,000 deposit and kept positions
+    // the wallet no longer holds, so NAV and PnL diverged from the chain.
+    const holdings = this.mcp.getPortfolio
+      ? await this.mcp.getPortfolio(BSC_CHAIN)
+      : null;
+    let sawWallet = holdings != null;
 
     const amounts = new Map<string, number>();
     const prices = new Map<string, number>();
@@ -2495,8 +2500,10 @@ export class TradingAgent {
       });
     }
 
-    for (const h of holdings) {
-      await ingestHolding(h);
+    if (holdings) {
+      for (const h of holdings) {
+        await ingestHolding(h);
+      }
     }
 
     if (walletAddress) {
@@ -2519,6 +2526,7 @@ export class TradingAgent {
         }
         const binancePositions = await fetchWalletPositions(walletAddress);
         if (binancePositions.length > 0) {
+          sawWallet = true;
           this.primeWalletCache(walletAddress, binancePositions);
         }
       } catch (err) {
@@ -2560,6 +2568,7 @@ export class TradingAgent {
       });
       const scanned = await scanWalletViaCliSubprocess(walletAddress);
       logger.info("CLI wallet scan finished", { found: scanned.length });
+      if (scanned.length > 0) sawWallet = true;
       for (const h of scanned) {
         const sym = h.symbol.toUpperCase();
         if (amounts.has(sym)) continue;
@@ -2613,6 +2622,11 @@ export class TradingAgent {
       }
     }
 
+    if (!sawWallet) {
+      logger.warn("Skipping on-chain reconcile — wallet balance unread");
+      return empty;
+    }
+
     const { added, removed } = this.portfolio.reconcileOnChainPositions(amounts, prices);
     if (walletAddress) await this.seedEntriesFromBinance(walletAddress);
     const gas = this.portfolio.gasReserve;
@@ -2637,23 +2651,48 @@ export class TradingAgent {
     };
   }
 
+  /** USDT from the latest Binance Web3 scan when the baw CLI has no session. */
+  private usdtFromWalletScan(): number | undefined {
+    const rows = this._cachedWalletInfo?.binancePositions;
+    if (!rows?.length || Date.now() - this._walletPositionsAt > WALLET_NAV_MAX_AGE_MS) {
+      return undefined;
+    }
+    const usdt = dedupeWalletPositions(rows).find(
+      (p) => p.symbol.toUpperCase() === "USDT" && p.remainQty > 0
+    );
+    return usdt?.remainQty;
+  }
+
   /** Sync portfolio cash from on-chain USDT balance (live trading). */
   async syncWalletCapital(): Promise<{ usdtBalance: number; synced: boolean }> {
-    if (!this.mcp.getStablecoinBalance) {
-      return { usdtBalance: this.portfolio.cash, synced: false };
+    let balance: number | undefined;
+    let symbol = "USDT";
+
+    if (this.mcp.getStablecoinBalance) {
+      const stable = await this.mcp.getStablecoinBalance(BSC_CHAIN);
+      if (stable) {
+        balance = stable.balance;
+        symbol = stable.symbol;
+      }
     }
 
-    const stable = await this.mcp.getStablecoinBalance(BSC_CHAIN);
-    if (!stable) {
-      logger.warn("Could not read USDT balance — Agentic Wallet not connected?");
-      return { usdtBalance: this.portfolio.cash, synced: false };
+    if (balance == null) {
+      const scanned = this.usdtFromWalletScan();
+      if (scanned == null) {
+        logger.warn("Could not read USDT balance — Agentic Wallet not connected?");
+        return { usdtBalance: this.portfolio.cash, synced: false };
+      }
+      balance = scanned;
+      logger.info("USDT balance taken from Binance Web3 scan", {
+        usdt: Math.round(balance * 100) / 100,
+      });
     }
 
-    this.portfolio.setCashUsd(stable.balance);
+    this.portfolio.setCashUsd(balance);
 
     const positionsValue = this.estimateTrackedPositionsValue();
     const navUsd =
-      stable.balance + positionsValue + this.portfolio.gasReserve.valueUsd;
+      balance + positionsValue + this.portfolio.gasReserve.valueUsd;
 
     if (this.portfolio.hasPendingNavRestore()) {
       this.portfolio.applyPendingNavRestore(navUsd);
@@ -2668,11 +2707,11 @@ export class TradingAgent {
     void getAgentStore().saveNavState(this.portfolio.exportNavState());
 
     logger.info("Wallet capital synced from chain", {
-      usdt: stable.balance,
-      symbol: stable.symbol,
+      usdt: balance,
+      symbol,
     });
 
-    return { usdtBalance: stable.balance, synced: true };
+    return { usdtBalance: balance, synced: true };
   }
 
   /** Current USD value of positions tracked in memory (best-effort pricing). */
@@ -2964,7 +3003,9 @@ export class TradingAgent {
     positions: OperatorContext["positions"];
   } {
     const walletNav = this.freshWalletNavUsd();
-    const rows = this._cachedWalletInfo?.binancePositions;
+    const rows = this._cachedWalletInfo?.binancePositions
+      ? dedupeWalletPositions(this._cachedWalletInfo.binancePositions)
+      : undefined;
     if (walletNav && rows) {
       let cashUsd = 0;
       let gasUsd = 0;

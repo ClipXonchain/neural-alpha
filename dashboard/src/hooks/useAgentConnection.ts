@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import type { AgentState } from "@/lib/mock-data";
 import type { WalletSnapshot, LogEntry, Track1Snapshot } from "@/lib/agent-api";
-import { logEntryToActivity } from "@/lib/brain-narrative";
+import { logEntryToActivity, mergeActivity } from "@/lib/brain-narrative";
 import {
   fetchAgentState,
   fetchWallet,
@@ -120,8 +120,7 @@ export function useAgentConnection() {
                 `${logEntry.timestamp}-${Math.random().toString(36).slice(2, 6)}`
               );
               if (!newItem) return prev;
-              const activity = [newItem, ...prev.activity].slice(0, 120);
-              return { ...prev, activity };
+              return { ...prev, activity: mergeActivity(prev.activity, newItem) };
             });
           }
         );

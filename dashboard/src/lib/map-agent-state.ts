@@ -646,11 +646,28 @@ function mapDrawdownCurve(snap: Track1Snapshot) {
  * it as the source of truth for allocation while preserving the agent's entry
  * price / PnL where a matching position already exists.
  */
+/** Binance repeats the same page when `offset` is ignored. Sum each token once. */
+function dedupeWalletHoldings<T extends { symbol: string; contractAddress?: string }>(
+  rows: T[]
+): T[] {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const row of rows) {
+    const contract = (row.contractAddress ?? "").trim().toLowerCase();
+    const key = contract ? contract : row.symbol.toUpperCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(row);
+  }
+  return out;
+}
+
 export function enrichStateWithWallet(
   state: AgentState,
   positions?: WalletSnapshot["binancePositions"]
 ): AgentState {
   if (!positions || positions.length === 0) return state;
+  positions = dedupeWalletHoldings(positions);
 
   let gasUsd = 0;
   let gasPct24h = 0;

@@ -538,7 +538,17 @@ export function ClipxApp({
             <WalletPanel wallet={wallet} mode={state.mode} connected={connected} onSync={onSync} onSignin={onSignin} onVerify={onVerify} readOnly={readOnly} />
           </div>
         )}
-        {view === "activity" && <div className="page"><ActivityFeed activity={state.activity} /></div>}
+        {view === "activity" && (
+          <div className="page">
+            <ActivityFeed
+              activity={state.activity}
+              signals={state.signals}
+              trades={state.trades}
+              held={state.positions.map((position) => position.symbol)}
+              icons={icons}
+            />
+          </div>
+        )}
         {view === "analytics" && <AnalyticsPage state={state} config={config} />}
         {view === "settings" && !readOnly && (
           <div className="page">

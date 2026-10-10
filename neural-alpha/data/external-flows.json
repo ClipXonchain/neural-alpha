@@ -1,0 +1,10 @@
+[
+  {
+    "direction": "out",
+    "symbol": "CRCLB",
+    "qty": 5.242982579321423,
+    "valueUsd": 464.84,
+    "time": "2026-09-25T16:55:00Z",
+    "note": "Sent out of the wallet (not a swap). Between wallet syncs at 16:51:41 and 16:57:43 UTC; valued at the 16:51 mark of $88.66."
+  }
+]

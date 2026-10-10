@@ -1,9 +1,8 @@
 "use client";
 
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from "react";
-import { Bot, FileText, Loader2, RefreshCw, Send } from "lucide-react";
+import { FileText, Loader2, RefreshCw } from "lucide-react";
 import {
-  askAssistant,
   fetchDailyReviews,
   fetchLlmStatus,
   runDailyReview,
@@ -12,18 +11,7 @@ import {
 } from "@/lib/agent-api";
 import { timeAgo } from "@/lib/utils";
 
-const SUGGESTIONS = [
-  "Why is today's P&L what it is?",
-  "Which position is closest to its stop-loss?",
-  "How did my closed trades do this week?",
-  "What did the last Agent Studio report say?",
-];
-
-interface Turn {
-  question: string;
-  answer?: string;
-  error?: string;
-}
+const REVIEW_SECTIONS = ["Result", "Trades", "What worked / what didn't", "Rule check", "Watch tomorrow"] as const;
 
 /** Bold, bullets and paragraphs only — the model is told to answer in short Markdown. */
 function MiniMarkdown({ text }: { text: string }) {
@@ -59,6 +47,28 @@ function MiniMarkdown({ text }: { text: string }) {
   return <div className="ai-md">{blocks}</div>;
 }
 
+function reviewTitle(label: string): (typeof REVIEW_SECTIONS)[number] | string {
+  const key = label.toLowerCase().replace(/\s+/g, " ").trim();
+  return REVIEW_SECTIONS.find((section) => section.toLowerCase() === key) ?? label;
+}
+
+/** The model often writes every heading in one paragraph. Split those labels into sections. */
+function parseReview(text: string): { title: string; body: string }[] {
+  const pattern = /\*{0,2}(Result|Trades|What worked\s*\/\s*what didn't|Rule check|Watch tomorrow)\*{0,2}\s*[—–:-]\s*/gi;
+  const matches = [...text.matchAll(pattern)];
+  if (matches.length === 0) return [];
+  return matches.flatMap((match, index) => {
+    const start = (match.index ?? 0) + match[0].length;
+    const end = index + 1 < matches.length ? matches[index + 1].index ?? text.length : text.length;
+    const body = text
+      .slice(start, end)
+      .replace(/\s+(?=\d+[.)]\s)/g, "\n")
+      .replace(/\s+(?=[-*•]\s)/g, "\n")
+      .trim();
+    return body ? [{ title: reviewTitle(match[1]), body }] : [];
+  });
+}
+
 function NotConfigured() {
   return (
     <div className="ai-empty">
@@ -74,9 +84,6 @@ export function AiDesk({ readOnly }: { readOnly?: boolean }) {
   const [selected, setSelected] = useState(0);
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
-  const [question, setQuestion] = useState("");
-  const [turns, setTurns] = useState<Turn[]>([]);
-  const [asking, setAsking] = useState(false);
 
   const loadReviews = useCallback(async () => {
     try {
@@ -94,23 +101,6 @@ export function AiDesk({ readOnly }: { readOnly?: boolean }) {
 
   const enabled = status?.enabled ?? false;
 
-  const ask = async (q: string) => {
-    const text = q.trim();
-    if (!text || asking) return;
-    setQuestion("");
-    setAsking(true);
-    setTurns((t) => [...t, { question: text }]);
-    try {
-      const r = await askAssistant(text);
-      setTurns((t) => t.map((turn, i) => (i === t.length - 1 ? { ...turn, answer: r.answer } : turn)));
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      setTurns((t) => t.map((turn, i) => (i === t.length - 1 ? { ...turn, error: msg } : turn)));
-    } finally {
-      setAsking(false);
-    }
-  };
-
   const writeReview = async () => {
     setReviewBusy(true);
     setReviewError(null);
@@ -126,60 +116,10 @@ export function AiDesk({ readOnly }: { readOnly?: boolean }) {
   };
 
   const review = reviews[selected];
+  const sections = review ? parseReview(review.text) : [];
 
   return (
     <div className="ai-desk">
-      {!readOnly && (
-        <div className="panel ai-panel">
-          <div className="section-header">
-            <h2><Bot size={15} /> Ask the agent</h2>
-            {status?.reasoningModel && <span className="ai-model">{status.reasoningModel}</span>}
-          </div>
-          {status && !enabled ? (
-            <NotConfigured />
-          ) : (
-            <>
-              <div className="ai-thread">
-                {turns.length === 0 && (
-                  <div className="ai-suggestions">
-                    <p>Read-only: answers come from the agent&apos;s live books, trades, transfers and logs. It can&apos;t trade.</p>
-                    {SUGGESTIONS.map((s) => (
-                      <button key={s} className="ai-chip" onClick={() => void ask(s)} disabled={asking}>{s}</button>
-                    ))}
-                  </div>
-                )}
-                {turns.map((t, i) => (
-                  <div key={i} className="ai-turn">
-                    <div className="ai-q">{t.question}</div>
-                    {t.answer && <MiniMarkdown text={t.answer} />}
-                    {t.error && <div className="ai-error">{t.error}</div>}
-                    {!t.answer && !t.error && <div className="ai-wait"><Loader2 size={13} className="spin" /> Thinking…</div>}
-                  </div>
-                ))}
-              </div>
-              <form
-                className="ai-input"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void ask(question);
-                }}
-              >
-                <input
-                  value={question}
-                  maxLength={500}
-                  placeholder="Ask about trades, P&L, positions, rules…"
-                  onChange={(e) => setQuestion(e.target.value)}
-                  disabled={asking}
-                />
-                <button type="submit" disabled={asking || !question.trim()} aria-label="Ask">
-                  {asking ? <Loader2 size={14} className="spin" /> : <Send size={14} />}
-                </button>
-              </form>
-            </>
-          )}
-        </div>
-      )}
-
       <div className="panel ai-panel">
         <div className="section-header">
           <h2><FileText size={15} /> Daily review</h2>
@@ -202,7 +142,18 @@ export function AiDesk({ readOnly }: { readOnly?: boolean }) {
         {reviewError && <div className="ai-error">{reviewError}</div>}
         {review ? (
           <div className="ai-review">
-            <MiniMarkdown text={review.text} />
+            {sections.length > 0 ? (
+              <div className="review-sections">
+                {sections.map((section) => (
+                  <section className="review-section" key={section.title}>
+                    <h3>{section.title}</h3>
+                    <MiniMarkdown text={section.body} />
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <MiniMarkdown text={review.text} />
+            )}
             <div className="ai-meta">
               {review.model} · written {timeAgo(review.generatedAt)}
               {review.partial ? " · day was still in progress" : ""}
