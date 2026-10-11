@@ -93,7 +93,8 @@ import {
   submitStudioAnalysis,
   pollStudioJob,
 } from "./integrations/campaign-x402.js";
-import { tickerFromBstock } from "./integrations/bstock.js";
+import { getBstockAddress, tickerFromBstock } from "./integrations/bstock.js";
+import { getRwaTokenPrices, web3Credentials } from "./integrations/binance-web3-signed.js";
 
 /** CMC / eligible-universe refresh. Live Binance quotes pulse faster than this. */
 const DEEP_SCAN_MS = 180_000;
@@ -922,6 +923,17 @@ export class TradingAgent {
 
     for (const md of markets) {
       this.mergeLiveQuoteIntoMarket(md, this.livePrices.get(md.symbol));
+    }
+
+    if (web3Credentials()) {
+      const symbols = [...new Set([...this.watchlist, ...this.portfolio.getAllPositions().keys()])].slice(0, 12);
+      const addresses = symbols.map((symbol) => getBstockAddress(symbol)).filter((address): address is string => Boolean(address));
+      try {
+        const spreads = (await getRwaTokenPrices(addresses)).filter((row) => row.spreadPct != null).slice(0, 3);
+        if (spreads.length) logger.info("RWA on-chain vs reference", { spreads });
+      } catch (err) {
+        logger.warn("RWA signed price check failed", { error: err instanceof Error ? err.message : String(err) });
+      }
     }
 
     for (const [symbol, quote] of this.livePrices) {
