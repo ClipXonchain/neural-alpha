@@ -65,6 +65,7 @@ export default function ParticleText({
     let started = performance.now();
     let frame = 0;
     let alive = true;
+    let onScreen = true;
 
     const fitSize = (family: string, width: number) => {
       const probe = document.createElement("span");
@@ -79,7 +80,7 @@ export default function ParticleText({
     };
 
     const sample = () => {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = 1;
       const width = Math.max(1, wrap.clientWidth);
       const height = Math.max(1, wrap.clientHeight);
       canvas.width = Math.floor(width * dpr);
@@ -130,7 +131,11 @@ export default function ParticleText({
 
     const draw = (now: number) => {
       if (!alive) return;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      if (!onScreen || document.hidden) {
+        frame = 0;
+        return;
+      }
+      const dpr = 1;
       const width = wrap.clientWidth;
       const height = wrap.clientHeight;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -156,13 +161,8 @@ export default function ParticleText({
           }
         }
         ctx.fillStyle = particle.highlight ? highlightColor : color;
-        ctx.shadowColor = particle.highlight ? highlightColor : color;
-        ctx.shadowBlur = glow ? 10 : 0;
-        ctx.beginPath();
-        ctx.arc(x, y, particleSize / 2, 0, Math.PI * 2);
-        ctx.fill();
+        ctx.fillRect(x, y, particleSize, particleSize);
       }
-      ctx.shadowBlur = 0;
       frame = requestAnimationFrame(draw);
     };
 
@@ -176,7 +176,17 @@ export default function ParticleText({
       pointer.on = false;
     };
 
+    const resume = () => {
+      if (!alive || !onScreen || document.hidden || frame) return;
+      frame = requestAnimationFrame(draw);
+    };
+    const seen = new IntersectionObserver(([entry]) => {
+      onScreen = entry.isIntersecting;
+      if (onScreen) resume();
+    }, { rootMargin: "120px" });
     sample();
+    seen.observe(wrap);
+    document.addEventListener("visibilitychange", resume);
     frame = requestAnimationFrame(draw);
     wrap.addEventListener("pointermove", move);
     wrap.addEventListener("pointerleave", leave);
@@ -187,6 +197,8 @@ export default function ParticleText({
       alive = false;
       cancelAnimationFrame(frame);
       observer.disconnect();
+      seen.disconnect();
+      document.removeEventListener("visibilitychange", resume);
       wrap.removeEventListener("pointermove", move);
       wrap.removeEventListener("pointerleave", leave);
     };

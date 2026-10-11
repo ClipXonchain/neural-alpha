@@ -54,6 +54,52 @@ function buildGradientVars(colors: string[]): Record<string, string> {
 }
 
 const ORBIT_MS = 7000;
+const ORBIT_FRAME_MS = 50;
+
+type OrbitCard = { el: HTMLElement; steerUntil: number; onScreen: boolean };
+
+const orbitCards = new Set<OrbitCard>();
+let orbitFrame = 0;
+let orbitStamp = 0;
+let orbitWatch: IntersectionObserver | null = null;
+
+function orbitObserver() {
+  if (orbitWatch) return orbitWatch;
+  orbitWatch = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      for (const card of orbitCards) {
+        if (card.el === entry.target) card.onScreen = entry.isIntersecting;
+      }
+    }
+  }, { rootMargin: "140px" });
+  return orbitWatch;
+}
+
+function runOrbit(now: number) {
+  orbitFrame = requestAnimationFrame(runOrbit);
+  if (document.hidden || now - orbitStamp < ORBIT_FRAME_MS) return;
+  orbitStamp = now;
+  const angle = `${((now % ORBIT_MS) / ORBIT_MS) * 360}deg`;
+  for (const card of orbitCards) {
+    if (!card.onScreen || now < card.steerUntil) continue;
+    card.el.style.setProperty("--cursor-angle", angle);
+  }
+}
+
+function trackOrbit(card: OrbitCard) {
+  orbitCards.add(card);
+  orbitObserver().observe(card.el);
+  if (!orbitFrame) orbitFrame = requestAnimationFrame(runOrbit);
+}
+
+function releaseOrbit(card: OrbitCard) {
+  orbitCards.delete(card);
+  orbitWatch?.unobserve(card.el);
+  if (!orbitCards.size && orbitFrame) {
+    cancelAnimationFrame(orbitFrame);
+    orbitFrame = 0;
+  }
+}
 
 export default function BorderGlow({
   children,
@@ -70,7 +116,7 @@ export default function BorderGlow({
   fillOpacity = 0.5,
 }: BorderGlowProps) {
   const cardRef = useRef<HTMLDivElement>(null);
-  const steerUntil = useRef(0);
+  const orbitRef = useRef<OrbitCard | null>(null);
   const reduce = useReducedMotion() === true;
 
   const writeFromPoint = useCallback((clientX: number, clientY: number) => {
@@ -95,7 +141,7 @@ export default function BorderGlow({
     }
     card.style.setProperty("--edge-proximity", (edge * 100).toFixed(3));
     card.style.setProperty("--cursor-angle", `${angle.toFixed(3)}deg`);
-    steerUntil.current = performance.now() + 180;
+    if (orbitRef.current) orbitRef.current.steerUntil = performance.now() + 180;
   }, [reduce]);
 
   const handlePointer = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
@@ -104,7 +150,7 @@ export default function BorderGlow({
 
   const handlePointerLeave = useCallback(() => {
     if (reduce) return;
-    steerUntil.current = 0;
+    if (orbitRef.current) orbitRef.current.steerUntil = 0;
     cardRef.current?.style.setProperty("--edge-proximity", animated ? "100" : "0");
   }, [animated, reduce]);
 
@@ -115,20 +161,13 @@ export default function BorderGlow({
     if (!card) return;
     card.classList.add("border-glow-orbit");
     card.style.setProperty("--edge-proximity", "100");
-
-    let frame = 0;
-    const tick = (now: number) => {
-      if (now >= steerUntil.current) {
-        const angle = ((now % ORBIT_MS) / ORBIT_MS) * 360;
-        card.style.setProperty("--cursor-angle", `${angle.toFixed(3)}deg`);
-        card.style.setProperty("--edge-proximity", "100");
-      }
-      frame = requestAnimationFrame(tick);
-    };
-    frame = requestAnimationFrame(tick);
+    const tracked: OrbitCard = { el: card, steerUntil: 0, onScreen: false };
+    orbitRef.current = tracked;
+    trackOrbit(tracked);
 
     return () => {
-      cancelAnimationFrame(frame);
+      releaseOrbit(tracked);
+      if (orbitRef.current === tracked) orbitRef.current = null;
       card.classList.remove("border-glow-orbit");
     };
   }, [animated, reduce]);

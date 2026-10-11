@@ -71,9 +71,8 @@ export default function TrueFocus({
             ref={(node) => { wordRefs.current[wordIndex] = node; }}
             className="true-focus-word"
             style={{
-              filter: active ? "none" : `blur(${blurAmount}px)`,
-              opacity: active ? 1 : 0.55,
-              transition: `filter ${animationDuration}s ease, opacity ${animationDuration}s ease`,
+              opacity: active ? 1 : Math.min(0.55, Math.max(0.28, 0.62 - blurAmount * 0.08)),
+              transition: `opacity ${animationDuration}s ease`,
             }}
             onMouseEnter={() => { if (manualMode) setIndex(wordIndex); }}
           >
