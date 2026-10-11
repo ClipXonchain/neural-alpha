@@ -10,8 +10,7 @@
 <p align="center">
   <a href="https://neuralalpha.io">Live site</a> &middot;
   <a href="https://neuralalpha.io/about">About</a> &middot;
-  <a href="https://github.com/ClipXonchain/neural-alpha/tree/hackathon">Branch <code>hackathon</code></a> &middot;
-  <a href="./HACKATHON.md">Hackathon notes</a>
+  <a href="https://github.com/ClipXonchain/neural-alpha">Repository</a>
 </p>
 
 <p align="center">
@@ -22,12 +21,9 @@
   <img src="https://img.shields.io/badge/assets-bStock_spot-17181b?style=flat-square" alt="bStock" />
 </p>
 
-**This file matches the [`hackathon`](https://github.com/ClipXonchain/neural-alpha/tree/hackathon) branch.** Clone that branch. It is the tree submitted for [BNB Hack: Tokenized Stocks Edition](https://www.bnbchain.org/en/hackathons/tokenized-stocks).
-
 | | |
 |---|---|
 | Repository | https://github.com/ClipXonchain/neural-alpha |
-| Branch | `hackathon` |
 | Public site | https://neuralalpha.io |
 | Also public | https://agents.clipx.app |
 | Chain | BNB Smart Chain, chainId `56`. Spot only. |
@@ -48,7 +44,7 @@ Each cycle the agent:
 
 Keys stay in Binance Agentic Wallet (MPC). The process does not hold a trading private key. The agent API binds to `127.0.0.1`. The public dashboard is read-only.
 
-The same codebase still records FIFO realized PnL and the paid x402 calls from the earlier [bStock AI-Powered PnL Contest](https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest) (17 Aug – 1 Sep 2026 UTC). Judges for the October hackathon score the product, the Web3 stack, and a written developer-experience report. They do not score that contest PnL. See [`HACKATHON.md`](./HACKATHON.md).
+The same codebase still records FIFO realized PnL and the paid x402 calls from the [bStock AI-Powered PnL Contest](https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest) (17 Aug – 1 Sep 2026 UTC).
 
 ---
 
@@ -154,7 +150,7 @@ npm run dev
 
 The header shows **LIVE** when the dashboard is attached to the agent, and **DEMO** when it is not.
 
-Confirm the hackathon integrations without sending a swap:
+Confirm the signed Web3 calls without sending a swap:
 
 ```bash
 npm run hackathon:check --workspace=neural-alpha
@@ -350,7 +346,6 @@ curl -sS -X POST https://neuralalpha.io/api/agent/control/stop
 ```
 neural-alpha/
 ├── README.md                         # this file
-├── HACKATHON.md                      # October 2026 submission notes
 ├── AGENTS.md                         # short map for coding agents
 ├── package.json                      # npm workspaces
 ├── ecosystem.config.cjs              # PM2: neural-agent, neural-dashboard
@@ -468,22 +463,6 @@ Pair Agentic Wallet on a machine with a browser, then copy the session, or run `
 | Config writes | Whitelist of keys |
 
 Use a wallet funded with only what you are willing to trade. Closed-market autonomous buys stay inside `HACKATHON_MAX_TRADE_USD`.
-
----
-
-## Hackathon
-
-Event: [BNB Hack: Tokenized Stocks Edition](https://www.bnbchain.org/en/hackathons/tokenized-stocks). Submissions lock 11 Oct 2026, 12:00 UTC. Judging runs 12–23 Oct. Keep this branch and https://neuralalpha.io up through 23 Oct.
-
-| Submit | URL |
-|---|---|
-| Register | https://forms.gle/NEmy3FxYc4f5Dua47 |
-| Project | https://forms.gle/yToDUzaDMwWnq6R6A |
-| Developer Experience Report | https://forms.gle/EUQ39xf54GHjC2ys5 |
-
-The report is 25% of the score. Write it from your own integration notes. A generated report is rejected. Facts worth checking against the code and the docs are in [`HACKATHON.md`](./HACKATHON.md).
-
-Restricted regions (do not register from these): United States, Canada, the Netherlands, Iran, Cuba, North Korea, Crimea, Donetsk People's Republic, Luhansk People's Republic, the United Kingdom, and Japan.
 
 ---
 
