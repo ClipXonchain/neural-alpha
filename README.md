@@ -3,15 +3,15 @@
 </p>
 
 <p align="center">
-  Autonomous bStock trading agent for Binance Agentic Wallet — signals, risk, FIFO PnL.
+  Autonomous spot agent for tokenized US stocks (bStock) on BNB Smart Chain.
+  It scores the book, checks hours and spread, and sends swaps through Binance Agentic Wallet.
 </p>
 
 <p align="center">
-  <a href="https://agents.clipx.app">Live Dashboard</a> &middot;
-  <a href="#quick-start">Quick Start</a> &middot;
-  <a href="#architecture">Architecture</a> &middot;
-  <a href="#deployment">Deployment</a> &middot;
-  <a href="#security">Security</a>
+  <a href="https://neuralalpha.io">Live site</a> &middot;
+  <a href="https://neuralalpha.io/about">About</a> &middot;
+  <a href="https://github.com/ClipXonchain/neural-alpha/tree/hackathon">Branch <code>hackathon</code></a> &middot;
+  <a href="./HACKATHON.md">Hackathon notes</a>
 </p>
 
 <p align="center">
@@ -19,200 +19,128 @@
   <img src="https://img.shields.io/badge/runtime-Node.js_20+-339933?style=flat-square&logo=nodedotjs&logoColor=white" alt="Node.js" />
   <img src="https://img.shields.io/badge/dashboard-Next.js_15-000000?style=flat-square&logo=nextdotjs" alt="Next.js" />
   <img src="https://img.shields.io/badge/execution-Binance_Agentic_Wallet-F0B90B?style=flat-square" alt="Agentic Wallet" />
-  <img src="https://img.shields.io/badge/assets-bStock-17181b?style=flat-square" alt="bStock" />
+  <img src="https://img.shields.io/badge/assets-bStock_spot-17181b?style=flat-square" alt="bStock" />
 </p>
 
----
+**This file matches the [`hackathon`](https://github.com/ClipXonchain/neural-alpha/tree/hackathon) branch.** Clone that branch. It is the tree submitted for [BNB Hack: Tokenized Stocks Edition](https://www.bnbchain.org/en/hackathons/tokenized-stocks).
 
-## Overview
-
-Neural Alpha is an autonomous trading agent for **tokenized US stocks (bStock)** on BNB Smart Chain. It scores markets, enforces risk in code, and executes swaps through **Binance Agentic Wallet** (`baw` CLI) — MPC keyless, no local private keys.
-
-Built for the **[bStock AI-Powered PnL Contest](https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest)** (Binance Wallet × bStocks × BNB Chain Agent Studio × CoinMarketCap), 17 Aug – 1 Sep 2026 UTC.
-
-**Production deployment:** [agents.clipx.app](https://agents.clipx.app)
-
----
-
-## Table of Contents
-
-- [Key Features](#key-features)
-- [Architecture](#architecture)
-- [Prerequisites](#prerequisites)
-- [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Strategy Engine](#strategy-engine)
-- [Risk Management](#risk-management)
-- [Dashboard](#dashboard)
-- [Deployment](#deployment)
-- [Security](#security)
-- [API Reference](#api-reference)
-- [Project Structure](#project-structure)
-- [NPM Scripts](#npm-scripts)
-- [Troubleshooting](#troubleshooting)
-- [Competition](#competition)
-- [License](#license)
+| | |
+|---|---|
+| Repository | https://github.com/ClipXonchain/neural-alpha |
+| Branch | `hackathon` |
+| Public site | https://neuralalpha.io |
+| Also public | https://agents.clipx.app |
+| Chain | BNB Smart Chain, chainId `56`. Spot only. |
 
 ---
 
-## Key Features
+## What it is
 
-**Signal Engine**
-- 9-factor scoring: RSI, MACD, EMA crossover, Bollinger Bands, momentum, volume spikes, mcap:volume turnover, Fear & Greed index, and ClipX news sentiment
-- Optional AI technical analysis (GPT-4o-mini or any OpenAI-compatible model) overlaid on top signals each cycle
-- Tiered token scanning — active watchlist (15 tokens) every cycle + full scan of all 149 eligible BEP-20 tokens every 3 cycles
+Neural Alpha is a trading desk for **Binance bStocks**: tokenized US stocks whose symbols end in `B` (NVDAB, AAPLB, TSLAB, and the rest of the type=3 universe). It does not trade perps, Ondo (`…on`), or xStocks (`…x`).
 
-**Strategy Presets**
-- Three risk-tiered profiles: **SafeTrade** (capital preservation), **Medium** (balanced), **Momentum** (return-seeking)
-- Each preset configures signal weights, position sizing, stop-loss/take-profit, trailing stops, and portfolio limits
-- Hot-switchable from the dashboard without restart
+Each cycle the agent:
 
-**Risk Guardrails (enforced in code, not prompts)**
-- Max drawdown cap with emergency buy-halt
-- Per-trade position limits, daily trade caps, on-chain tx budget
-- Stop-loss, take-profit, and trailing stop exits
-- Honeypot detection before every live swap
-- Weekly eligible **bStock** allowlist (type=3 contracts + campaign list)
+1. Loads the public type=3 bStock list and the current eligible set.
+2. Scores names with session-weighted technicals, volume, news, and optional LLM review.
+3. Asks the signed Binance Web3 RWA book whether the underlying market is open, paused, or closed, and whether the on-chain price is rich versus the API reference price.
+4. Runs the same order through the risk manager (size, confidence, drawdown, cooldowns, allowlist).
+5. In live mode, quotes the swap, simulates the calldata, then broadcasts it with Agentic Wallet. Paper mode fills locally and never signs.
 
-**Execution**
-- Self-custody via Binance Agentic Wallet — MPC keyless, keys never held by the agent
-- Paper mode (simulated) and live mode (real BSC swaps)
-- On-chain portfolio reconciliation with Binance Web3 Wallet API
-- Startup cooldown, failed-swap cooldown, and autonomous trade pacing
+Keys stay in Binance Agentic Wallet (MPC). The process does not hold a trading private key. The agent API binds to `127.0.0.1`. The public dashboard is read-only.
 
-**Dashboard**
-- Real-time Next.js dashboard with SSE streaming
-- Portfolio metrics, equity/drawdown charts, signal monitor, trade history, activity feed
-- Wallet panel with on-chain balances, competition registration
-- Natural language command assistant (AI-powered when OpenAI key is set)
-- Agent controls for live parameter tuning
-
-**Production-Ready**
-- API authentication (Bearer token)
-- CORS origin restriction, rate limiting, request size limits
-- PM2 process management, Nginx reverse proxy, Let's Encrypt SSL
-- SQLite persistence for trades, NAV snapshots, and chain sync state, with an optional hourly Neon backup
-- Graceful shutdown with SIGTERM/SIGINT handling
+The same codebase still records FIFO realized PnL and the paid x402 calls from the earlier [bStock AI-Powered PnL Contest](https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest) (17 Aug – 1 Sep 2026 UTC). Judges for the October hackathon score the product, the Web3 stack, and a written developer-experience report. They do not score that contest PnL. See [`HACKATHON.md`](./HACKATHON.md).
 
 ---
 
 ## Architecture
 
-Neural Alpha runs an autonomous loop: **read markets → score signals → validate risk → execute on BSC → reconcile portfolio**. The diagram below is the core agent workflow (one cycle repeats every 30s in paper mode, 60 min in live mode).
-
-### Core Agent Workflow
-
 ```mermaid
 flowchart TB
-    subgraph SOURCES["Data sources"]
-        CMC["CoinMarketCap Pro / x402<br/>Quotes · Trending · Fear & Greed"]
-        NEWS["ClipX News<br/>Per-token sentiment"]
-        WALLET["BSC Wallet<br/>USDT · BNB · token holdings"]
+    subgraph sources["Data"]
+        LIST["Public type=3 bStock list"]
+        RWA["Signed Web3 API<br/>hours · spread · candles · quote"]
+        CMC["CMC quotes · news · optional x402"]
     end
 
-    subgraph LOOP["Neural Alpha — trading cycle"]
-        direction TB
-        S1["① Ingest<br/>Watchlist + full 149-token scan"]
-        S2["② Analyze<br/>9-factor signals · optional AI review"]
-        S3["③ Decide<br/>Rank buys/sells · stop-loss · take-profit"]
-        S4{"④ Risk gate<br/>Drawdown · limits · allowlist"}
-        S5["⑤ Execute<br/>Eligible bStock → baw market-order swap"]
-        S6["⑥ Reconcile<br/>Sync on-chain · NAV snapshot · persist"]
-
+    subgraph loop["One cycle"]
+        S1["Ingest watchlist"]
+        S2["Score session profile"]
+        S3{"RWA gate<br/>hours · 1.5% spread · size cap"}
+        S4{"Risk manager"}
+        S5["Simulate calldata"]
+        S6["baw contract-call<br/>or market-order fallback"]
         S1 --> S2 --> S3 --> S4
-        S4 -->|Rejected| S6
-        S4 -->|Approved| S5 --> S6
+        S4 -->|pass| S5 --> S6
     end
 
-    subgraph OUTPUTS["Outputs"]
-        UI["Dashboard + SSE<br/>State · trades · logs"]
-        DB[("SQLite<br/>Trades · NAV · sync<br/>Neon backup hourly")]
-        TX["BSC mainnet<br/>Signed BEP-20 swaps"]
+    subgraph out["Outputs"]
+        UI["Next.js dashboard<br/>neuralalpha.io"]
+        DB[("SQLite<br/>optional hourly Neon copy")]
+        BSC["BSC mainnet"]
     end
 
-    CMC --> S1
-    NEWS --> S1
-    WALLET --> S6
-    S5 --> TX
-    TX -.->|Confirm balances| WALLET
-    S6 --> UI
+    LIST --> S1
+    CMC --> S2
+    RWA --> S3
+    RWA --> S5
+    S6 --> BSC
     S6 --> DB
-    S6 -->|Wait interval · repeat| S1
-
-    style S4 fill:#e94560,stroke:#fff,color:#fff
-    style S5 fill:#f0b90b,stroke:#1a1a2e,color:#1a1a2e
-    style TX fill:#f0b90b,stroke:#1a1a2e,color:#1a1a2e
+    DB --> UI
 ```
 
-**In plain terms:**
+| Step | What the code does |
+|---|---|
+| Universe | `integrations/bstock.ts` reads the public type=3 list. Eligibility is `ELIGIBLE_BSTOCKS`, else `neural-alpha/data/eligible-bstocks.json`, else the non-leveraged type=3 set. |
+| Score | `strategy/signals.ts` plus the active session profile in `strategy/presets.ts`. |
+| Hours and spread | `strategy/rwa-book.ts`. A missing or `pause` status blocks the order. A buy is blocked when on-chain price is at least 1.5% rich versus `referencePrice`. `referencePrice` is the API's per-share conversion, not an NYSE print. |
+| Closed market | Buys while status is `closed` or `overnight` are capped. Default band is $8–$15 (`HACKATHON_MAX_TRADE_USD`). Stale research uses the $8 floor. One new closed-market name at a time. |
+| Send | `execution/hackathon-route.ts` quotes and builds calldata on the Trading API, simulates on the Transaction API, then broadcasts. A failed simulation never falls through to a send. |
+| Fallback | `baw market-order swap` runs only when Developer Mode is off, or the route is RFQ and returned no EVM calldata. |
+| Research | Optional `STUDIO_AGENT_URL`. If unset, closed-market research can use `https://stock-agent.bnbchain.org/x402/analyze/async`. That wallet does not hold the bStock inventory. |
 
-| Step | What happens |
-|------|----------------|
-| **Ingest** | Pull prices for the active watchlist; every 3rd cycle, scan all 149 eligible BEP-20 tokens |
-| **Analyze** | Blend RSI, MACD, EMA, Bollinger, momentum, volume, news, and Fear & Greed into a score per token |
-| **Decide** | Pick the best trades; optional protective exits (stop-loss / take-profit / trailing) run first |
-| **Risk gate** | Block trades that breach drawdown, daily caps, position size, token allowlist, or tx budget |
-| **Execute** | Live mode: `baw market-order swap` on BSC, poll until FINISHED/FAILED. Paper mode: simulated fill |
-| **Reconcile** | Match portfolio to chain, update NAV, stream to dashboard, save to SQLite, sleep, repeat |
-
-**Operator path:** Browser → [agents.clipx.app](https://agents.clipx.app) → Next.js dashboard → authenticated proxy → agent API (`127.0.0.1:3847`). Manual commands (`buy`, `sell`, `portfolio`) use the same risk and execution path as autonomous trades.
+Operator path: browser → https://neuralalpha.io → Next.js → agent API on `127.0.0.1`. Public builds set `READONLY` and `NEXT_PUBLIC_READONLY`, so visitors can watch state and cannot start, stop, or trade.
 
 ---
 
 ## Prerequisites
 
-| Requirement | Purpose |
+| Requirement | Why |
 |---|---|
-| **Node.js >= 20** | Runtime (ESM, `import.meta`) |
-| **npm >= 9** | Package manager (workspaces) |
-| **[baw CLI](https://www.binance.com/en/skills/detail/binance-web3/binance-agentic-wallet)** | Binance Agentic Wallet — sign-in, balances, market-order swaps, x402 |
+| Node.js 20+ | ESM agent and Next.js 15 dashboard |
+| npm 9+ | Workspaces: `neural-alpha`, `dashboard` |
+| [Binance Agentic Wallet CLI](https://web3.binance.com/en/dev-docs/products/agentic-wallet/introduction) | Sign-in, balances, `market-order`, `contract-call`, x402 |
+| BSC gas (BNB) | Live sends. Keep a reserve; default `MIN_GAS_RESERVE_USD` is 1.5 |
+| Payment token | Buys spend one of BNB, USDT, USDC, U, USD1. Default `PAYMENT_TOKEN=USDT` |
+| Web3 API key | Signed RWA, Market, Trading, Transaction, Wallet, and DeFi reads. Create a project at the [developer portal](https://web3.binance.com/en/dev-portal) |
 
 ```bash
-# Install Binance Agentic Wallet CLI
 npm i -g @binance/agentic-wallet
 baw --version
-
-# Sign in (QR in Binance App)
-baw auth signin
+baw auth signin          # confirm in the Binance App
 baw wallet status --json
-baw wallet address --json
 ```
-| **USDT / USDC / U / USD1 on BSC** | Campaign payment capital (live mode) |
+
+A Web3 API key does not sign the CLI in. Agentic Wallet is a separate session (`~/.baw`). Developer Mode, turned on in the Binance app, is what lets `baw contract-call` broadcast the simulated calldata.
 
 ---
 
-## Quick Start
-
-### 1. Clone and install
+## Quick start
 
 ```bash
-git clone https://github.com/your-org/neural-alpha.git
+git clone -b hackathon https://github.com/ClipXonchain/neural-alpha.git
 cd neural-alpha
 npm install
-```
-
-### 2. Configure environment
-
-```bash
 cp .env.example .env
 ```
 
-Minimum configuration:
+Minimum local paper run. Paper mode simulates fills. It does not broadcast.
 
 ```bash
-# Required
-CMC_PRO_API_KEY=<your-key>
+# .env
+AGENT_MODE=paper
+BRIDGE_MODE=auto
 PAYMENT_TOKEN=USDT
-BRIDGE_MODE=auto          # auto-detects baw + CMC Pro
-
-# Mode
-AGENT_MODE=paper          # "paper" for simulation, "live" for real BSC trading
-
-# Optional: AI assistant
-OPENAI_API_KEY=sk-...     # enables NL commands + AI signal analysis
 ```
-
-### 3. Run (development)
 
 ```bash
 npm run dev
@@ -220,490 +148,367 @@ npm run dev
 
 | Service | URL |
 |---|---|
-| **Dashboard** | http://localhost:3000 |
-| **Agent API** | http://localhost:3847/api/health |
+| Dashboard | http://localhost:3000 |
+| Agent API | http://127.0.0.1:3847/api/health |
+| About | http://localhost:3000/about |
 
-The dashboard header shows **LIVE** when connected to the agent, **DEMO** when offline.
+The header shows **LIVE** when the dashboard is attached to the agent, and **DEMO** when it is not.
 
-### 4. Run (production)
+Confirm the hackathon integrations without sending a swap:
 
 ```bash
-npm run prod:build
-npm run prod:start      # starts via PM2
+npm run hackathon:check --workspace=neural-alpha
 ```
 
-See [Deployment](#deployment) for full VPS setup.
+That command needs `OC_API_KEY` and `OC_SECRET_KEY` in `.env` before the signed calls can pass. It never broadcasts.
+
+Live mode (`AGENT_MODE=live`) quotes and can send real BSC swaps. Fund the Agentic Wallet with a small amount, sign in, and turn Developer Mode on before you expect a `contract-call` fill.
 
 ---
 
 ## Configuration
 
-### Paper vs Live Mode
+Copy `.env.example`. Do not commit `.env`.
 
-| | Paper (`AGENT_MODE=paper`) | Live (`AGENT_MODE=live`) |
+### Modes
+
+| | `AGENT_MODE=paper` | `AGENT_MODE=live` |
 |---|---|---|
-| Swaps | Simulated (`paper-*` tx hash) | Real BSC transactions via Agentic Wallet |
-| Capital | Uses `INITIAL_DEPOSIT_USD` | Wallet USDT + positions + gas; PnL vs deposit + starting BNB |
-| Cycle interval | 30s default | 60 min default |
-| Portfolio | In-memory only | Reconciled with on-chain state each cycle |
+| Swaps | Simulated | BSC, via the route in `hackathon-route.ts` |
+| Cycle | 30s | 5 min (`TRADE_INTERVAL_MS`, default `300000`) |
+| Quote pulse | 10s | 10s (`SIGNAL_REFRESH_MS`) |
+| Protective exits | On, checked every 10s | Same |
+| Portfolio | Local | Reconciled with the wallet each cycle |
 
-### Environment Variables
+`BRIDGE_MODE` is `auto` (default), `baw`, `cmc-pro`, or `mock`. `auto` uses Agentic Wallet when `baw` is signed in.
 
-All variables are documented in `.env.example`. Key ones:
+### Variables that change behavior
 
-| Variable | Default | Description |
+| Variable | Default | Role |
 |---|---|---|
 | `AGENT_MODE` | `paper` | `paper` or `live` |
-| `BRIDGE_MODE` | `auto` | `auto` / `baw` / `cmc-pro` / `mock` |
-| `CMC_PRO_API_KEY` | — | CoinMarketCap Pro API key |
-| `PAYMENT_TOKEN` | `USDT` | Campaign payment token: BNB / USDT / USDC / U / USD1 |
-| `BAW_CLI` | `baw` | Binance Agentic Wallet CLI |
-| `AGENT_WALLET_ADDRESS` | — | BSC wallet address (auto-detected from `baw`) |
-| `INITIAL_DEPOSIT_USD` | `2000` | Starting USDT deposit. Total PnL = NAV − (this + BNB at lock) |
-| `API_SECRET` | — | **Required in production** — Bearer token for API auth |
-| `NODE_ENV` | — | Set to `production` on VPS |
-| `STRATEGY` | `medium` | `safe` / `medium` / `momentum` |
-| `TRADE_INTERVAL_MS` | 30s/60min | Cycle frequency |
-| `MAX_DRAWDOWN_PCT` | `20` | Hard drawdown cap (%) |
-| `MAX_POSITION_SIZE_USD` | `100` | Max **buy** size (USD). Sells are not capped — a position that grew past this can still exit in full. |
-| `MAX_DAILY_TRADES` | `10` | Daily autonomous trade cap (set in `.env`; dashboard reads from agent config) |
-| `STOP_LOSS_PCT` | `8` | Stop-loss threshold (%) |
-| `TAKE_PROFIT_PCT` | `15` | Arms the trailing TP (does not sell at this print) |
-| `TRAILING_GIVEBACK_PCT` | `1` | After arm, sell if price drops this % from the hold's peak |
-| `MIN_BUY_CONFIDENCE` | `0.55` | Minimum signal confidence to buy |
-| `AUTO_EXIT_ENABLED` | `false` | Enable autonomous stop-loss/take-profit exits |
-| `OPENAI_API_KEY` | — | Enables AI assistant + signal analysis |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Any OpenAI-compatible chat model |
-| `SQLITE_PATH` | `data/neural-alpha.sqlite` | Local SQLite file. This is the live database |
-| `DATABASE_URL` | — | Optional Neon Postgres connection. Receives an hourly copy of SQLite |
-| `NEON_BACKUP_INTERVAL_MS` | `3600000` | How often SQLite is backed up to Neon |
-| `CORS_ORIGINS` | — | Additional allowed CORS origins (comma-separated) |
-| `DASHBOARD_PORT` | `3847` | Agent API port (internal) |
-| `LOG_LEVEL` | `info` | `error` / `warn` / `trade` / `signal` / `info` / `debug` |
+| `PAYMENT_TOKEN` | `USDT` | Buy-side token: `BNB`, `USDT`, `USDC`, `U`, `USD1` |
+| `BAW_CLI` | `baw` | CLI binary |
+| `BINANCE_CHAIN_ID` | `56` | BSC |
+| `OC_API_KEY` / `OC_SECRET_KEY` | unset | Signed Web3 API. The signed path includes `/build`. Omitting it returns `40102` |
+| `HACKATHON_MAX_TRADE_USD` | `15` | Ceiling for a closed-market autonomous buy |
+| `STUDIO_AGENT_URL` | unset | Optional Agent Studio research task. It sizes; it does not custody bStocks |
+| `SESSION_POLICY` | `auto` | `auto`, `rth`, `close`, `overnight`. Legacy `safe` / `medium` / `momentum` map to `overnight` / `auto` / `rth` |
+| `INITIAL_DEPOSIT_USD` | `2000` | Deposit baseline. Total PnL is NAV minus this deposit plus BNB locked at the first sync |
+| `MAX_POSITION_SIZE_USD` | `250` | Cap on a buy. A larger position can still be sold in full |
+| `MAX_PORTFOLIO_TOKENS` | session | RTH/close 4, overnight 3, unless overridden |
+| `MIN_TRADE_AMOUNT_USD` | `5` | Dust floor |
+| `MIN_BUY_CONFIDENCE` | session | About 0.48–0.52 unless overridden |
+| `STOP_LOSS_PCT` | session | Protective stop |
+| `TAKE_PROFIT_PCT` | session | Arms the trail. It does not sell at that print |
+| `TRAILING_GIVEBACK_PCT` | `1` | After the trail arms, sell on a 1% drop from the hold's peak |
+| `AUTO_EXIT_ENABLED` | on | Set `false` to disable autonomous stops |
+| `SLIPPAGE_TOLERANCE` | `1` | Percent. Also the gap allowed between the Trading API quote and the `baw` quote |
+| `DISABLE_DRAWDOWN_LIMIT` | `true` in `.env.example` | `true` turns the drawdown halt off. Unset it to use the session cap (18–22%) |
+| `FAILED_SWAP_COOLDOWN_MS` | `1800000` | 30 min before the same name is retried after a failed swap |
+| `MIN_BUY_INTERVAL_MS` | `600000` | 10 min between autonomous buys |
+| `ELIGIBLE_BSTOCKS` | file | Comma-separated override of `data/eligible-bstocks.json` |
+| `ALLOW_LEVERAGED_BSTOCKS` | off | Leveraged and inverse names stay out of new buys |
+| `API_SECRET` | unset | Required in production. Bearer token for every non-GET |
+| `OPENAI_API_KEY` | unset | Optional. Rules trade without it |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Per-cycle signal note. Any OpenAI-compatible API via `OPENAI_BASE_URL` |
+| `AI_SIGNAL_ANALYSIS` | on when a key is set | Can nudge confidence. It cannot place or block an order by itself |
+| `SQLITE_PATH` | `data/neural-alpha.sqlite` | Live database |
+| `DATABASE_URL` | unset | Optional Neon Postgres. Hourly copy of SQLite |
+| `CMC_PRO_API_KEY` | unset | Optional CoinMarketCap Pro quotes and Fear & Greed |
+| `DASHBOARD_PORT` | `3847` | Agent API. Production `deploy.sh` uses `3006` |
+| `LOG_LEVEL` | `info` | `error` `warn` `trade` `signal` `info` `debug` |
+
+The full template, including x402 cadence and CMC macro cache, is `.env.example`. Dashboard-only flags are in `dashboard/.env.example`.
 
 ---
 
-## Strategy Engine
+## Strategy
 
-### Signal Pipeline (9 factors)
+### Session profiles
 
-| Factor | Weight (Medium) | Source |
+bStocks trade 24 hours on BSC. The cash market does not. `SESSION_POLICY=auto` follows the New York clock and swaps the profile:
+
+| Clock | Window (America/New_York) | Profile |
 |---|---|---|
-| RSI (14) | 15 | Price history |
-| MACD (12/26/9) | 13 | Price history |
-| EMA Crossover (12/26) | 11 | Price history |
-| Bollinger Bands (20,2) | 6 | Price history |
-| Momentum (10-period) | 18 | Price history |
-| Volume Spike | 18 | Volume vs 20-bar avg |
-| MCap:Volume Turnover | 7 | CMC |
-| Fear & Greed Index | 6 | CMC |
-| News Sentiment | 10 | ClipX API |
+| `rth` | Weekday 09:30–16:00 | Trend, opening-range breakout, volume. Larger size |
+| `close` | Weekday 16:00–20:00 | Hold strength into the cash close |
+| `overnight` | Everything else, including weekends | Gaps and news. Smaller size |
 
-Weights vary by strategy preset. Signals are ranked by absolute score, then validated by the risk manager before execution.
+`SESSION_POLICY=rth|close|overnight` locks one profile. The RWA `marketStatus` from the signed API still gates the order. The NY clock is only the fallback when that field is empty.
 
-### Strategy Presets
+### What gets scored
 
-| Preset | Philosophy | Max DD | Daily Trades | Position Size | Stop/TP |
-|---|---|---|---|---|---|
-| **SafeTrade** | Capital preservation, confirmed mean-reversion, tight stops | 12% | 3 | 0.6x | 5% / 10% |
-| **Medium** | Balanced trend + momentum + volume | 20% | 5 | 0.85x | 8% / 15% |
-| **Momentum** | Return-seeking, chases breakouts and volume spikes | 28% | 6 | 1.1x | 10% / 28% |
+Weights live on the active profile (`strategy/presets.ts`). Factors: RSI(14), MACD(12/26/9), EMA(12/26), Bollinger(20, 2), momentum, volume versus its 20-bar average, market-cap to volume, news sentiment, StochRSI, VWAP, overnight gap, opening-range breakout, and a regime tag. ClipX news is fetched from `CLIPX_NEWS_URL` (default `https://clipx.app/api/news/feed`).
 
-Switch presets at runtime from the dashboard Agent Controls panel or via the API.
+When `OPENAI_API_KEY` is set, the top signals (`AI_SIGNAL_TOP_N`, default 5) get a short LLM note. A daily review runs after midnight UTC unless `AI_DAILY_REVIEW=false`.
 
-### AI Signal Analysis (Optional)
+### RWA gate
 
-When `OPENAI_API_KEY` is set and `AI_SIGNAL_ANALYSIS=true`:
+Pure function in `strategy/rwa-book.ts`. No network of its own. The signed client fills it.
 
-- Top N signals per cycle are sent to the LLM with full technical context
-- AI returns verdict (bullish/bearish/neutral), confidence, risks, and a one-line summary
-- AI insight is overlaid on the signal score and surfaced on the dashboard
+| Condition | Buy | Sell |
+|---|---|---|
+| Status missing or `pause` | Blocked | Blocked |
+| On-chain ≥ 1.5% rich vs reference | Blocked | Allowed only if the wallet already holds it, and size stays inside the cap |
+| `closed` or `overnight` | $8–$15, one new name, stale research uses $8 | Existing exit rules |
+| `regular` or premarket | Normal size, still inside `MAX_POSITION_SIZE_USD` | Normal |
 
 ---
 
-## Risk Management
+## Risk
 
-All guardrails are enforced in code (`neural-alpha/src/risk/manager.ts`), not prompts:
+Enforced in `neural-alpha/src/risk/manager.ts` and the RWA gate, not in a prompt.
 
-| Rule | Default | Effect |
-|---|---|---|
-| Max drawdown | 20% (Medium) | Emergency mode — new buys halted, positions held |
-| Stop-loss | 8% | Protective sell triggered |
-| Take-profit | 15% | Protective sell triggered |
-| Trailing stop | 6% activate / 3% giveback | Locks in gains after activation |
-| Daily trade cap | 5/day | Autonomous trades blocked after cap |
-| On-chain tx budget | 10/day | Prevents excessive gas spend |
-| Max positions | 3 tokens | Portfolio concentration limit |
-| Min trade size | $5 | Dust prevention |
-| Max position size | $100 | Per-trade cap |
-| Confidence gate | 55% | Weak signals filtered |
-| Token allowlist | 149 BEP-20 | Ineligible tokens rejected |
-| Eligible-list check | Skip audit for current-week bStocks; otherwise fail-closed |
-| Startup cooldown | 120s | Autonomous trades paused after restart |
-| Failed swap cooldown | 30 min | Same token not retried immediately |
+| Rule | Behavior |
+|---|---|
+| Allowlist | Symbol must be an eligible bStock. Stables and `EXCLUDED_TOKENS` cannot be bought |
+| Leveraged names | Skipped unless `ALLOW_LEVERAGED_BSTOCKS=true` |
+| Confidence | Below the session minimum, no buy |
+| Position count | Session cap, overridable with `MAX_PORTFOLIO_TOKENS` |
+| Drawdown | Session cap unless `DISABLE_DRAWDOWN_LIMIT=true` |
+| Stop and trail | Autonomous when `AUTO_EXIT_ENABLED` is on (the default) |
+| Failed swap | 30 minute cooldown on that symbol |
+| Quote disagreement | Trading API output and `baw` output must be inside `SLIPPAGE_TOLERANCE`, unless they diverge by 25% or more (treated as a unit mismatch, not a veto) |
+| Simulation | A failed `pre-transaction/simulate` blocks the send |
+| Gas | BNB below `MIN_GAS_RESERVE_USD` is not spent as the swap token |
+
+FIFO lots and deposit-baseline PnL are in `neural-alpha/src/risk/portfolio.ts`. Gas is not part of campaign realized PnL.
 
 ---
 
 ## Dashboard
 
-The Next.js dashboard at `https://agents.clipx.app` provides:
+Next.js 15 app in `dashboard/`. Public production: https://neuralalpha.io. `/about` is a fixed overview and does not repaint from the live book.
 
-| Panel | Description |
+| Surface | Role |
 |---|---|
-| **Metric Cards** | Portfolio NAV, PnL, drawdown, win rate, daily trades |
-| **Equity Chart** | Live portfolio value over time |
-| **Drawdown Chart** | Max drawdown visualization |
-| **Allocation Chart** | Portfolio composition by token |
-| **Signal Monitor** | RSI, MACD, momentum, news sentiment, AI verdict per token |
-| **Positions Table** | Open positions with entry price, PnL, weight |
-| **Trade History** | Full trade log with BSCScan links for live trades |
-| **Activity Feed** | Filterable real-time log stream |
-| **Wallet Panel** | Address, BNB/USDT balances, sync, competition registration |
-| **Agent Controls** | Max position, interval, drawdown, slippage, strategy preset |
-| **Command Panel** | Natural language assistant (AI-powered with OpenAI key) |
+| Metric cards | NAV, PnL, drawdown, win rate |
+| Equity and allocation | Value over time, mix by token |
+| Signal monitor | Indicators and the latest AI note |
+| Positions and trades | Open lots, history, BSCScan links on live fills |
+| Activity | Log stream |
+| Wallet | Address, BNB and payment-token balances |
+| Agent controls | Size, interval, slippage, session policy. Hidden on the public read-only build |
+| AI desk | Assistant and daily review when an OpenAI-compatible key is set |
 
-The dashboard connects via SSE for real-time streaming — no polling.
+The browser talks to `/api/agent/*`. The Next.js route proxies that to the agent. SSE is the live channel. Set both `READONLY=true` and `NEXT_PUBLIC_READONLY=true` on any public build. Leave both unset on a machine where you operate the agent.
+
+---
+
+## API
+
+Agent HTTP API, prefix `/api`. Bound to `127.0.0.1`.
+
+GET is public so a monitor can read state. Every other method returns 401 unless `Authorization: Bearer <API_SECRET>` matches. If `API_SECRET` is unset, auth is off (local development only).
+
+| Method | Path | Role |
+|---|---|---|
+| GET | `/api/health` | Liveness. No auth even when a secret is set |
+| GET | `/api/state` | Agent snapshot |
+| GET | `/api/logs` | Recent log lines |
+| GET | `/api/events` | SSE |
+| GET | `/api/wallet` | Address and balances |
+| GET | `/api/competition/status` | Campaign registration flag |
+| GET | `/api/llm/status` | Whether an LLM key is configured |
+| GET | `/api/reviews` | Stored daily reviews |
+| GET | `/api/blacklist` | Symbols blocked from new buys |
+| GET | `/api/campaign/studio-job` | Latest Studio research job |
+| POST | `/api/control/start` | Resume the loop |
+| POST | `/api/control/stop` | Pause the loop |
+| POST | `/api/control/restart` | Reset and restart |
+| POST | `/api/control/sell` | Operator sell |
+| POST | `/api/control/resync` | Re-read the wallet |
+| POST | `/api/control/config` | Whitelisted config keys |
+| POST | `/api/control/watchlist` | Set the watchlist |
+| POST | `/api/assistant` | Natural-language assistant |
+| POST | `/api/wallet/sync` | Pull balances |
+| POST | `/api/wallet/signin` | Start `baw` pairing |
+| POST | `/api/wallet/verify` | Confirm pairing |
+| POST | `/api/blacklist` | Add or remove a symbol |
+| POST | `/api/reviews/run` | Write a daily review now |
+| POST | `/api/campaign/ai-tasks` | Paid campaign x402 calls |
+| POST | `/api/competition/register` | Record campaign registration |
+
+Production health check:
+
+```bash
+curl -sS https://neuralalpha.io/api/health
+```
+
+A public POST must fail:
+
+```bash
+curl -sS -X POST https://neuralalpha.io/api/agent/control/stop
+# {"error":"Unauthorized"}
+```
+
+---
+
+## Project structure
+
+```
+neural-alpha/
+├── README.md                         # this file
+├── HACKATHON.md                      # October 2026 submission notes
+├── AGENTS.md                         # short map for coding agents
+├── package.json                      # npm workspaces
+├── ecosystem.config.cjs              # PM2: neural-agent, neural-dashboard
+├── deploy.sh                         # VPS deploy for neuralalpha.io
+├── .env.example
+├── deploy/
+│   ├── DEPLOY.md
+│   ├── setup.sh
+│   └── baw-connect.sh                # one pairing session on a VPS
+├── neural-alpha/                     # agent
+│   └── src/
+│       ├── index.ts                  # process entry, graceful shutdown
+│       ├── agent.ts                  # cycle, state, RWA-aware routing
+│       ├── config.ts                 # env → AgentConfig
+│       ├── hackathon-check.ts        # stack check, never sends
+│       ├── execution/
+│       │   ├── executor.ts           # order builder
+│       │   └── hackathon-route.ts    # quote → simulate → broadcast
+│       ├── integrations/
+│       │   ├── bstock.ts             # type=3 universe
+│       │   ├── binance-web3-signed.ts
+│       │   ├── agentic-wallet-bridge.ts
+│       │   ├── baw-cli.ts
+│       │   └── campaign-x402.ts
+│       ├── strategy/                 # signals, sessions, RWA gate, AI note
+│       ├── risk/                     # manager, FIFO portfolio
+│       ├── db/                       # SQLite + optional Neon copy
+│       └── web/server.ts             # localhost API
+└── dashboard/                        # Next.js UI
+    └── src/app/
+        ├── page.tsx                  # monitor
+        ├── about/page.tsx
+        └── api/agent/[...path]/route.ts
+```
+
+---
+
+## Scripts
+
+From the repo root:
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Agent and dashboard together |
+| `npm run agent` / `npm run agent:dev` | Agent only / watch mode |
+| `npm run dashboard` | Next.js only |
+| `npm run build` | Compile agent and dashboard |
+| `npm test --workspace=neural-alpha` | Unit tests (RWA book, signature prefix, risk, portfolio, store) |
+| `npm run hackathon:check --workspace=neural-alpha` | Live API check. Does not send a swap |
+| `npm run register` | Campaign registration helper for the earlier PnL contest |
+| `npm run prod:build` | Production build |
+| `npm run prod:start` | `pm2 start ecosystem.config.cjs` |
+| `npm run prod:restart` | Restart `neural-agent` and `neural-dashboard` only |
+| `npm run prod:logs` | Those two logs |
+| `npm run local:simulator` | SSH tunnel from a laptop to the VPS agent, then a local dashboard |
+
+Do not run `pm2 restart all` on the production host. Other apps share that process list.
+
+---
+
+## Web3 modules on the live path
+
+Implemented in `neural-alpha/src/integrations/binance-web3-signed.ts`. Base URL `https://web3.binance.com/build`. Signature string is `timestamp + METHOD + /build/api/v1/... + body`. Auth: [Binance Web3 authentication](https://web3.binance.com/en/dev-docs/authentication).
+
+| Module | Use |
+|---|---|
+| RWA Data | Token board, ticker search, market status, profile, on-chain vs reference price |
+| Market | Candles |
+| Trading | Aggregated quote and swap calldata |
+| Transaction | `simulate`, then broadcast when a raw signed transaction exists |
+| Wallet | Portfolio read |
+| DeFi | Stable APY read (context, not a strategy input that places trades) |
+| Agentic Wallet | `baw` quote, `contract-call` when Developer Mode is on, `market-order swap` as the fallback above |
+| b402 / x402 | CMC MCP and Agent Studio research payments. Gasless. They do not move the bStock inventory |
+
+Public bStock quotes also work with no developer key:
+
+`https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai?type=3`
+
+That public list is not a substitute for the signed RWA price and market-status calls.
 
 ---
 
 ## Deployment
 
-### Production Architecture
+Public site: https://neuralalpha.io. The agent listens on localhost. Nginx terminates TLS and forwards the site to Next.js.
 
-```
-Internet → Nginx (SSL) → Next.js :3000 → Agent API :3847 (localhost only) → baw → BSC
-```
-
-- **Agent API** binds to `127.0.0.1` only — never directly exposed to the internet
-- **Dashboard** proxy authenticates with the agent using `API_SECRET`
-- **Nginx** terminates SSL, routes traffic, adds security headers
-
-### Existing VPS (`~/neural-alpha`)
-
-Public site is **read-only**. Other PM2 apps (e.g. `clipx-news-brain`) are not restarted.
+On the VPS, from this repo:
 
 ```bash
-cd ~/neural-alpha
-cp -a .env /tmp/neural-alpha.env
-git fetch origin
-git checkout -B agentic-wallet origin/agentic-wallet
-git reset --hard origin/agentic-wallet
-cp /tmp/neural-alpha.env .env
-bash deploy/setup.sh
+bash deploy.sh
 ```
 
-### Fresh VPS
+`deploy.sh` targets `neuralalpha.io`, restarts only `neural-agent` and `neural-dashboard`, and can pin a branch (`bash deploy.sh update --branch hackathon --reset`). `--reset` discards code changes and restores `.env`.
 
-```bash
-git clone -b agentic-wallet <repo-url> ~/neural-alpha && cd ~/neural-alpha
-cp .env.example .env && nano .env
-bash deploy/setup.sh
-```
+Older notes for the `agents.clipx.app` host are in [`deploy/DEPLOY.md`](./deploy/DEPLOY.md). That host is also read-only. To operate the VPS agent from a laptop, stop local `npm run dev` (it owns port 3847) and run `bash deploy/local-machine-simulator.sh`. The laptop `.env` must use the same `API_SECRET`.
 
-The script forces `READONLY=true` / `NEXT_PUBLIC_READONLY=true`, keeps `API_SECRET`, and starts only `neural-agent` + `neural-dashboard`.
-
-### Manual Deploy
-
-```bash
-# Install dependencies
-npm ci
-
-# Build everything
-npm run prod:build
-
-# Start with PM2
-pm2 start ecosystem.config.cjs
-pm2 save && pm2 startup
-```
-
-### PM2 Operations
-
-```bash
-pm2 status                                      # all processes
-pm2 logs neural-agent --lines 100
-pm2 logs neural-dashboard
-pm2 restart neural-agent neural-dashboard       # do not use restart all
-```
-
-### Health Check
-
-```bash
-curl https://agents.clipx.app/api/health
-# → {"status":"ok","running":true,"uptime":12345,"timestamp":...}
-```
-
-### Updating
-
-```bash
-cd ~/neural-alpha
-bash deploy/setup.sh --branch agentic-wallet --reset
-```
-
-Full deployment documentation: [`deploy/DEPLOY.md`](./deploy/DEPLOY.md)
+Pair Agentic Wallet on a machine with a browser, then copy the session, or run `bash deploy/baw-connect.sh` once on the VPS and confirm that single code in the Binance app. Do not start a second `baw auth signin` while a code is waiting.
 
 ---
 
 ## Security
 
-### Authentication
-
-All agent API endpoints (except `/api/health`) require authentication:
-
-```bash
-# Set in .env
-API_SECRET=<generated-with-openssl-rand-hex-32>
-```
-
-The dashboard proxy automatically attaches the token. Direct API calls require:
-
-```
-Authorization: Bearer <API_SECRET>
-```
-
-### Hardening
-
-| Measure | Implementation |
+| Control | Where |
 |---|---|
-| API authentication | Bearer token on all mutating/read endpoints |
-| CORS restriction | Origin whitelist (`agents.clipx.app` + `localhost`) |
-| Rate limiting | 120 req/min per IP (in-memory token bucket) |
-| Body size limits | 64KB max request body |
-| SSE connection cap | 20 concurrent clients |
-| Localhost binding | Agent API on `127.0.0.1` only |
-| Security headers | `X-Frame-Options`, `X-Content-Type-Options`, `HSTS`, `Referrer-Policy` |
-| Error sanitization | No stack traces in production responses |
-| Input validation | Whitelist of allowed config keys, command length limits |
-| Agentic Wallet | MPC keyless — agent never holds private keys |
-| Graceful shutdown | SIGTERM/SIGINT handlers with timeout |
+| No trading key in the repo | Agentic Wallet MPC. Never commit `.env`, `~/.baw/`, or API secrets |
+| Localhost API | `server.listen(port, "127.0.0.1")` |
+| POST auth | Bearer `API_SECRET`. GET stays public for the monitor |
+| Public UI | `READONLY` and `NEXT_PUBLIC_READONLY` hide controls and stop the proxy from attaching the secret |
+| CORS | `neuralalpha.io`, `www.neuralalpha.io`, `agents.clipx.app`, localhost. Extra origins via `CORS_ORIGINS` |
+| Rate limit | 240 requests/minute/IP. Health and SSE are exempt |
+| Body cap | 64 KB |
+| SSE cap | 20 clients |
+| Errors | Production responses omit stack traces |
+| Config writes | Whitelist of keys |
 
-### Best Practices
-
-- **Never commit** `.env`, session tokens, or `~/.baw/`
-- Use a **dedicated hot wallet** with limited funds
-- Token allowlist enforced in code — ineligible tokens rejected
-- Honeypot screening before every live swap
-- Drawdown cap enforced in code, not prompts
+Use a wallet funded with only what you are willing to trade. Closed-market autonomous buys stay inside `HACKATHON_MAX_TRADE_USD`.
 
 ---
 
-## API Reference
+## Hackathon
 
-All endpoints are prefixed with `/api/`. Authentication required unless noted.
+Event: [BNB Hack: Tokenized Stocks Edition](https://www.bnbchain.org/en/hackathons/tokenized-stocks). Submissions lock 11 Oct 2026, 12:00 UTC. Judging runs 12–23 Oct. Keep this branch and https://neuralalpha.io up through 23 Oct.
 
-### Read Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/health` | Health check (no auth) |
-| `GET` | `/api/state` | Full agent state snapshot |
-| `GET` | `/api/logs` | Last 100 log entries |
-| `GET` | `/api/events` | SSE stream (state + log events) |
-| `GET` | `/api/wallet` | Wallet address, BNB/USDT balances |
-| `GET` | `/api/competition/status` | Competition registration status |
-
-### Control Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `POST` | `/api/control/start` | Start trading loop |
-| `POST` | `/api/control/stop` | Pause trading loop |
-| `POST` | `/api/control/restart` | Reset portfolio and restart |
-| `POST` | `/api/control/resync` | Force on-chain portfolio reconciliation |
-| `POST` | `/api/control/config` | Update agent configuration |
-| `POST` | `/api/control/watchlist` | Set token watchlist |
-| `POST` | `/api/command` | Execute NL command |
-| `POST` | `/api/wallet/sync` | Sync USDT balance from chain |
-| `POST` | `/api/wallet/mode` | Switch wallet mode (local/walletconnect) |
-| `POST` | `/api/competition/register` | Submit on-chain competition registration |
-
----
-
-## Project Structure
-
-```
-neural-alpha/
-├── ecosystem.config.cjs          # PM2 process configuration
-├── package.json                   # Monorepo root (npm workspaces)
-├── .env.example                   # Environment template
-├── deploy/
-│   ├── DEPLOY.md                  # Deployment documentation
-│   ├── nginx.conf                 # Nginx reverse proxy config
-│   └── setup.sh                   # One-command deploy script
-│
-├── neural-alpha/                  # Autonomous trading agent
-│   ├── package.json
-│   └── src/
-│       ├── index.ts               # Entry point + graceful shutdown
-│       ├── agent.ts               # Core trading loop + state management
-│       ├── config.ts              # bStock watchlist, configuration
-│       ├── execution/
-│       │   └── executor.ts        # baw market-order builder + result processor
-│       ├── integrations/
-│       │   ├── create-bridge.ts   # Bridge factory (baw / CMC Pro / mock)
-│       │   ├── agentic-wallet-bridge.ts # Binance Agentic Wallet CLI
-│       ├── commands/
-│       │   ├── handler.ts         # NL command router + trade execution
-│       │   └── llm.ts             # OpenAI-compatible assistant
-│       ├── data/
-│       │   ├── market.ts          # CMC quotes, price history, F&G
-│       │   └── news.ts            # ClipX news fetcher
-│       ├── db/
-│       │   ├── schema.sqlite.sql  # Live SQLite schema
-│       │   ├── schema.sql         # Neon backup schema
-│       │   ├── store.ts           # SQLite persistence (trades, NAV, sync)
-│       │   └── neon-backup.ts     # Hourly SQLite → Neon copy
-│       ├── risk/
-│       │   ├── manager.ts         # Risk validation + emergency mode
-│       │   └── portfolio.ts       # PnL tracking, snapshots, reconciliation
-│       ├── strategy/
-│       │   ├── index.ts           # Strategy orchestrator
-│       │   ├── signals.ts         # 9-factor signal scoring
-│       │   ├── presets.ts         # SafeTrade / Medium / Momentum profiles
-│       │   ├── ai-analyst.ts      # GPT-powered technical analysis
-│       │   ├── news-sentiment.ts  # ClipX NLP sentiment analyzer
-│       │   └── indicators.ts      # RSI, MACD, EMA, BB, ATR
-│       ├── utils/
-│       │   ├── logger.ts          # Structured logging + SSE fan-out
-│       │   └── types.ts           # Shared TypeScript interfaces
-│       └── web/
-│           └── server.ts          # Agent HTTP API + SSE + auth + rate limiting
-│
-└── dashboard/                     # Next.js 15 live monitoring UI
-    ├── package.json
-    ├── next.config.ts             # Security headers, production config
-    └── src/
-        ├── app/
-        │   ├── page.tsx           # Main dashboard page
-        │   ├── layout.tsx         # Root layout
-        │   └── api/agent/[...path]/
-        │       └── route.ts       # Authenticated proxy to agent API
-        ├── components/dashboard/  # 13 UI panels
-        ├── hooks/
-        │   └── useAgentConnection.ts  # SSE client + state management
-        └── lib/
-            ├── agent-api.ts       # Typed API client
-            ├── agent-url.ts       # Agent URL resolution
-            ├── map-agent-state.ts # API → dashboard state mapping
-            └── mock-data.ts       # Offline demo data
-```
-
----
-
-## NPM Scripts
-
-| Command | Description |
+| Submit | URL |
 |---|---|
-| `npm run dev` | Start agent + dashboard together (development) |
-| `npm run agent` | Agent only |
-| `npm run agent:dev` | Agent with hot reload |
-| `npm run dashboard` | Dashboard dev server |
-| `npm run build` | Build all workspaces |
-| `npm run register` | Competition registration helper |
-| `npm run prod:build` | Production build (agent + dashboard) |
-| `npm run prod:start` | Start via PM2 |
-| `npm run prod:stop` | Stop via PM2 |
-| `npm run prod:restart` | Restart via PM2 |
-| `npm run prod:logs` | PM2 log viewer |
-| `npm run prod:status` | PM2 process status |
-| `npm run prod:deploy` | Full deployment script |
+| Register | https://forms.gle/NEmy3FxYc4f5Dua47 |
+| Project | https://forms.gle/yToDUzaDMwWnq6R6A |
+| Developer Experience Report | https://forms.gle/EUQ39xf54GHjC2ys5 |
+
+The report is 25% of the score. Write it from your own integration notes. A generated report is rejected. Facts worth checking against the code and the docs are in [`HACKATHON.md`](./HACKATHON.md).
+
+Restricted regions (do not register from these): United States, Canada, the Netherlands, Iran, Cuba, North Korea, Crimea, Donetsk People's Republic, Luhansk People's Republic, the United Kingdom, and Japan.
 
 ---
 
 ## Troubleshooting
 
-### Dashboard shows DEMO / offline
+**Dashboard stays on DEMO.** The agent is not running, or the dashboard cannot reach it. `npm run dev`, then open http://127.0.0.1:3847/api/health.
 
-The agent isn't running. Start both services:
+**`40102 Invalid signature`.** The signed path must start with `/build`. See `buildPreHash` in `binance-web3-signed.ts`.
 
-```bash
-npm run dev
-```
+**Signed calls skipped.** `OC_API_KEY` and `OC_SECRET_KEY` are empty. The public type=3 list still loads. Hours, spread, simulate, and the Trading API quote do not.
 
-### Trades show no BSC tx hash in live mode
+**Live mode never fills.** `baw wallet status --json` must be connected. The wallet needs the payment token and BNB for gas. Developer Mode must be on for `contract-call`. If it is off, the route falls back to `market-order swap`. A failed simulation stops the order instead of falling back.
 
-1. Confirm `AGENT_MODE=live` in `.env`
-2. Ensure wallet has both USDT (trading capital) and BNB (gas)
-3. Restart the agent after funding
-4. Check logs: `pm2 logs neural-agent` or `tail -f neural-alpha/logs/agent.jsonl`
+**`401` on a control POST.** `API_SECRET` on the caller does not match the agent. Public hosts are supposed to reject these.
 
-### API returns 401 Unauthorized
+**Port 3847 in use.** Development retries 3847–3852. Production does not, so it cannot land on another site's port. Stop the other agent, or set `DASHBOARD_PORT`.
 
-`API_SECRET` mismatch between agent and dashboard. Ensure both read the same `.env` file, or set `API_SECRET` in the dashboard's environment.
-
-### Port 3847 already in use
-
-The agent automatically retries ports 3847-3852. If all are taken, stop other agent processes:
-
-```bash
-pm2 stop neural-agent
-# or
-lsof -i :3847
-```
-
-### Agentic Wallet issues
-
-```bash
-baw wallet status --json
-baw wallet address --json
-baw wallet balance --binanceChainId 56 --json
-```
-
-If status is `UNCONNECTED` on a laptop, run `baw auth signin` and confirm in the Binance App. On a VPS use `bash deploy/baw-connect.sh` (or copy `~/.baw` from a machine that is already signed in).
-
-To control the **VPS** agent from this Mac (not the public monitor), stop `npm run dev` and run `bash deploy/local-machine-simulator.sh`.
+**Agentic Wallet on a server.** A VPS has no browser. Pair on a laptop and `scp -r ~/.baw` to the PM2 user, or use `bash deploy/baw-connect.sh` once.
 
 ---
 
-## Competition
-
-### bStock AI-Powered PnL Contest
-
-| Field | Value |
-|---|---|
-| Window | 2026-08-17 09:00 UTC – 2026-09-01 00:00 UTC |
-| Ranking | Realized PnL (FIFO), Top 100 |
-| Prize | Up to 100,000 USDC |
-| Docs | [bstock-pnl-contest](https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest) |
-
-### Competition Rules Enforcement
-
-| Rule | Implementation |
-|---|---|
-| Register before trading | Join Now on campaign page + `CAMPAIGN_REGISTERED=true` |
-| Eligible bStock only | type=3 API + `data/eligible-bstocks.json` |
-| Payment BNB/USDT/USDC/U/USD1 | `PAYMENT_TOKEN` + executor |
-| Agentic Wallet execution | `baw market-order swap` |
-| FIFO realized PnL | `risk/portfolio.ts` lots |
-| ≥3 CMC + ≥3 Studio x402 | `campaign-x402.ts` / dashboard |
-
-### Registration
+## Tests
 
 ```bash
-npm run register
-# Then tap Join Now and bind this Agentic Wallet.
+npm test --workspace=neural-alpha
 ```
 
-### baw CLI commands used
-
-| Command | Purpose |
-|---|---|
-| `wallet status/address/balance` | Connection + holdings |
-| `market-order quote/swap/list` | Price + execute + confirm |
-| `x402-payment preview/sign` | Campaign CMC / Agent Studio payments |
-| `auth signin/verify` | Binance App QR session |
-
----
-
-## Resources
-
-| Resource | URL |
-|---|---|
-| Live Dashboard | https://agents.clipx.app |
-| Campaign docs | https://web3.binance.com/en/dev-docs/products/agentic-wallet/use-cases/campaigns/bstock-pnl-contest |
-| Agentic Wallet skill | https://github.com/binance/binance-skills-hub/tree/main/skills/binance-web3/binance-agentic-wallet |
-| CMC Agent Hub | https://coinmarketcap.com/api/agent |
-| Deployment Guide | [deploy/DEPLOY.md](./deploy/DEPLOY.md) |
-
----
-
-
+Covers the RWA decision table, the `/build` signature prefix, risk gates, FIFO and deposit PnL, external flows, the SQLite store, and the x402 schedule. `hackathon:check` is the network check and is not part of `npm test`.
