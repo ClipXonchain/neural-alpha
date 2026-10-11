@@ -276,6 +276,51 @@ export async function submitStudioAnalysis(tickers: string[]): Promise<StudioJob
   return job;
 }
 
+/**
+ * Pay a deployed Studio research task. The response may include sizeScale (0–1).
+ * A missing URL, or a failed payment, leaves sizing to the hours gate.
+ */
+export async function consultStudioResearch(input: {
+  url: string;
+  symbol: string;
+  marketStatus: string;
+  spreadPct: number | null;
+}): Promise<{ fresh: boolean; sizeScale: number }> {
+  const body = JSON.stringify({
+    symbol: input.symbol,
+    marketStatus: input.marketStatus,
+    spreadPct: input.spreadPct,
+  });
+  const headers: Record<string, string> = { Accept: "application/json", "Content-Type": "application/json" };
+  const challenge = await fetch(input.url, { method: "POST", headers, body });
+  if (challenge.status !== 402 && challenge.ok) {
+    const json = (await challenge.json().catch(() => ({}))) as { sizeScale?: number };
+    const scale = typeof json.sizeScale === "number" ? Math.min(1, Math.max(0, json.sizeScale)) : 1;
+    return { fresh: true, sizeScale: scale };
+  }
+  if (challenge.status !== 402) {
+    const text = await challenge.text();
+    throw new Error(`Studio research HTTP ${challenge.status}: ${text.slice(0, 180)}`);
+  }
+  const paymentRequired =
+    headerValue(challenge.headers, "payment-required") ?? headerValue(challenge.headers, "PAYMENT-REQUIRED");
+  if (!paymentRequired) throw new Error("Studio research 402 missing payment-required");
+  const signed = await previewAndSign(paymentRequired);
+  const replay = await fetch(input.url, {
+    method: "POST",
+    headers: { ...headers, [signed.paymentHeaderName]: signed.paymentHeaderValue },
+    body,
+  });
+  if (!replay.ok) {
+    const text = await replay.text();
+    throw new Error(`Studio research replay HTTP ${replay.status}: ${text.slice(0, 180)}`);
+  }
+  const json = (await replay.json().catch(() => ({}))) as { sizeScale?: number };
+  recordStudioCall({ at: Date.now(), symbols: [input.symbol], settled: true });
+  const scale = typeof json.sizeScale === "number" ? Math.min(1, Math.max(0, json.sizeScale)) : 1;
+  return { fresh: true, sizeScale: scale };
+}
+
 export async function pollStudioJob(
   jobId: string,
   jobToken: string

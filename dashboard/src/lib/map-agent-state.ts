@@ -948,6 +948,7 @@ export function mapTrack1ToDashboard(
     autoExitEnabled: snap.config.autoExitEnabled,
     minTradablePriceUsd: snap.config.minTradablePriceUsd ?? 0.01,
     excludedTokens: snap.config.excludedTokens,
+    rwaBook: snap.rwaBook ?? null,
   };
 
   if (snap.binancePositions && snap.binancePositions.length > 0) {

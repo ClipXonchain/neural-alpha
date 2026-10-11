@@ -94,11 +94,11 @@ Public surfaces already in the project: https://neuralalpha.io and https://agent
 | Working agent, not a deck | Ready | `neural-alpha/` scores, checks risk, and routes swaps. `dashboard/` is the live monitor. `/about` is a public overview with fixed sample figures. |
 | Public repo a judge can open | Ready if the GitHub repo stays public through 23 Oct | Deploy docs point at `ClipXonchain/neural-alpha`. Confirm the default branch a judge will clone still builds. |
 | Deployed link through judging | Ready if the VPS stays up through 23 Oct | `neuralalpha.io` is the public site. The agent API is localhost-only behind that dashboard. |
-| Agentic Wallet / Wallet Skills | Strong | `baw` wallet status, balances, `market-order` quote/swap/list, and `x402-payment` preview/sign. This is the best fit for the $2,000 wallet special. A judge still needs a signed-in `baw` session to watch a live swap. |
-| Agent Studio | Partial | Paid stock-analysis jobs go to `https://stock-agent.bnbchain.org/x402/analyze/async`. That is not Agent Studio identity, ERC-8004, ERC-8183, or a managed runtime. Weak for the Agent Studio special unless that product is actually deployed. |
-| Binance Web3 API modules (signed REST) | Missing | Market and wallet reads use public `bapi` URLs (`rwa/stock/detail/list`, token meta, dynamic info, position list) plus Sintral candles. There is no developer-portal API key, request signing, Trading API, Transaction API simulation, DeFi API, or b402 REST client. |
-| RWA on-chain vs reference price | Partial | Live on-chain quotes are checked against a reference, but not through the RWA Data API’s reference-price fields. |
-| Small live mainnet demo | Unproven in this tree | The swap path is implemented. A live fill still depends on `baw auth signin` and a funded wallet. Confirm a recent successful swap before submitting. |
+| Agentic Wallet / Wallet Skills | Strong | `baw` quotes, and Developer Mode `contract-call` broadcasts the simulated Trading API calldata. `market-order swap` is the fallback when Developer Mode is off. x402 payments still go through `baw`. |
+| Agent Studio | Research leg | A closed-market buy can call `STUDIO_AGENT_URL`. Until that URL is set, the paid job at `https://stock-agent.bnbchain.org/x402/analyze/async` is the research input. Studio's own wallet is not the bStock signer. |
+| Binance Web3 API modules (signed REST) | In the live path when `OC_API_KEY` is set | RWA hours and spread, Market candles, Trading quote and calldata, Transaction simulate, Wallet portfolio read, DeFi APY read. |
+| RWA on-chain vs reference price | In the gate | `marketStatus` allows or blocks. A spread of 1.5% or more vetoes a rich buy. `referencePrice` is the API's per-share conversion, not an NYSE quote. |
+| Small live mainnet demo | Ready to send | Live mode caps a closed-market buy at `HACKATHON_MAX_TRADE_USD` (default $15). `npm run hackathon:check` never sends a swap. A fill still needs `baw auth signin` and Developer Mode. |
 | Hackathon registration form | Not in the repo | The old PnL-contest Join Now flow is a different form. Register at the hackathon Google Form if that has not been done. |
 | Project submission form | Not done | https://forms.gle/yToDUzaDMwWnq6R6A |
 | Developer Experience Report | Not done | 25% of the score. Write it from real integration notes. Do not generate it. |
@@ -111,8 +111,11 @@ Work for this event lives on the `hackathon` branch.
 | Step | Who | Status |
 | --- | --- | --- |
 | bStock spot agent on BSC, public site, public repo | Code | Done. Site `https://neuralalpha.io`. Repo `https://github.com/ClipXonchain/neural-alpha`. |
-| Signed RWA Data client (token list, search, on-chain vs reference price) | Code | Done in `neural-alpha/src/integrations/binance-web3-signed.ts`. The agent calls it each scan when keys are set. |
-| Signed Transaction API client (gas price + simulate, no broadcast) | Code | Done. `npm run hackathon:check` runs a zero-value simulation. |
+| Signed RWA Data client (hours, profile, sector list, on-chain vs reference) | Code | Done. The live book uses it when keys are set. |
+| Market candles, Trading quote, Wallet read, DeFi APY | Code | Done in `neural-alpha/src/integrations/binance-web3-signed.ts`. |
+| Transaction simulate, then one broadcast | Code | Simulate runs before send. `baw contract-call execute` broadcasts that call when Developer Mode is on. REST broadcast runs only if a raw `signedTransaction` exists. |
+| Closed-market size cap | Code | $8–$15 unless the operator sets an explicit amount. Pause and a rich spread block the buy. |
+| `baw` signed in, Developer Mode on, one small live swap | You | The check never sends a swap. |
 | Signature includes the `/build` prefix | Code | Done, with a unit test. The docs call a missing prefix the usual `40102`. |
 | API key in the environment | You | Create a project at the [developer portal](https://web3.binance.com/en/dev-portal/project). Put `OC_API_KEY` and `OC_SECRET_KEY` in `.env`. Do not commit them. |
 | `baw` signed in, and one small live swap you can show | You | The check prints the session. It does not send a swap. Sign in with `baw auth signin` if it says not logged in, then place a small bStock swap from the agent. |
@@ -135,10 +138,10 @@ These are from the official docs and from this codebase. Rewrite them in your ow
 - Public bStock quotes already work without a developer key, from `https://www.binance.com/bapi/defi/v1/public/wallet-direct/buw/wallet/market/token/rwa/stock/detail/list/ai?type=3`. That is not the signed RWA Data API.
 - The signed API base is `https://web3.binance.com/build`. The signature string is `timestamp + METHOD + /build/api/v1/... + body`. Leaving `/build` out of the signed path returns `40102 Invalid signature`. Auth page: https://web3.binance.com/en/dev-docs/authentication
 - RWA price is `GET /api/v1/dex/market/rwa/price` with `binanceChainId` and `tokenContractAddresses`. The docs define `referencePrice` as a per-share conversion of the on-chain token price, not an official stock-market quote.
-- Transaction simulation is `POST /api/v1/dex/pre-transaction/simulate`. Neural Alpha uses it as a dry run and still executes swaps with `baw market-order`, not by broadcasting the Transaction API payload.
-- Agentic Wallet is a separate login (`baw auth signin`). A Web3 API key does not sign the CLI in.
-- Agent Studio in this repo is a paid call to `https://stock-agent.bnbchain.org/x402/analyze/async`. It is not an ERC-8004 agent runtime.
+- Transaction simulation is `POST /api/v1/dex/pre-transaction/simulate`. When the Trading API returns EVM calldata, that call is simulated and then `baw contract-call` broadcasts it. `market-order swap` runs only when Developer Mode is off or the route is RFQ with no calldata. REST `broadcast` needs a raw signed transaction, which the CLI does not return.
+- Agentic Wallet is a separate login (`baw auth signin`). A Web3 API key does not sign the CLI in. Developer Mode is enabled in the Binance app.
+- Agent Studio research is `STUDIO_AGENT_URL` when set, otherwise `https://stock-agent.bnbchain.org/x402/analyze/async`. That research wallet does not hold the bStock inventory.
 
 ## Verdict
 
-The code on `hackathon` covers the track and the signed API modules a judge can inspect. Submission is still blocked on your API key, a signed-in wallet, and the three forms. Those cannot be completed from the repo.
+The code on `hackathon` puts the signed book in front of a live BSC send. Submission still needs a signed-in `baw` session, Developer Mode, one small fill, and the three forms.

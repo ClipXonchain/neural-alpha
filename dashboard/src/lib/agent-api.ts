@@ -67,6 +67,22 @@ export interface Track1Snapshot {
     cmcX402IntervalMs?: number;
     studioX402IntervalMs?: number;
   };
+  rwaBook?: {
+    updatedAt: number;
+    defiApyPct: number | null;
+    simulate: string | null;
+    txHash: string | null;
+    rows: Array<{
+      symbol: string;
+      marketStatus: string;
+      nextOpenTime: number | null;
+      onChainPrice: number | null;
+      referencePrice: number | null;
+      spreadPct: number | null;
+      session: string;
+      reason: string;
+    }>;
+  } | null;
   portfolio: {
     timestamp: number;
     totalValueUsd: number;

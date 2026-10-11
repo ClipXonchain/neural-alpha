@@ -145,3 +145,11 @@ img.token-logo.sm,.token-logo.sm{width:24px;height:24px}
   .about-link{min-height:44px}
   .ai-desk{grid-template-columns:minmax(0,1fr)}
 }
+.rwa-book{margin-bottom:14px;padding:14px 16px}
+.rwa-book h2{margin:0;font-size:14px}
+.rwa-book p{margin:4px 0 0;color:var(--muted);font-size:12px}
+.rwa-meta{color:var(--muted);font-size:11px}
+.rwa-rows{display:grid;gap:8px;margin-top:12px}
+.rwa-row{display:grid;grid-template-columns:72px 88px minmax(120px,160px) 64px minmax(0,1fr);gap:10px;align-items:center;font-size:12px;color:var(--text-secondary)}
+.rwa-row strong{color:var(--text)}
+@media(max-width:760px){.rwa-row{grid-template-columns:72px 1fr;}}

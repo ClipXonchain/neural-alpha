@@ -4,10 +4,17 @@
  */
 import { bawWalletStatus } from "./integrations/baw-cli.js";
 import {
+  getAddressPortfolio,
+  getAggregatedQuote,
+  buildSwapTransaction,
+  getDefiStableApy,
   getGasPrice,
+  getMarketCandles,
   getRwaTokenPrices,
-  listRwaTokens,
+  getRwaUnderlyingMarket,
+  listRwaTokenBoard,
   searchRwaToken,
+  simulationRejected,
   simulateEvmTransaction,
   web3Credentials,
 } from "./integrations/binance-web3-signed.js";
@@ -32,13 +39,33 @@ async function main() {
 
   if (creds) {
     try {
-      const listed = await listRwaTokens("bstock", "56");
-      const count = Array.isArray(listed)
-        ? listed.length
-        : listed && typeof listed === "object"
-          ? Object.keys(listed).length
-          : 0;
-      line(true, "RWA token list", `bstock on BSC responded (${count} top-level fields or rows)`);
+      const listed = await listRwaTokenBoard({ tabId: 9 });
+      const sample = listed[0];
+      line(
+        listed.length > 0,
+        "RWA token list",
+        sample
+          ? `${listed.length} Magnificent 7 names, ${sample.symbol} is ${sample.marketStatus}`
+          : "empty board"
+      );
+      if (sample?.tokenContractAddress) {
+        try {
+          const market = await getRwaUnderlyingMarket(sample.tokenContractAddress);
+          line(
+            Boolean(market?.marketStatus),
+            "RWA market status",
+            market ? `${market.marketStatus} next open ${market.nextOpenTime ?? "n/a"}` : "empty"
+          );
+        } catch (err) {
+          line(false, "RWA market status", err instanceof Error ? err.message : String(err));
+        }
+        try {
+          const candles = await getMarketCandles(sample.tokenContractAddress, { limit: 8 });
+          line(candles.length > 0, "Market candles", `${candles.length} bars`);
+        } catch (err) {
+          line(false, "Market candles", err instanceof Error ? err.message : String(err));
+        }
+      }
     } catch (err) {
       line(false, "RWA token list", err instanceof Error ? err.message : String(err));
     }
@@ -81,6 +108,57 @@ async function main() {
       line(true, "Transaction API simulate", "zero-value self call, not broadcast");
     } catch (err) {
       line(false, "Transaction API simulate", err instanceof Error ? err.message : String(err));
+    }
+
+    try {
+      const apy = await getDefiStableApy();
+      line(apy != null, "DeFi APY", apy != null ? `${apy}%` : "no APY field in the protocol list");
+    } catch (err) {
+      line(false, "DeFi APY", err instanceof Error ? err.message : String(err));
+    }
+
+    try {
+      await getAddressPortfolio("0xc571161563A6586622b8a701b0dDd31250A5088c");
+      line(true, "Wallet portfolio", "1-day overview");
+    } catch (err) {
+      line(false, "Wallet portfolio", err instanceof Error ? err.message : String(err));
+    }
+
+    const wallet = "0xc571161563A6586622b8a701b0dDd31250A5088c";
+    const usdt = "0x55d398326f99059fF775485246999027B3197955";
+    const tenUsdt = (10n * 10n ** 18n).toString();
+    try {
+      const quote = await getAggregatedQuote({
+        fromTokenAddress: usdt,
+        toTokenAddress: NVDAB,
+        amount: tenUsdt,
+        userWalletAddress: wallet,
+      });
+      line(Boolean(quote?.quoteId), "Trading quote", quote ? `${quote.executionMode ?? "route"} ${quote.vendorName ?? ""}`.trim() : "none");
+      if (quote?.quoteId) {
+        const call = await buildSwapTransaction({
+          fromTokenAddress: usdt,
+          toTokenAddress: NVDAB,
+          amount: tenUsdt,
+          userWalletAddress: wallet,
+          quoteId: quote.quoteId,
+          slippagePercent: "1",
+        });
+        if (!call) {
+          line(true, "Swap calldata", "no EVM calldata; market-order would send");
+        } else {
+          const simulated = await simulateEvmTransaction({
+            from: wallet,
+            to: call.to,
+            data: call.data,
+            value: call.value.startsWith("0x") ? BigInt(call.value).toString() : call.value || "0",
+          });
+          const rejected = simulationRejected(simulated);
+          line(!rejected, "Simulate swap calldata", rejected ?? "pass, not broadcast");
+        }
+      }
+    } catch (err) {
+      line(false, "Trading quote", err instanceof Error ? err.message : String(err));
     }
   }
 

@@ -28,9 +28,10 @@ export class RiskManager {
   validateTrade(
     signal: TradeSignal,
     tradeAmountUsd: number,
-    opts: { manual?: boolean; explicitAmount?: boolean } = {}
+    opts: { manual?: boolean; explicitAmount?: boolean; rwaBlockReason?: string } = {}
   ): RiskCheck {
     const violations: string[] = [];
+    if (opts.rwaBlockReason) violations.push(opts.rwaBlockReason);
     this.portfolio.purgeDustFromMarket();
     const dailyTradeCount = this.portfolio.getTodayTradeCount();
     const drawdownPct = this.portfolio.getMaxDrawdown();

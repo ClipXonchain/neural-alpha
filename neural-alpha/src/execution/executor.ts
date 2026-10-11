@@ -277,7 +277,7 @@ export function processSwapResult(
 function resolveTradeSizeUsd(
   signal: TradeSignal,
   riskManager: RiskManager,
-  opts: { manual?: boolean; amountUsd?: number }
+  opts: { manual?: boolean; amountUsd?: number; forcedUsd?: number }
 ): { tradeSizeUsd: number; fromTokenAmount?: number } {
   const explicit = opts.manual && opts.amountUsd !== undefined && opts.amountUsd > 0;
 
@@ -298,7 +298,11 @@ function resolveTradeSizeUsd(
     };
   }
 
-  return { tradeSizeUsd: riskManager.computeTradeSize(signal) };
+  const sized = riskManager.computeTradeSize(signal);
+  if (opts.forcedUsd && opts.forcedUsd > 0 && signal.action === "buy") {
+    return { tradeSizeUsd: opts.forcedUsd };
+  }
+  return { tradeSizeUsd: sized };
 }
 
 /**
@@ -309,8 +313,11 @@ export function validateAndCreateOrder(
   signal: TradeSignal,
   riskManager: RiskManager,
   config: AgentConfig,
-  opts: { manual?: boolean; amountUsd?: number } = {}
+  opts: { manual?: boolean; amountUsd?: number; rwaBlockReason?: string; forcedUsd?: number } = {}
 ): { approved: boolean; order?: TradeOrder; violations?: string[] } {
+  if (opts.rwaBlockReason) {
+    return { approved: false, violations: [opts.rwaBlockReason] };
+  }
   // Tradeable on BSC = curated allowlist OR any token we can resolve to a
   // verified BEP-20 contract (static map / runtime CMC cache). This lifts the
   // hard allowlist limit so the assistant can trade arbitrary BSC tokens.
@@ -356,8 +363,9 @@ export function validateAndCreateOrder(
   }
 
   const riskCheck = riskManager.validateTrade(signal, tradeSize, {
-    ...opts,
+    manual: opts.manual,
     explicitAmount,
+    rwaBlockReason: opts.rwaBlockReason,
   });
   if (!riskCheck.passed) {
     return { approved: false, violations: riskCheck.violations };

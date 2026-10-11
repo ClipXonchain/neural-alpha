@@ -139,6 +139,22 @@ export interface AgentState {
   autoExitEnabled?: boolean;
   minTradablePriceUsd?: number;
   excludedTokens?: string[];
+  rwaBook?: {
+    updatedAt: number;
+    defiApyPct: number | null;
+    simulate: string | null;
+    txHash: string | null;
+    rows: Array<{
+      symbol: string;
+      marketStatus: string;
+      nextOpenTime: number | null;
+      onChainPrice: number | null;
+      referencePrice: number | null;
+      spreadPct: number | null;
+      session: string;
+      reason: string;
+    }>;
+  } | null;
 }
 
 function generateEquityCurve(): Array<{ time: string; value: number; pnl: number }> {

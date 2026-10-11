@@ -751,8 +751,35 @@ function Overview({
   onAll: () => void;
 }) {
   const up = state.totalPnl >= 0;
+  const book = state.rwaBook?.rows.slice(0, 4) ?? [];
   return (
     <div className="page">
+      {book.length > 0 && (
+        <div className="panel rwa-book">
+          <div className="section-header">
+            <div>
+              <h2>Hours book</h2>
+              <p>On-chain price versus the RWA reference. A paused name does not trade.</p>
+            </div>
+            <span className="rwa-meta">
+              {state.rwaBook?.defiApyPct != null ? `Idle USDT APY ${state.rwaBook.defiApyPct}%` : "DeFi APY unread"}
+              {state.rwaBook?.simulate ? ` · simulate ${state.rwaBook.simulate}` : ""}
+              {state.rwaBook?.txHash ? ` · ${shortenHash(state.rwaBook.txHash)}` : ""}
+            </span>
+          </div>
+          <div className="rwa-rows">
+            {book.map((row) => (
+              <div className="rwa-row" key={row.symbol}>
+                <strong>{row.symbol}</strong>
+                <span>{row.marketStatus}</span>
+                <span>{row.onChainPrice ?? "—"} / {row.referencePrice ?? "—"}</span>
+                <span>{row.spreadPct == null ? "—" : `${row.spreadPct.toFixed(2)}%`}</span>
+                <span>{row.reason}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       <div className="stats-grid five">
         <StatCard icon={Wallet} label="Total Portfolio Value" value={formatUsd(state.portfolioValue)} sub={portfolioBasisLabel(state)} spark={curve} />
         <StatCard icon={CircleDollarSign} label="Total P&L" value={money(state.totalPnl)} sub={`${formatPct(state.totalPnlPct)} all time`} tone={state.totalPnl < 0 ? "red" : ""} subTone={state.totalPnl < 0 ? "loss" : "gain"} />

@@ -1,6 +1,6 @@
 import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot, LogEntry } from "./utils/types.js";
 import { loadConfig, resolveInitialDepositUsd, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
-import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, parseCmcQuotesBatch, parseCmcTrending, unwrapX402Response } from "./data/market.js";
+import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, loadPriceHistory, parseCmcQuotesBatch, parseCmcTrending, unwrapX402Response } from "./data/market.js";
 import { fetchNewsFeed } from "./data/news.js";
 import { analyzeMarkets, selectTrades } from "./strategy/index.js";
 import { getSessionProfile } from "./strategy/presets.js";
@@ -90,11 +90,31 @@ import {
 } from "./integrations/agentic-wallet-bridge.js";
 import {
   completeCmcCampaignCall,
+  consultStudioResearch,
   submitStudioAnalysis,
   pollStudioJob,
 } from "./integrations/campaign-x402.js";
-import { getBstockAddress, tickerFromBstock } from "./integrations/bstock.js";
-import { getRwaTokenPrices, web3Credentials } from "./integrations/binance-web3-signed.js";
+import { getBstockAddress, tickerFromBstock, BSC_USDT } from "./integrations/bstock.js";
+import {
+  getDefiStableApy,
+  getMarketCandles,
+  getRwaTokenPrices,
+  getRwaUnderlyingMarket,
+  getRwaUnderlyingProfile,
+  listRwaTokenBoard,
+  web3Credentials,
+  type RwaListedToken,
+} from "./integrations/binance-web3-signed.js";
+import { portfolioUsd, routeLiveSwap } from "./execution/hackathon-route.js";
+import {
+  clockMarketStatus,
+  decideRwaTrade,
+  hackathonTradeCap,
+  isCappedMarket,
+  researchIsFresh,
+  HACKATHON_MIN_TRADE_USD,
+  type RwaSession,
+} from "./strategy/rwa-book.js";
 
 /** CMC / eligible-universe refresh. Live Binance quotes pulse faster than this. */
 const DEEP_SCAN_MS = 180_000;
@@ -235,6 +255,24 @@ export class TradingAgent {
   private lastCmcX402At = 0;
   /** Last paid Agent Studio x402 attempt. */
   private lastStudioX402At = 0;
+  private rwaDesk: {
+    updatedAt: number;
+    defiApyPct: number | null;
+    simulate: string | null;
+    txHash: string | null;
+    rows: Array<{
+      symbol: string;
+      tokenContractAddress: string;
+      marketStatus: string;
+      nextOpenTime: number | null;
+      onChainPrice: number | null;
+      referencePrice: number | null;
+      spreadPct: number | null;
+      session: RwaSession;
+      reason: string;
+      decimals: number | null;
+    }>;
+  } | null = null;
   private x402Inflight: Promise<void> | null = null;
   /** Avoid repeating the free-USDT skip line on every trade cycle. */
   private x402CashSkipLogged = false;
@@ -927,13 +965,7 @@ export class TradingAgent {
 
     if (web3Credentials()) {
       const symbols = [...new Set([...this.watchlist, ...this.portfolio.getAllPositions().keys()])].slice(0, 12);
-      const addresses = symbols.map((symbol) => getBstockAddress(symbol)).filter((address): address is string => Boolean(address));
-      try {
-        const spreads = (await getRwaTokenPrices(addresses)).filter((row) => row.spreadPct != null).slice(0, 3);
-        if (spreads.length) logger.info("RWA on-chain vs reference", { spreads });
-      } catch (err) {
-        logger.warn("RWA signed price check failed", { error: err instanceof Error ? err.message : String(err) });
-      }
+      await this.refreshRwaBook(symbols);
     }
 
     for (const [symbol, quote] of this.livePrices) {
@@ -1284,6 +1316,167 @@ export class TradingAgent {
     );
   }
 
+  private nyClockStatus(): "regular" | "postmarket" | "closed" {
+    const policy = isSessionPolicy(this.config.sessionPolicy) ? this.config.sessionPolicy : "auto";
+    return clockMarketStatus(getSessionClock(policy).active);
+  }
+
+  private matchListed(symbol: string, listed: RwaListedToken[]): RwaListedToken | undefined {
+    const upper = symbol.toUpperCase();
+    const ticker = tickerFromBstock(upper);
+    const address = getBstockAddress(upper)?.toLowerCase();
+    return listed.find((row) => {
+      if (address && row.tokenContractAddress.toLowerCase() === address) return true;
+      if (row.symbol === upper || row.symbol === ticker) return true;
+      if (row.underlyingTicker && `${row.underlyingTicker}B` === upper) return true;
+      return `${row.symbol}B` === upper;
+    });
+  }
+
+  private async refreshRwaBook(symbols: string[]): Promise<void> {
+    try {
+      const listed = await listRwaTokenBoard({ tabId: 9 });
+      const addresses = symbols
+        .map((symbol) => getBstockAddress(symbol))
+        .filter((address): address is string => Boolean(address));
+      const prices = await getRwaTokenPrices(addresses);
+      const rows: NonNullable<TradingAgent["rwaDesk"]>["rows"] = [];
+      let extraMarkets = 0;
+      for (const symbol of symbols) {
+        const upper = symbol.toUpperCase();
+        const address = getBstockAddress(upper);
+        if (!address) continue;
+        let listedRow = this.matchListed(upper, listed);
+        const price = prices.find((row) => row.tokenContractAddress.toLowerCase() === address.toLowerCase());
+        if ((!listedRow || listedRow.marketStatus === "unknown") && extraMarkets < 4) {
+          extraMarkets += 1;
+          try {
+            listedRow = (await getRwaUnderlyingMarket(address)) ?? listedRow;
+          } catch (err) {
+            logger.warn("RWA market status failed", { symbol: upper, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
+        const spread = price?.spreadPct ?? listedRow?.spreadPct ?? null;
+        const status = listedRow?.marketStatus ?? "unknown";
+        const decision = decideRwaTrade({
+          marketStatus: status,
+          clockStatus: this.nyClockStatus(),
+          spreadPct: spread,
+          side: "buy",
+          holdsToken: false,
+          requestedUsd: hackathonTradeCap(process.env.HACKATHON_MAX_TRADE_USD),
+          researchFresh: true,
+        });
+        rows.push({
+          symbol: upper,
+          tokenContractAddress: address,
+          marketStatus: status,
+          nextOpenTime: listedRow?.nextOpenTime ?? null,
+          onChainPrice: price?.onChainPrice ?? listedRow?.onChainPrice ?? null,
+          referencePrice: price?.referencePrice ?? listedRow?.referencePrice ?? null,
+          spreadPct: spread,
+          session: decision.session,
+          reason: decision.reason,
+          decimals: listedRow?.decimals ?? null,
+        });
+      }
+      const head = rows[0];
+      if (head) {
+        try {
+          const profile = await getRwaUnderlyingProfile(head.tokenContractAddress);
+          const name = profile?.underlyingFullName ?? profile?.companyName ?? profile?.underlyingName;
+          if (typeof name === "string" && name) head.reason = `${name} · ${head.reason}`;
+        } catch (err) {
+          logger.warn("RWA profile failed", { symbol: head.symbol, error: err instanceof Error ? err.message : String(err) });
+        }
+        try {
+          const candles = await getMarketCandles(head.tokenContractAddress);
+          if (candles.length >= 14) loadPriceHistory(head.symbol, candles, { fromKlines: true });
+        } catch (err) {
+          logger.warn("Market API candles failed", { symbol: head.symbol, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      let defiApyPct = this.rwaDesk?.defiApyPct ?? null;
+      try {
+        defiApyPct = await getDefiStableApy();
+      } catch (err) {
+        logger.warn("DeFi APY read failed", { error: err instanceof Error ? err.message : String(err) });
+      }
+      this.rwaDesk = {
+        updatedAt: Date.now(),
+        defiApyPct,
+        simulate: this.rwaDesk?.simulate ?? null,
+        txHash: this.rwaDesk?.txHash ?? null,
+        rows,
+      };
+      if (rows.length) {
+        logger.info("RWA book", {
+          names: rows.slice(0, 3).map((row) => ({
+            symbol: row.symbol,
+            status: row.marketStatus,
+            spread: row.spreadPct,
+          })),
+          defiApyPct,
+        });
+      }
+    } catch (err) {
+      logger.warn("RWA book refresh failed", { error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  private async gateRwa(
+    signal: import("./utils/types.js").TradeSignal,
+    opts: { manual?: boolean; amountUsd?: number }
+  ): Promise<{ block?: string; forcedUsd?: number; reason?: string }> {
+    if (this.config.mode !== "live" || !web3Credentials()) return {};
+    const symbol = signal.symbol.toUpperCase();
+    const row = this.rwaDesk?.rows.find((item) => item.symbol === symbol);
+    const explicit = Boolean(opts.manual && opts.amountUsd !== undefined && opts.amountUsd > 0);
+    let researchFresh = researchIsFresh(Math.max(this.lastStudioX402At, this.lastCmcX402At));
+    let scale = 1;
+    const effectiveStatus = row?.marketStatus && row.marketStatus !== "unknown" ? row.marketStatus : this.nyClockStatus();
+    if (!researchFresh && isCappedMarket(effectiveStatus) && signal.action === "buy" && process.env.STUDIO_AGENT_URL) {
+      try {
+        const consult = await consultStudioResearch({
+          url: process.env.STUDIO_AGENT_URL,
+          symbol,
+          marketStatus: row?.marketStatus ?? "unknown",
+          spreadPct: row?.spreadPct ?? null,
+        });
+        researchFresh = consult.fresh;
+        scale = consult.sizeScale;
+        if (consult.fresh) this.lastStudioX402At = Date.now();
+      } catch (err) {
+        logger.warn("Studio research unavailable", { error: err instanceof Error ? err.message : String(err) });
+      }
+    }
+    const requested = explicit ? opts.amountUsd! : this.riskManager.computeTradeSize(signal);
+    const others = [...this.portfolio.getAllPositions().keys()].filter(
+      (name) => name.toUpperCase() !== symbol && this.portfolio.isMaterialPosition(name)
+    ).length;
+    const decision = decideRwaTrade({
+      marketStatus: row?.marketStatus,
+      clockStatus: this.nyClockStatus(),
+      spreadPct: row?.spreadPct ?? null,
+      side: signal.action === "sell" ? "sell" : "buy",
+      holdsToken: this.portfolio.isMaterialPosition(symbol),
+      requestedUsd: requested,
+      researchFresh,
+      otherOpenPositions: others,
+      maxTradeUsd: hackathonTradeCap(process.env.HACKATHON_MAX_TRADE_USD),
+    });
+    const apy = this.rwaDesk?.defiApyPct;
+    const reason = apy != null ? `${decision.reason}; idle USDT DeFi APY ${apy}%` : decision.reason;
+    if (!decision.allowed) return { block: decision.reason, reason };
+    if (!explicit && decision.capped && decision.amountUsd > 0) {
+      const scaled = signal.action === "buy" && scale < 1
+        ? Math.max(HACKATHON_MIN_TRADE_USD, Math.round(decision.amountUsd * scale * 100) / 100)
+        : decision.amountUsd;
+      return { forcedUsd: signal.action === "buy" ? Math.min(scaled, decision.amountUsd) : scaled, reason };
+    }
+    return { reason };
+  }
+
   private async executeTrade(
     signal: import("./utils/types.js").TradeSignal,
     opts: {
@@ -1316,11 +1509,20 @@ export class TradingAgent {
       }
     }
 
+    const gate = await this.gateRwa(signal, opts);
+    if (gate.reason) signal.reasons = [...(signal.reasons ?? []), gate.reason];
+
     let order: import("./utils/types.js").TradeOrder;
     if (opts.order) {
       order = opts.order;
+      if (gate.block) return this.sellBlockedResult(order, gate.block);
+      if (gate.forcedUsd && gate.forcedUsd > 0 && order.side === "buy") order.amountUsd = gate.forcedUsd;
     } else {
-      const validation = validateAndCreateOrder(signal, this.riskManager, this.config, opts);
+      const validation = validateAndCreateOrder(signal, this.riskManager, this.config, {
+        ...opts,
+        rwaBlockReason: gate.block,
+        forcedUsd: gate.forcedUsd,
+      });
       if (!validation.approved || !validation.order) {
         logger.info("Trade not approved", {
           symbol: signal.symbol,
@@ -1419,6 +1621,11 @@ export class TradingAgent {
           sellAmount: safeAmount,
         });
         order.fromTokenAmount = safeAmount;
+        if (gate.forcedUsd && gate.forcedUsd > 0) {
+          const price = getLatestPrice(order.symbol) || 0;
+          const capped = price > 0 ? floorTokenAmount(gate.forcedUsd / price, 8) : 0;
+          if (capped > 0 && capped < safeAmount) order.fromTokenAmount = capped;
+        }
       }
 
       const quoteParams = buildQuoteParams(order);
@@ -1429,15 +1636,45 @@ export class TradingAgent {
         return null;
       }
 
-      // Check token risk before execution
       const risk = await this.mcp.checkTokenRisk(BSC_CHAIN, order.toToken);
       if (risk && (risk as Record<string, boolean>).isHoneypot) {
         logger.risk("HONEYPOT DETECTED — aborting trade", { token: order.toToken });
         return null;
       }
 
-      const swapParams = buildSwapParams(order);
-      const swapResult = await this.mcp.executeSwap(swapParams);
+      let swapResult: Record<string, unknown> | null = null;
+      if (web3Credentials()) {
+        const wallet = this.currentWalletAddress();
+        if (!wallet) return this.sellBlockedResult(order, "Agentic Wallet address is missing");
+        const bookRow = this.rwaDesk?.rows.find((item) => item.symbol === order.symbol.toUpperCase());
+        const buying = order.side === "buy";
+        const fromTokenAddress = buying ? BSC_USDT : bookRow?.tokenContractAddress ?? getBstockAddress(order.fromToken) ?? "";
+        const toTokenAddress = buying ? bookRow?.tokenContractAddress ?? getBstockAddress(order.toToken) ?? "" : BSC_USDT;
+        const fromAmount = buying ? order.amountUsd : order.fromTokenAmount ?? 0;
+        const fromDecimals = buying ? 18 : bookRow?.decimals ?? 18;
+        const bawOutput = parseFloat(String((quote as { estimatedOutput?: string }).estimatedOutput ?? ""));
+        const routed = await routeLiveSwap({
+          wallet,
+          fromTokenAddress,
+          toTokenAddress,
+          fromAmount,
+          fromDecimals,
+          bawOutput: Number.isFinite(bawOutput) ? bawOutput : null,
+          slippagePct: order.slippage,
+        });
+        if (this.rwaDesk) {
+          this.rwaDesk.simulate = routed.simulate ?? this.rwaDesk.simulate;
+          if (routed.txHash) this.rwaDesk.txHash = routed.txHash;
+        }
+        logger.info("Hackathon route", { symbol: order.symbol, outcome: routed.outcome, reason: routed.reason });
+        if (routed.outcome === "blocked") return this.sellBlockedResult(order, routed.reason);
+        if (routed.outcome === "sent") swapResult = { success: true, txHash: routed.txHash };
+      }
+
+      if (!swapResult) {
+        const swapParams = buildSwapParams(order);
+        swapResult = await this.mcp.executeSwap(swapParams);
+      }
 
       logger.info("Agentic Wallet swap raw response", {
         symbol: order.symbol,
@@ -1456,6 +1693,15 @@ export class TradingAgent {
           await this.syncWalletCapital();
         } catch (err) {
           logger.warn("Post-trade wallet sync failed", { error: String(err) });
+        }
+        const wallet = this.currentWalletAddress();
+        if (wallet && web3Credentials()) {
+          const apiUsd = await portfolioUsd(wallet);
+          const bawUsd = this._cachedWalletInfo?.usdtBalance;
+          if (apiUsd != null && typeof bawUsd === "number" && Math.abs(apiUsd - bawUsd) / Math.max(bawUsd, 1) > 0.05) {
+            logger.warn("Wallet API portfolio disagrees with Agentic Wallet USDT", { apiUsd, bawUsd });
+          }
+          if (this.rwaDesk && result.txHash) this.rwaDesk.txHash = result.txHash;
         }
         this.scheduleTradeHistoryBackfill([], { force: true });
         if (order.side === "sell") {
@@ -3485,6 +3731,7 @@ export class TradingAgent {
       session,
       autonomous: this.buildAutonomousStatus(),
       cmcMacro: getCmcMacro(),
+      rwaBook: this.rwaDesk,
       ...(this._cachedWalletInfo?.binancePositions?.length
         ? { binancePositions: this._cachedWalletInfo.binancePositions }
         : {}),
@@ -3571,6 +3818,7 @@ export interface AgentState {
     eventHint: string | null;
     summary: string;
   } | null;
+  rwaBook?: TradingAgent["rwaDesk"];
 }
 
 export interface AutonomousStatus {
