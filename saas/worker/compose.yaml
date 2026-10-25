@@ -1,30 +1,27 @@
-# One customer. The bridge shares the worker network so it can see
-# 127.0.0.1:3847 without changing neural-alpha's bind address.
-# Build context is the neural-alpha repo root.
+# Image definition for one customer container.
+# saas/control starts this with a per-customer override. Do not run it
+# by itself: that would have no private folder and no container name.
 
 services:
   worker:
+    image: neural-saas-worker:local
     build:
       context: ../..
       dockerfile: saas/worker/Dockerfile
-      args:
-        UPSTREAM_REF: agentic-wallet
-    volumes:
-      - tenant_data:/data
-    environment:
-      AGENT_MODE: paper
-      HOME: /data/home
-      DASHBOARD_PORT: "3847"
-    ports:
-      - "127.0.0.1:3848:3848"
+    networks:
+      - neural-saas
 
   bridge:
+    image: neural-saas-bridge:local
     build:
       context: ../..
       dockerfile: saas/worker/bridge.Dockerfile
     network_mode: service:worker
     depends_on:
       - worker
+    restart: unless-stopped
 
-volumes:
-  tenant_data:
+networks:
+  neural-saas:
+    external: true
+    name: neural-saas

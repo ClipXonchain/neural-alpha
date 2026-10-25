@@ -2,6 +2,11 @@
 # Prepare a private data dir and baw home, then start upstream unchanged.
 set -eu
 
+delay=$(printf '%s' "${SAAS_START_DELAY_SEC:-0}" | tr -cd '0-9')
+if [ -n "$delay" ] && [ "$delay" -gt 0 ] && [ "$delay" -le 60 ]; then
+  sleep "$delay"
+fi
+
 mkdir -p /data/home /data/book
 
 src_data=/opt/neural-alpha/neural-alpha/data
