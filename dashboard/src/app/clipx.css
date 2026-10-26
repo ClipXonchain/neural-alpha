@@ -157,8 +157,18 @@ img.token-logo.sm,.token-logo.sm{width:24px;height:24px}
 .start-ad-cta{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 12px;border-radius:8px;color:#edf3f3;font-size:12px;font-weight:650;border:1px solid transparent;background-image:linear-gradient(#101316,#101316),linear-gradient(90deg,#0e3d2c,#18cf7a,#b8f5d8,#18cf7a,#0e3d2c);background-size:auto,220% 100%;background-clip:padding-box,border-box;background-origin:border-box;animation:start-ad-flow 8s linear infinite}
 .start-ad:hover .start-ad-cta{animation-duration:5s}
 @keyframes start-ad-flow{to{background-position:0 0,220% 0}}
-.code-button{border:1px solid rgba(24,207,122,.35);background:#101316;border-radius:8px;color:#edf3f3;padding:8px 10px;font-size:11px;font-weight:650;white-space:nowrap}
-.code-button:disabled{opacity:.6}
+.account{position:relative;flex:none}
+.account-button{width:31px;height:31px;padding:0;border:0;border-radius:50%;background:transparent;display:grid;place-items:center}
+.account-button:focus-visible{outline:none;box-shadow:0 0 0 3px rgba(24,207,122,.4)}
+.account-face{width:31px;height:31px;border-radius:50%;display:grid;place-items:center;color:#fff;position:relative}
+.account-face svg{display:block}
+.account-face span{position:absolute;z-index:1;width:7px;height:7px;border:2px solid #08090b;background:var(--green);border-radius:50%;right:-1px;bottom:0}
+.account-menu{position:absolute;right:0;top:40px;width:220px;padding:6px;border:1px solid var(--border);border-radius:12px;background:#101316;box-shadow:0 18px 48px rgba(0,0,0,.45);z-index:40}
+.account-menu p{margin:8px 8px 0;font-size:13px;font-weight:650}
+.account-menu small{display:block;margin:3px 8px 8px;color:#8b98a3;font-size:11px;font-family:var(--mono)}
+.account-menu button{width:100%;display:flex;align-items:center;gap:8px;text-align:left;border:0;background:transparent;color:#dce4e9;border-radius:8px;padding:8px;font-size:12px}
+.account-menu button:hover{background:rgba(255,255,255,.05)}
+.account-menu button:disabled{opacity:.6}
 .access-code-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:10px 26px;border-bottom:1px solid rgba(24,207,122,.22);background:rgba(24,207,122,.06)}
 .access-code-bar strong{font-family:var(--mono);font-size:13px;letter-spacing:.06em;color:#3ee08f}
 .access-code-bar button{border:1px solid var(--border);background:var(--surface);border-radius:8px;color:#dce4e9;padding:6px 10px;font-size:11px}

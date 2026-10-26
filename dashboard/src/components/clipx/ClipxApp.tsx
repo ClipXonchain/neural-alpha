@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Activity,
   Aperture,
@@ -18,6 +18,7 @@ import {
   CircleDollarSign,
   Clover,
   Compass,
+  Copy,
   Crown,
   Diamond,
   ExternalLink,
@@ -27,6 +28,7 @@ import {
   Ghost,
   Hexagon,
   Info,
+  KeyRound,
   Layers,
   LayoutDashboard,
   Leaf,
@@ -350,22 +352,77 @@ function walletSeed(address: string): number {
   return hash >>> 0;
 }
 
-function WalletAvatar({ address }: { address?: string | null }) {
-  if (!address) {
-    return (
-      <div className="avatar" aria-hidden>
-        <Wallet size={15} strokeWidth={2.25} />
-        <span />
-      </div>
-    );
-  }
-  const seed = walletSeed(address.toLowerCase());
-  const Icon = WALLET_ICONS[seed % WALLET_ICONS.length];
-  const [from, to] = WALLET_PALETTES[(seed >>> 8) % WALLET_PALETTES.length];
+function AccountMenu({
+  address,
+  label,
+  agentName,
+  allowAccessCode,
+  codeBusy,
+  onWallet,
+  onCopy,
+  onCode,
+}: {
+  address?: string | null;
+  label: string;
+  agentName: string;
+  allowAccessCode: boolean;
+  codeBusy: boolean;
+  onWallet: () => void;
+  onCopy: () => void;
+  onCode: () => void;
+}) {
+  const [openMenu, setOpenMenu] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!openMenu) return;
+    const close = (event: MouseEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpenMenu(false);
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpenMenu(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [openMenu]);
+  const seed = walletSeed((address || "disconnected").toLowerCase());
+  const Icon = address ? WALLET_ICONS[seed % WALLET_ICONS.length] : Wallet;
+  const [from, to] = address ? WALLET_PALETTES[(seed >>> 8) % WALLET_PALETTES.length] : ["#3a4048", "#1c2128"];
+  const choose = (action: () => void) => {
+    setOpenMenu(false);
+    action();
+  };
   return (
-    <div className="avatar" style={{ background: `linear-gradient(145deg, ${from}, ${to})` }} aria-hidden>
-      <Icon size={15} strokeWidth={2.25} />
-      <span />
+    <div className="account" ref={root}>
+      <button
+        type="button"
+        className="account-button"
+        aria-expanded={openMenu}
+        aria-haspopup="menu"
+        aria-label={address ? `Account ${label}` : "Account"}
+        onClick={() => setOpenMenu((value) => !value)}
+      >
+        <span className="account-face" style={{ background: `linear-gradient(145deg, ${from}, ${to})` }}>
+          <Icon size={15} strokeWidth={2.25} />
+          <span />
+        </span>
+      </button>
+      {openMenu && (
+        <div className="account-menu" role="menu">
+          <p>{agentName || "Wallet"}</p>
+          <small>{address ? label : "Not connected"}</small>
+          <button type="button" role="menuitem" onClick={() => choose(onWallet)}><Wallet size={14} /> Open wallet</button>
+          {address ? <button type="button" role="menuitem" onClick={() => choose(onCopy)}><Copy size={14} /> Copy address</button> : null}
+          {allowAccessCode ? (
+            <button type="button" role="menuitem" disabled={codeBusy} onClick={() => choose(onCode)}>
+              <KeyRound size={14} /> {codeBusy ? "Creating…" : "New access code"}
+            </button>
+          ) : null}
+        </div>
+      )}
     </div>
   );
 }
@@ -476,6 +533,19 @@ export function ClipxApp({
     }
   };
 
+  const copyWalletAddress = async () => {
+    const full = wallet?.address || "";
+    if (!full) return;
+    try {
+      await navigator.clipboard.writeText(full);
+      setCodeNote("Address copied.");
+      setAccessCode("");
+    } catch {
+      setAccessCode("");
+      setCodeNote(full);
+    }
+  };
+
   const copyAccessCode = async () => {
     try {
       await navigator.clipboard.writeText(accessCode);
@@ -530,15 +600,19 @@ export function ClipxApp({
               {agentName ? <><span className="agent-id">{agentName}</span><span className="wallet-short">{address}</span></> : address}
               <ExternalLink size={13} />
             </button>
-            <WalletAvatar address={wallet?.address} />
-            {allowAccessCode && (
-              <button className="code-button" type="button" onClick={() => void issueAccessCode()} disabled={codeBusy}>
-                {codeBusy ? "Creating…" : "New code"}
-              </button>
-            )}
+            <AccountMenu
+              address={wallet?.address}
+              label={address}
+              agentName={agentName}
+              allowAccessCode={allowAccessCode}
+              codeBusy={codeBusy}
+              onWallet={() => go("wallet")}
+              onCopy={() => void copyWalletAddress()}
+              onCode={() => void issueAccessCode()}
+            />
           </div>
         </header>
-        {allowAccessCode && (accessCode || codeNote) && (
+        {(accessCode || codeNote) && (
           <div className="access-code-bar">
             {accessCode ? <strong>{accessCode}</strong> : null}
             {accessCode ? <button type="button" onClick={() => void copyAccessCode()}>Copy</button> : null}
