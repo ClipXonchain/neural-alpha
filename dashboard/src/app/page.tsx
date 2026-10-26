@@ -39,6 +39,7 @@ export default function DashboardPage() {
     loading,
     state,
     wallet,
+    walletChecked,
     agentConfig,
     error,
     handleStart,
@@ -57,6 +58,7 @@ export default function DashboardPage() {
     <ClipxApp
       state={state}
       wallet={wallet}
+      walletChecked={walletChecked}
       connected={connected}
       error={error}
       readOnly={readOnly}

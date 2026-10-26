@@ -40,6 +40,7 @@ export function CustomerDashboard() {
     loading,
     state,
     wallet,
+    walletChecked,
     agentConfig,
     error,
     handleStart,
@@ -58,6 +59,7 @@ export function CustomerDashboard() {
     <ClipxApp
       state={state}
       wallet={wallet}
+      walletChecked={walletChecked}
       connected={connected}
       error={error}
       readOnly={false}

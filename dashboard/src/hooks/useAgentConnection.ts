@@ -37,6 +37,7 @@ export function useAgentConnection() {
   const [loading, setLoading] = useState(true);
   const [state, setState] = useState<AgentState | null>(null);
   const [wallet, setWallet] = useState<WalletSnapshot | null>(null);
+  const [walletChecked, setWalletChecked] = useState(false);
   const [bridgeSource, setBridgeSource] = useState<string>("");
   const [error, setError] = useState<string | null>(null);
   const [agentConfig, setAgentConfig] = useState<Track1Snapshot["config"] | null>(null);
@@ -50,6 +51,7 @@ export function useAgentConnection() {
       const w = await fetchWallet();
       setWallet(w);
       walletRef.current = w;
+      setWalletChecked(true);
       setState((prev) =>
         prev
           ? mergeWalletLiveIntoSignals(
@@ -59,7 +61,7 @@ export function useAgentConnection() {
           : prev
       );
     } catch {
-      /* wallet cache may still be warming */
+      setWalletChecked(true);
     }
   }, []);
 
@@ -253,6 +255,7 @@ export function useAgentConnection() {
     loading,
     state,
     wallet,
+    walletChecked,
     bridgeSource,
     agentConfig,
     error,

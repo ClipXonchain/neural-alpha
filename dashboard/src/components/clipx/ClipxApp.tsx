@@ -372,6 +372,7 @@ function WalletAvatar({ address }: { address?: string | null }) {
 export function ClipxApp({
   state,
   wallet,
+  walletChecked = false,
   connected,
   error,
   readOnly,
@@ -390,6 +391,8 @@ export function ClipxApp({
 }: {
   state: AgentState;
   wallet: WalletSnapshot | null;
+  /** True after the wallet request finishes. Until then the desk keeps the live book. */
+  walletChecked?: boolean;
   connected: boolean;
   error: string | null;
   readOnly: boolean;
@@ -410,7 +413,8 @@ export function ClipxApp({
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<LedgerRow | null>(null);
   const [range, setRange] = useState<keyof typeof RANGES>("30D");
-  const rows = useMemo(() => buildRows(state.trades), [state.trades]);
+  const funded = walletChecked ? Boolean(wallet?.address) : true;
+  const rows = useMemo(() => buildRows(funded ? state.trades : []), [state.trades, funded]);
   const title = NAV.find((item) => item.id === view)?.label ?? "Overview";
   const address = wallet?.address ? shortenHash(wallet.address) : "Not connected";
   const sentiment = useMemo(() => {
@@ -438,7 +442,7 @@ export function ClipxApp({
     }
     return map;
   }, [state.signals, wallet]);
-  const curve = state.equityCurve.map((point) => point.value);
+  const curve = funded ? state.equityCurve.map((point) => point.value) : [];
   const alertCount = state.activity.filter((item) => item.type === "risk" || item.type === "error").length;
 
   const go = (id: ViewId) => {
@@ -495,6 +499,7 @@ export function ClipxApp({
         {view === "overview" && (
           <Overview
             state={state}
+            funded={funded}
             rows={rows}
             icons={icons}
             curve={curve}
@@ -505,14 +510,18 @@ export function ClipxApp({
             onAll={() => go("trades")}
           />
         )}
-        {view === "agents" && <AgentsPage state={state} />}
+        {view === "agents" && <AgentsPage state={state} funded={funded} />}
         {view === "strategies" && <StrategiesPage state={state} config={config} />}
         {view === "portfolio" && (
           <div className="page">
-            <div className="content-grid portfolio-grid">
-              <div className="panel"><Section title="Allocation" /><AllocationChart state={state} onRefresh={onResync} /></div>
-              <div className="panel"><Section title="Open Positions" /><PositionRows positions={state.positions} icons={icons} /></div>
-            </div>
+            {funded ? (
+              <div className="content-grid portfolio-grid">
+                <div className="panel"><Section title="Allocation" /><AllocationChart state={state} onRefresh={onResync} /></div>
+                <div className="panel"><Section title="Open Positions" /><PositionRows positions={state.positions} icons={icons} /></div>
+              </div>
+            ) : (
+              <div className="panel"><p className="feature-note">Connect your Binance wallet to see holdings.</p></div>
+            )}
           </div>
         )}
         {view === "trades" && <TradesPage rows={rows} icons={icons} curve={curve} onSelect={setSelected} />}
@@ -549,7 +558,7 @@ export function ClipxApp({
             />
           </div>
         )}
-        {view === "analytics" && <AnalyticsPage state={state} config={config} />}
+        {view === "analytics" && (funded ? <AnalyticsPage state={state} config={config} /> : <div className="page"><div className="panel"><p className="feature-note">Portfolio value appears after your Binance wallet is paired.</p></div></div>)}
         {view === "settings" && !readOnly && (
           <div className="page">
             <AgentControls connected={connected} config={config} onSave={onSave} />
@@ -579,7 +588,7 @@ function uptimeLabel(seconds: number): string {
   return hours > 0 ? `${hours}h ${mins}m` : `${mins}m`;
 }
 
-function AgentsPage({ state }: { state: AgentState }) {
+function AgentsPage({ state, funded }: { state: AgentState; funded: boolean }) {
   const auto = state.autonomous;
   const up = state.totalPnl >= 0;
   const facts = [
@@ -603,10 +612,10 @@ function AgentsPage({ state }: { state: AgentState }) {
               <b className={state.status === "running" ? "monitoring" : "idle"}>{state.status === "running" ? auto.phase.toUpperCase() : "IDLE"}</b>
               <small>Risk: {state.emergencyMode ? "High" : "Low"}</small>
             </div>
-            <div className={`agent-pnl ${up ? "" : "negative"}`}>{money(state.totalPnl)}<small>{formatPct(state.totalPnlPct)}</small></div>
+            <div className={`agent-pnl ${funded && !up ? "negative" : ""}`}>{funded ? money(state.totalPnl) : "—"}<small>{funded ? formatPct(state.totalPnlPct) : "No wallet"}</small></div>
           </div>
         </div>
-        <div className="panel-footer"><span>Total Agents P&L (Today)</span><strong>{money(state.dailyPnl)}</strong></div>
+        <div className="panel-footer"><span>Total Agents P&L (Today)</span><strong>{funded ? money(state.dailyPnl) : "—"}</strong></div>
       </div>
       <div className="rule-grid">
         {facts.map(([label, value]) => (
@@ -731,6 +740,7 @@ const RANGES = {
 
 function Overview({
   state,
+  funded,
   rows,
   icons,
   curve,
@@ -741,6 +751,7 @@ function Overview({
   onAll,
 }: {
   state: AgentState;
+  funded: boolean;
   rows: LedgerRow[];
   icons: Map<string, string>;
   curve: number[];
@@ -754,11 +765,11 @@ function Overview({
   return (
     <div className="page">
       <div className="stats-grid five">
-        <StatCard icon={Wallet} label="Total Portfolio Value" value={formatUsd(state.portfolioValue)} sub={portfolioBasisLabel(state)} spark={curve} />
-        <StatCard icon={CircleDollarSign} label="Total P&L" value={money(state.totalPnl)} sub={`${formatPct(state.totalPnlPct)} all time`} tone={state.totalPnl < 0 ? "red" : ""} subTone={state.totalPnl < 0 ? "loss" : "gain"} />
-        <StatCard icon={TrendingUp} label="Today's P&L" value={money(state.dailyPnl)} sub={formatPct(state.dailyPnlPct)} tone={state.dailyPnl < 0 ? "red" : ""} subTone={state.dailyPnl < 0 ? "loss" : "gain"} spark={curve.slice(-24)} />
-        <StatCard icon={Layers} label="Open Positions" value={String(state.positions.length)} sub={`Across ${state.positions.length} assets`} tone="blue" />
-        <StatCard icon={Activity} label="Win Rate (All Time)" value={`${state.winRate.toFixed(1)}%`} sub={`${state.winCount} of ${state.closedTrades} closes`} ring={state.winRate} />
+        <StatCard icon={Wallet} label="Total Portfolio Value" value={funded ? formatUsd(state.portfolioValue) : "—"} sub={funded ? portfolioBasisLabel(state) : "Connect Binance"} spark={curve} />
+        <StatCard icon={CircleDollarSign} label="Total P&L" value={funded ? money(state.totalPnl) : "—"} sub={funded ? `${formatPct(state.totalPnlPct)} all time` : "No wallet yet"} tone={funded && state.totalPnl < 0 ? "red" : ""} subTone={funded && state.totalPnl < 0 ? "loss" : "gain"} />
+        <StatCard icon={TrendingUp} label="Today's P&L" value={funded ? money(state.dailyPnl) : "—"} sub={funded ? formatPct(state.dailyPnlPct) : "No wallet yet"} tone={funded && state.dailyPnl < 0 ? "red" : ""} subTone={funded && state.dailyPnl < 0 ? "loss" : "gain"} spark={curve.slice(-24)} />
+        <StatCard icon={Layers} label="Open Positions" value={funded ? String(state.positions.length) : "—"} sub={funded ? `Across ${state.positions.length} assets` : "No wallet yet"} tone="blue" />
+        <StatCard icon={Activity} label="Win Rate (All Time)" value={funded ? `${state.winRate.toFixed(1)}%` : "—"} sub={funded ? `${state.winCount} of ${state.closedTrades} closes` : "No wallet yet"} ring={funded ? state.winRate : 0} />
       </div>
       <div className="content-grid">
         <div className="main-col">
@@ -766,7 +777,7 @@ function Overview({
             <div className="section-header">
               <div>
                 <h2>Portfolio Performance</h2>
-                <div className="chart-value">{formatUsd(state.portfolioValue)} <span className={up ? "" : "loss"}>{money(state.totalPnl)} ({formatPct(state.totalPnlPct)})</span></div>
+                <div className="chart-value">{funded ? <>{formatUsd(state.portfolioValue)} <span className={up ? "" : "loss"}>{money(state.totalPnl)} ({formatPct(state.totalPnlPct)})</span></> : "Connect Binance to see your wallet"}</div>
               </div>
               <div className="range-tabs">
                 {(Object.keys(RANGES) as (keyof typeof RANGES)[]).map((key) => (
@@ -774,7 +785,7 @@ function Overview({
                 ))}
               </div>
             </div>
-            <EquityChart state={state} embedded rangeMs={RANGES[range]} />
+            {funded ? <EquityChart state={state} embedded rangeMs={RANGES[range]} /> : <p className="feature-note">Portfolio value appears after your Binance wallet is paired.</p>}
           </div>
           <div className="panel">
             <Section title="Recent Trades" action="View all" onAction={onAll} />
@@ -782,7 +793,7 @@ function Overview({
           </div>
           <div className="panel">
             <Section title="Open Positions" />
-            <PositionRows positions={state.positions} icons={icons} />
+            <PositionRows positions={funded ? state.positions : []} icons={icons} />
           </div>
         </div>
         <div className="side-col">
@@ -794,11 +805,11 @@ function Overview({
                 <div className={`agent-avatar ${agentKind(state.autonomous.sessionLabel)}`}><AgentRobot session={state.autonomous.sessionLabel} /></div>
                 <div className="agent-info"><strong>{DESK_AGENT}</strong><small>On-chain US stocks · {state.autonomous.sessionLabel}</small></div>
                 <div className="agent-state"><b className={state.status === "running" ? "monitoring" : "idle"}>{state.status === "running" ? "RUNNING" : "IDLE"}</b><small>Risk: {state.emergencyMode ? "High" : "Low"}</small></div>
-                <div className={`agent-pnl ${up ? "" : "negative"}`}>{money(state.totalPnl)}<small>{formatPct(state.totalPnlPct)}</small></div>
+                <div className={`agent-pnl ${funded && !up ? "negative" : ""}`}>{funded ? money(state.totalPnl) : "—"}<small>{funded ? formatPct(state.totalPnlPct) : "No wallet"}</small></div>
                 <ChevronRight size={15} className="muted-icon" />
               </div>
             </div>
-            <div className="panel-footer"><span>Total Agents P&L (Today)</span><strong>{money(state.dailyPnl)}</strong></div>
+            <div className="panel-footer"><span>Total Agents P&L (Today)</span><strong>{funded ? money(state.dailyPnl) : "—"}</strong></div>
           </div>
           <div className="panel">
             <Section title="Market Watchlist" />
