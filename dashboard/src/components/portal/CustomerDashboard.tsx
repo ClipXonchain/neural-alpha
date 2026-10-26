@@ -86,6 +86,7 @@ export function CustomerDashboard() {
       onSave={handleSaveConfig}
       onBlacklist={async (symbol) => { await blacklistToken(symbol); }}
       onUnblacklist={async (symbol) => { await unblacklistToken(symbol); }}
+      allowAccessCode
     />
   );
 }

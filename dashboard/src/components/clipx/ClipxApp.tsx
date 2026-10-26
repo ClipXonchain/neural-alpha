@@ -389,6 +389,7 @@ export function ClipxApp({
   onBlacklist,
   onUnblacklist,
   showcaseView,
+  allowAccessCode = false,
 }: {
   state: AgentState;
   wallet: WalletSnapshot | null;
@@ -409,11 +410,16 @@ export function ClipxApp({
   onBlacklist?: (symbol: string) => Promise<void>;
   onUnblacklist?: (symbol: string) => Promise<void>;
   showcaseView?: ViewId;
+  /** Customer portal only. Mints a replacement access code for this signed-in browser. */
+  allowAccessCode?: boolean;
 }) {
   const [view, setView] = useState<ViewId>(showcaseView ?? "overview");
   const [open, setOpen] = useState(false);
   const [selected, setSelected] = useState<LedgerRow | null>(null);
   const [range, setRange] = useState<keyof typeof RANGES>("30D");
+  const [accessCode, setAccessCode] = useState("");
+  const [codeBusy, setCodeBusy] = useState(false);
+  const [codeNote, setCodeNote] = useState("");
   const funded = walletChecked ? Boolean(wallet?.address) : true;
   const agentName = agentIdLabel(wallet?.agentId);
   const rows = useMemo(() => buildRows(funded ? state.trades : []), [state.trades, funded]);
@@ -450,6 +456,33 @@ export function ClipxApp({
   const go = (id: ViewId) => {
     setView(id);
     setOpen(false);
+  };
+
+  const issueAccessCode = async () => {
+    setCodeBusy(true);
+    setCodeNote("");
+    try {
+      const response = await fetch("/api/portal/access-code", { method: "POST" });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || typeof data.accessCode !== "string") {
+        throw new Error(typeof data.error === "string" ? data.error : "Could not create an access code.");
+      }
+      setAccessCode(data.accessCode);
+    } catch (err) {
+      setAccessCode("");
+      setCodeNote(err instanceof Error ? err.message : "Could not create an access code.");
+    } finally {
+      setCodeBusy(false);
+    }
+  };
+
+  const copyAccessCode = async () => {
+    try {
+      await navigator.clipboard.writeText(accessCode);
+      setCodeNote("Copied. This browser stays signed in.");
+    } catch {
+      setCodeNote("Select the code and copy it.");
+    }
   };
 
   return (
@@ -498,8 +531,20 @@ export function ClipxApp({
               <ExternalLink size={13} />
             </button>
             <WalletAvatar address={wallet?.address} />
+            {allowAccessCode && (
+              <button className="code-button" type="button" onClick={() => void issueAccessCode()} disabled={codeBusy}>
+                {codeBusy ? "Creating…" : "New code"}
+              </button>
+            )}
           </div>
         </header>
+        {allowAccessCode && (accessCode || codeNote) && (
+          <div className="access-code-bar">
+            {accessCode ? <strong>{accessCode}</strong> : null}
+            {accessCode ? <button type="button" onClick={() => void copyAccessCode()}>Copy</button> : null}
+            <span>{codeNote || "This replaces the previous code. This browser stays signed in."}</span>
+          </div>
+        )}
         {readOnly && (
           <a className="start-ad" href="/portal">
             <span className="start-ad-copy">
