@@ -3,10 +3,11 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { ERC20_TRANSFER_TOPIC, padTopicAddress } from "./payments.mjs";
-import { DEFAULT_TOKEN_CONTRACTS, parseUnits18 } from "./policy.mjs";
-import { loadConfig, createHandler } from "./server.mjs";
+import { CHECKOUT_EXPIRY_MS, DEFAULT_TOKEN_CONTRACTS, parseUnits18 } from "./policy.mjs";
+import { loadConfig, createHandler, portalLocation, adminLocation } from "./server.mjs";
 import { openStore } from "./store.mjs";
 
 function fakeDocker() {
@@ -242,13 +243,34 @@ test("each customer gets a separate container and the third is refused", async (
     const listed = await call(url, "/tenants");
     const row = listed.body.tenants.find((tenant) => tenant.id === first.body.tenant.id);
     const env = readFileSync(join(row.data_dir, "tenant.env"), "utf8");
-    assert.match(env, /MAX_POSITION_SIZE_USD=50/);
+    assert.match(env, /MAX_POSITION_SIZE_USD=100/);
+    assert.match(env, /HACKATHON_MAX_TRADE_USD=100/);
+    assert.match(env, /X402_MIN_PAYMENTS_PER_DAY=2/);
     assert.match(env, /DISABLE_DRAWDOWN_LIMIT=true/);
     assert.match(env, /PAYMENT_TOKEN=USDT/);
+    const usdc = listed.body.tenants.find((tenant) => tenant.payment_asset === "USDC");
+    const usdcEnv = readFileSync(join(usdc.data_dir, "tenant.env"), "utf8");
+    assert.match(usdcEnv, /PAYMENT_TOKEN=USDT/);
+    assert.doesNotMatch(usdcEnv, /PAYMENT_TOKEN=USDC/);
     assert.match(env, /API_SECRET=/);
     assert.doesNotMatch(env, /MAX_DRAWDOWN_PCT/);
     assert.match(env, /TRADE_INTERVAL_MS=300000/);
-    assert.doesNotMatch(JSON.stringify(listed.body), /agent_api_secret|access_token_hash/);
+    assert.doesNotMatch(JSON.stringify(listed.body), /agent_api_secret|access_token_hash|access_code_hash|accessCode/);
+    assert.match(first.body.accessCode, /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}(?:-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}){3}$/);
+    const byCode = await call(url, "/session/code", {
+      method: "POST",
+      token: null,
+      body: { code: first.body.accessCode.toLowerCase() },
+    });
+    assert.equal(byCode.status, 200);
+    assert.match(byCode.body.compoundToken, /^box-a\.[a-z0-9]{8}\.[a-f0-9]{64}$/);
+    const wrongCode = await call(url, "/session/code", {
+      method: "POST",
+      token: null,
+      body: { code: "AAAA-BBBB-CCCC-DDDD" },
+    });
+    assert.equal(wrongCode.status, 401);
+    assert.equal(wrongCode.body.compoundToken, undefined);
 
     const live = await call(url, `/tenants/${first.body.tenant.id}/mode`, {
       method: "POST",
@@ -273,9 +295,10 @@ test("each customer gets a separate container and the third is refused", async (
     assert.equal(cap.body.running, 2);
     assert.ok(cap.body.estimatedUsePerMin <= cap.body.upstreamBudgetPerMin);
 
-    const other = await call(url, `/tenants/${second.body.tenant.id}`, { token: first.body.accessToken });
+    const sessionToken = byCode.body.compoundToken;
+    const other = await call(url, `/tenants/${second.body.tenant.id}`, { token: sessionToken });
     assert.equal(other.status, 404);
-    const own = await call(url, `/tenants/${first.body.tenant.id}`, { token: first.body.accessToken });
+    const own = await call(url, `/tenants/${first.body.tenant.id}`, { token: sessionToken });
     assert.equal(own.status, 200);
     assert.equal(own.body.tenant.id, first.body.tenant.id);
     const listedAsCustomer = await call(url, "/tenants", { token: first.body.accessToken });
@@ -311,12 +334,14 @@ test("each customer gets a separate container and the third is refused", async (
       body: pay("dd"),
     });
     assert.equal(deskWrite.status, 403);
-    const page = await fetch(`${url}/admin`);
-    const html = await page.text();
-    assert.equal(page.status, 200);
-    assert.match(html, /Read only/);
-    assert.match(html, /bscscan\.com\/tx\//);
-    assert.doesNotMatch(html, /\/pause|\/resume|\/stop|\/pair|\/mode|\/risk/);
+    const page = await fetch(`${url}/admin`, { redirect: "manual" });
+    assert.equal(page.status, 302);
+    assert.equal(page.headers.get("location"), "http://127.0.0.1:3000/admin");
+    await page.body?.cancel();
+    const home = await fetch(`${url}/`, { redirect: "manual" });
+    assert.equal(home.status, 302);
+    assert.equal(home.headers.get("location"), "http://127.0.0.1:3000/admin");
+    await home.body?.cancel();
     const customerDesk = await call(url, "/admin/overview", { token: first.body.accessToken });
     assert.equal(customerDesk.status, 401);
 
@@ -437,7 +462,7 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     CONTROL_API_SECRET: "test-secret",
     SAAS_MONITOR_SECRET: "monitor-secret",
     SAAS_TREASURY_ADDRESS: treasury,
-    SAAS_PRICE_USD: "30",
+    SAAS_PRICE_USD: "15",
     SAAS_DATA_ROOT: root,
     SAAS_DB_PATH: join(root, "control.sqlite"),
     SAAS_HOST_ID: "cell-01",
@@ -446,7 +471,17 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
   const store = openStore(config.dbPath);
   const docker = fakeDocker();
   const { server, url } = await listen(
-    createHandler({ store, docker, config, rpc: mockRpc, now: () => currentTime }),
+    createHandler({
+      store,
+      docker,
+      config,
+      rpc: mockRpc,
+      now: () => currentTime,
+      // The address index is not the mock chain. A failed list falls back to eth_getLogs.
+      fetchImpl: async () => {
+        throw new Error("transfer list HTTP 503");
+      },
+    }),
   );
 
   try {
@@ -458,16 +493,35 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     });
     assert.equal(unverified.status, 402);
 
+    const absurd = await call(url, "/checkout", {
+      method: "POST",
+      token: null,
+      body: { paymentAsset: "USDT", preset: "custom", positionUsd: 9_000_000_000 },
+    });
+    assert.equal(absurd.status, 400);
+    assert.match(absurd.body.error, /10000/);
+    const customQuote = await call(url, "/checkout", {
+      method: "POST",
+      token: null,
+      body: { paymentAsset: "USDT", preset: "custom", positionUsd: "320.50", x402PerDay: 2 },
+    });
+    assert.equal(customQuote.status, 201);
+    assert.equal(customQuote.body.order.preset, "custom");
+    assert.equal(customQuote.body.order.positionUsd, 320.5);
+    assert.equal(customQuote.body.order.x402PerDay, 2);
+
     // 2. Create an unpaid checkout order
     const createdOrder = await call(url, "/checkout", {
       method: "POST",
       token: null,
-      body: { paymentAsset: "USDT", preset: "normal" },
+      body: { paymentAsset: "USDT", preset: "250", x402PerDay: 2 },
     });
     assert.equal(createdOrder.status, 201);
     assert.equal(createdOrder.body.order.status, "pending");
     assert.equal(createdOrder.body.order.treasuryAddress, treasury);
-    assert.match(createdOrder.body.order.amountDisplay, /^30\.\d+$/);
+    assert.match(createdOrder.body.order.amountDisplay, /^15\.\d{3}$/);
+    assert.equal(createdOrder.body.order.amountWei, parseUnits18(createdOrder.body.order.amountDisplay).toString());
+    assert.equal(Date.parse(createdOrder.body.order.expiresAt) - currentTime.getTime(), CHECKOUT_EXPIRY_MS);
     assert.equal(docker.containers.size, 0);
 
     const orderId = createdOrder.body.order.id;
@@ -485,7 +539,7 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     const underRes = await call(url, `/checkout/${orderId}/verify`, {
       method: "POST",
       token: null,
-      body: { paymentTx: underpaidTx, claimSecret },
+      body: { paymentTx: underpaidTx, claimSecret, payer },
     });
     assert.equal(underRes.status, 402);
     assert.match(underRes.body.error, /underpaid/);
@@ -502,7 +556,7 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     const unconfRes = await call(url, `/checkout/${orderId}/verify`, {
       method: "POST",
       token: null,
-      body: { paymentTx: unconfirmedTx, claimSecret },
+      body: { paymentTx: unconfirmedTx, claimSecret, payer },
     });
     assert.equal(unconfRes.status, 402);
     assert.match(unconfRes.body.error, /confirmations/);
@@ -519,7 +573,7 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     const verified = await call(url, `/checkout/${orderId}/verify`, {
       method: "POST",
       token: null,
-      body: { paymentTx: validOverpaidTx, claimSecret },
+      body: { paymentTx: validOverpaidTx, claimSecret, payer },
     });
     assert.equal(verified.status, 402);
     assert.match(verified.body.error, /exact quote/);
@@ -538,7 +592,7 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     const splitPayer = await call(url, `/checkout/${orderId}/verify`, {
       method: "POST",
       token: null,
-      body: { paymentTx: splitPayerTx, claimSecret },
+      body: { paymentTx: splitPayerTx, claimSecret, payer },
     });
     assert.equal(splitPayer.status, 402);
     assert.match(splitPayer.body.error, /one wallet address/);
@@ -556,7 +610,7 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     const wrongNetwork = await call(url, `/checkout/${orderId}/verify`, {
       method: "POST",
       token: null,
-      body: { paymentTx: exactTx, claimSecret },
+      body: { paymentTx: exactTx, claimSecret, payer },
     });
     assert.equal(wrongNetwork.status, 503);
     assert.match(wrongNetwork.body.error, /BNB Smart Chain/);
@@ -567,25 +621,41 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     const wrongDecimals = await call(url, `/checkout/${orderId}/verify`, {
       method: "POST",
       token: null,
-      body: { paymentTx: exactTx, claimSecret },
+      body: { paymentTx: exactTx, claimSecret, payer },
     });
     assert.equal(wrongDecimals.status, 503);
     assert.match(wrongDecimals.body.error, /decimals are 6/);
     assert.equal(docker.containers.size, 0);
 
     decimalsHex = "0x12";
+    const wrongSigner = await call(url, `/checkout/${orderId}/verify`, {
+      method: "POST",
+      token: null,
+      body: { paymentTx: exactTx, claimSecret, payer: "0x3333333333333333333333333333333333333333" },
+    });
+    assert.equal(wrongSigner.status, 401);
+    assert.match(wrongSigner.body.error, /did not send/);
+    assert.equal(store.getOrder(orderId).status, "pending");
+    assert.equal(docker.containers.size, 0);
+
     const exactVerified = await call(url, `/checkout/${orderId}/verify`, {
       method: "POST",
       token: null,
-      body: { paymentTx: exactTx, claimSecret },
+      body: { paymentTx: exactTx, claimSecret, payer },
     });
     assert.equal(exactVerified.status, 200);
     assert.equal(exactVerified.body.order.status, "paid");
     assert.equal(exactVerified.body.order.overpaidDisplay, "0");
     assert.equal(exactVerified.body.tenant.status, "running");
-    assert.equal(exactVerified.body.tenant.risk_preset, "normal");
+    assert.equal(exactVerified.body.tenant.risk_preset, "250");
+    assert.equal(exactVerified.body.tenant.max_position_usd, 250);
+    assert.equal(exactVerified.body.tenant.max_trade_usd, 250);
+    assert.equal(exactVerified.body.tenant.x402_per_day, 2);
+    assert.equal(createdOrder.body.order.positionUsd, 250);
     assert.equal(exactVerified.body.tenant.overpaid_amount, "0");
     assert.match(exactVerified.body.compoundToken, /^cell-01\.[a-z0-9]{8}\.[a-f0-9]{64}$/);
+    assert.match(exactVerified.body.accessCode, /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}(?:-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}){3}$/);
+    assert.equal(exactVerified.body.tenant.access_code_hash, undefined);
 
     // 6. Customer accesses their Dedicated Dashboard (/tenants/:id/state) using compoundToken
     const tenantId = exactVerified.body.tenant.id;
@@ -617,7 +687,7 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     const renewOrder = await call(url, "/checkout", {
       method: "POST",
       token: null,
-      body: { paymentAsset: "USDC", preset: "active", tenantId },
+      body: { paymentAsset: "USDC", preset: "500", tenantId },
     });
     assert.equal(renewOrder.status, 201);
     const renewTx = `0x${"44".repeat(32)}`;
@@ -634,9 +704,13 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
 
     const renewed = await call(url, `/tenants/${tenantId}`, { token: compoundToken });
     assert.equal(renewed.body.tenant.buys_halted, 0);
-    assert.equal(renewed.body.tenant.risk_preset, "active");
+    assert.equal(renewed.body.tenant.risk_preset, "500");
+    assert.equal(renewed.body.tenant.max_trade_usd, 500);
     const restoredEnv = readFileSync(join(root, tenantId, "tenant.env"), "utf8");
-    assert.match(restoredEnv, /MAX_POSITION_SIZE_USD=250/);
+    assert.match(restoredEnv, /MAX_POSITION_SIZE_USD=500/);
+    assert.match(restoredEnv, /HACKATHON_MAX_TRADE_USD=500/);
+    assert.match(restoredEnv, /PAYMENT_TOKEN=USDT/);
+    assert.match(restoredEnv, /X402_MIN_PAYMENTS_PER_DAY=2/);
     assert.doesNotMatch(restoredEnv, /DISABLE_NEW_BUYS=true/);
 
     const denied = await call(url, "/session/open", {
@@ -656,6 +730,47 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     assert.equal(oldToken.status, 404);
     const newToken = await call(url, `/tenants/${tenantId}`, { token: reopened.body.compoundToken });
     assert.equal(newToken.status, 200);
+
+    const unrelated = await call(url, "/session/open", {
+      method: "POST",
+      token: "test-secret",
+      body: { paymentTx: `0x${"55".repeat(32)}`, payer },
+    });
+    assert.equal(unrelated.status, 404);
+    const stranger = await call(url, "/session/open", {
+      method: "POST",
+      token: "test-secret",
+      body: { payer: "0x4444444444444444444444444444444444444444" },
+    });
+    assert.equal(stranger.status, 404);
+    const byWallet = await call(url, "/session/open", {
+      method: "POST",
+      token: "test-secret",
+      body: { payer },
+    });
+    assert.equal(byWallet.status, 200);
+    assert.notEqual(byWallet.body.compoundToken, reopened.body.compoundToken);
+    const afterWallet = await call(url, `/tenants/${tenantId}`, { token: byWallet.body.compoundToken });
+    assert.equal(afterWallet.status, 200);
+    const rotated = await call(url, `/tenants/${tenantId}/access-code`, {
+      method: "POST",
+      token: byWallet.body.compoundToken,
+    });
+    assert.equal(rotated.status, 200);
+    assert.match(rotated.body.accessCode, /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}(?:-[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{4}){3}$/);
+    assert.notEqual(rotated.body.accessCode, exactVerified.body.accessCode);
+    const retired = await call(url, "/session/code", {
+      method: "POST",
+      token: null,
+      body: { code: exactVerified.body.accessCode },
+    });
+    assert.equal(retired.status, 401);
+    const replaced = await call(url, "/session/code", {
+      method: "POST",
+      token: null,
+      body: { code: rotated.body.accessCode },
+    });
+    assert.equal(replaced.status, 200);
   } finally {
     server.close();
     store.close();
@@ -715,7 +830,7 @@ test("multi-VPS edge router links a second cell VPS, spills over when cell-01 is
     const firstOrder = await call(srv1.url, "/checkout", {
       method: "POST",
       token: null,
-      body: { paymentAsset: "USDT", preset: "cautious" },
+      body: { paymentAsset: "USDT", preset: "100" },
     });
     assert.equal(firstOrder.status, 201);
     assert.equal(firstOrder.body.order.hostId, "cell-01");
@@ -745,5 +860,211 @@ test("multi-VPS edge router links a second cell VPS, spills over when cell-01 is
     srv2.server.close();
     store1.close();
     store2.close();
+  }
+});
+
+test("saving a position size updates the live tenant in USDT and rejects a bad custom amount", async () => {
+  const root = mkdtempSync(join(tmpdir(), "na-risk-"));
+  const config = loadConfig({
+    CONTROL_API_SECRET: "test-secret",
+    SAAS_DATA_ROOT: root,
+    SAAS_DB_PATH: join(root, "control.sqlite"),
+    SAAS_HOST_ID: "box-a",
+    SAAS_MAX_TENANTS: "2",
+  });
+  const store = openStore(config.dbPath);
+  const docker = fakeDocker();
+  const { server, url } = await listen(createHandler({ store, docker, config }));
+  try {
+    const created = await call(url, "/tenants", { method: "POST", token: null, body: pay("c1", "BNB") });
+    assert.equal(created.status, 201);
+    const id = created.body.tenant.id;
+    const token = created.body.compoundToken;
+    const born = readFileSync(join(root, id, "tenant.env"), "utf8");
+    assert.match(born, /PAYMENT_TOKEN=USDT/);
+    assert.doesNotMatch(born, /PAYMENT_TOKEN=BNB/);
+    assert.equal(created.body.tenant.payment_asset, "BNB");
+
+    const saved = await call(url, `/tenants/${id}/risk`, {
+      method: "POST",
+      token,
+      body: { preset: "custom", positionUsd: 750, x402PerDay: 3 },
+    });
+    assert.equal(saved.status, 200);
+    assert.equal(saved.body.tenant.risk_preset, "custom");
+    assert.equal(saved.body.tenant.max_position_usd, 750);
+    assert.equal(saved.body.tenant.max_trade_usd, 750);
+    assert.equal(saved.body.tenant.x402_per_day, 3);
+    assert.equal(saved.body.tenant.access_code_hash, undefined);
+    const env = readFileSync(join(root, id, "tenant.env"), "utf8");
+    assert.match(env, /MAX_POSITION_SIZE_USD=750/);
+    assert.match(env, /HACKATHON_MAX_TRADE_USD=750/);
+    assert.match(env, /X402_MIN_PAYMENTS_PER_DAY=3/);
+    assert.match(env, /CMC_X402_INTERVAL_MS=57600000/);
+    assert.match(env, /STUDIO_X402_INTERVAL_MS=57600000/);
+    assert.match(env, /PAYMENT_TOKEN=USDT/);
+    const yml = readFileSync(join(root, id, "override.yml"), "utf8");
+    assert.match(yml, /PAYMENT_TOKEN: "USDT"/);
+    assert.match(yml, /MAX_POSITION_SIZE_USD: "750"/);
+    assert.match(yml, /HACKATHON_MAX_TRADE_USD: "750"/);
+
+    for (const body of [
+      { preset: "custom", positionUsd: 0 },
+      { preset: "custom", positionUsd: -20 },
+      { preset: "custom", positionUsd: 1_000_000_000_000 },
+      { preset: "500", x402PerDay: 1 },
+      { preset: "nope" },
+    ]) {
+      const rejected = await call(url, `/tenants/${id}/risk`, { method: "POST", token, body });
+      assert.equal(rejected.status, 400, JSON.stringify(body));
+    }
+    const unchanged = readFileSync(join(root, id, "tenant.env"), "utf8");
+    assert.match(unchanged, /MAX_POSITION_SIZE_USD=750/);
+    assert.match(unchanged, /X402_MIN_PAYMENTS_PER_DAY=3/);
+
+    const preset = await call(url, `/tenants/${id}/risk`, {
+      method: "POST",
+      token,
+      body: { preset: "500" },
+    });
+    assert.equal(preset.status, 200);
+    assert.equal(preset.body.tenant.risk_preset, "500");
+    assert.equal(preset.body.tenant.max_position_usd, 500);
+    assert.equal(preset.body.tenant.max_trade_usd, 500);
+    assert.equal(preset.body.tenant.x402_per_day, 3);
+    const after = readFileSync(join(root, id, "tenant.env"), "utf8");
+    assert.match(after, /MAX_POSITION_SIZE_USD=500/);
+    assert.match(after, /HACKATHON_MAX_TRADE_USD=500/);
+    assert.match(after, /X402_MIN_PAYMENTS_PER_DAY=3/);
+    assert.match(after, /PAYMENT_TOKEN=USDT/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("a stored 6-decimal stablecoin quote is replaced with a 3-decimal quote when the pay screen reads it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "na-control-"));
+  const currentTime = new Date("2026-10-26T12:00:00.000Z");
+  const treasury = "0x2222222222222222222222222222222222222222";
+  const config = loadConfig({
+    CONTROL_API_SECRET: "test-secret",
+    SAAS_MONITOR_SECRET: "monitor-secret",
+    SAAS_TREASURY_ADDRESS: treasury,
+    SAAS_PRICE_USD: "15",
+    SAAS_DATA_ROOT: root,
+    SAAS_DB_PATH: join(root, "control.sqlite"),
+    SAAS_HOST_ID: "cell-01",
+    SAAS_MAX_TENANTS: "5",
+  });
+  const store = openStore(config.dbPath);
+  const { server, url } = await listen(
+    createHandler({ store, docker: fakeDocker(), config, now: () => currentTime }),
+  );
+
+  try {
+    const created = await call(url, "/checkout", {
+      method: "POST",
+      token: null,
+      body: { paymentAsset: "USDT", preset: "100" },
+    });
+    assert.equal(created.status, 201);
+    assert.match(created.body.order.amountDisplay, /^15\.\d{3}$/);
+    const orderId = created.body.order.id;
+    const untouched = await call(url, `/checkout/${orderId}`);
+    assert.equal(untouched.status, 200);
+    assert.equal(untouched.body.order.amountDisplay, created.body.order.amountDisplay);
+    assert.equal(untouched.body.order.expiresAt, created.body.order.expiresAt);
+
+    const db = new DatabaseSync(config.dbPath);
+    db.prepare(
+      `UPDATE orders SET amount_display = ?, amount_wei = ?, tail = ?, expires_at = ? WHERE id = ?`,
+    ).run("15.008513", parseUnits18("15.008513").toString(), 8513, "2026-10-26T12:05:00.000Z", orderId);
+    db.close();
+
+    const replaced = await call(url, `/checkout/${orderId}`);
+    assert.equal(replaced.status, 200);
+    assert.equal(replaced.body.order.id, orderId);
+    assert.equal(replaced.body.order.status, "pending");
+    assert.match(replaced.body.order.amountDisplay, /^15\.\d{3}$/);
+    assert.notEqual(replaced.body.order.amountDisplay, "15.008513");
+    assert.equal(replaced.body.order.amountWei, parseUnits18(replaced.body.order.amountDisplay).toString());
+    assert.equal(Date.parse(replaced.body.order.expiresAt) - currentTime.getTime(), CHECKOUT_EXPIRY_MS);
+    assert.equal(store.getOrder(orderId).amount_display, replaced.body.order.amountDisplay);
+
+    const stable = await call(url, `/checkout/${orderId}`);
+    assert.equal(stable.body.order.amountDisplay, replaced.body.order.amountDisplay);
+    assert.equal(stable.body.order.expiresAt, replaced.body.order.expiresAt);
+
+    for (const asset of ["USDC", "U", "USD1"]) {
+      const quote = await call(url, "/checkout", {
+        method: "POST",
+        token: null,
+        body: { paymentAsset: asset, preset: "100" },
+      });
+      assert.equal(quote.status, 201, asset);
+      assert.match(quote.body.order.amountDisplay, /^15\.\d{3}$/);
+      assert.equal(quote.body.order.amountWei, parseUnits18(quote.body.order.amountDisplay).toString());
+    }
+
+    const bnb = await call(url, "/checkout", {
+      method: "POST",
+      token: null,
+      body: { paymentAsset: "BNB", preset: "100" },
+    });
+    assert.equal(bnb.status, 201);
+    assert.match(bnb.body.order.amountDisplay, /^\d+\.\d{6}$/);
+    assert.equal(bnb.body.order.amountDisplay.slice(-3).length, 3);
+    assert.notEqual(bnb.body.order.amountDisplay.slice(0, 2), "15");
+    const bnbRead = await call(url, `/checkout/${bnb.body.order.id}`);
+    assert.equal(bnbRead.body.order.amountDisplay, bnb.body.order.amountDisplay);
+    assert.equal(bnbRead.body.order.amountWei, bnb.body.order.amountWei);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("portal opens on localhost and on neuralalpha.io", () => {
+  const config = loadConfig({
+    SAAS_APP_URL: "https://neuralalpha.io/portal",
+    SAAS_LOCAL_APP_URL: "http://127.0.0.1:3000/portal",
+    DATABASE_URL: "postgres://example",
+  });
+  assert.equal(config.databaseUrl, "postgres://example");
+  assert.equal(config.portalUrl, "https://neuralalpha.io/portal");
+  assert.equal(portalLocation({ headers: { host: "127.0.0.1:3910" } }, config), "http://127.0.0.1:3000/portal");
+  assert.equal(portalLocation({ headers: { host: "localhost:3000" } }, config), "http://localhost:3000/portal");
+  assert.equal(portalLocation({ headers: { host: "neuralalpha.io" } }, config), "https://neuralalpha.io/portal");
+  assert.equal(portalLocation({ headers: { host: "www.neuralalpha.io" } }, config), "https://neuralalpha.io/portal");
+  assert.equal(adminLocation({ headers: { host: "127.0.0.1:3910" } }, config), "http://127.0.0.1:3000/admin");
+  assert.equal(adminLocation({ headers: { host: "neuralalpha.io" } }, config), "https://neuralalpha.io/admin");
+});
+
+test("a customer container does not receive the shared Neon URL", async () => {
+  const root = mkdtempSync(join(tmpdir(), "na-control-"));
+  const config = loadConfig({
+    CONTROL_API_SECRET: "test-secret",
+    SAAS_MONITOR_SECRET: "monitor-secret",
+    SAAS_DATA_ROOT: root,
+    SAAS_DB_PATH: join(root, "control.sqlite"),
+    SAAS_HOST_ID: "box-a",
+    SAAS_MAX_TENANTS: "2",
+    SAAS_HOST_RAM_MB: "16384",
+    DATABASE_URL: "postgres://backup-test.invalid/db",
+    TENANT_DATABASE_URL: "postgres://backup-test.invalid/db",
+  });
+  const store = openStore(config.dbPath);
+  const docker = fakeDocker();
+  const { server, url } = await listen(createHandler({ store, docker, config }));
+  try {
+    const created = await call(url, "/tenants", { method: "POST", token: null, body: pay("aa") });
+    assert.equal(created.status, 201);
+    const env = readFileSync(join(root, created.body.tenant.id, "tenant.env"), "utf8");
+    assert.equal(env.includes("DATABASE_URL"), false);
+    assert.equal(env.includes("backup-test.invalid"), false);
+  } finally {
+    server.close();
+    store.close();
   }
 });

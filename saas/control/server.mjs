@@ -1,18 +1,21 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createBnbPriceFeed } from "./bnb-price.mjs";
 import { createDocker } from "./docker.mjs";
 import { createEdgeCluster, formatCompoundToken, normalizeBaseUrl, parseCompoundToken } from "./edge.mjs";
 import { tenantDir, writeTenantFiles } from "./files.mjs";
-import { createBscRpc, createTreasuryWatcher, ERC20_TRANSFER_TOPIC, padTopicAddress, verifyBscReceipt } from "./payments.mjs";
+import { createBscRpc, createTreasuryWatcher, ERC20_TRANSFER_TOPIC, padTopicAddress, readConfirmationCount, verifyBinanceWalletPayment, verifyBscReceipt } from "./payments.mjs";
 import {
   assertAddress,
   assertPayment,
   CALLS_PER_CYCLE,
   CHECKOUT_EXPIRY_MS,
+  CHECKOUT_PROVISION_RETRY_MS,
   CHECKOUT_SETTLEMENT_GRACE_MS,
+  checkoutAmountIsCurrent,
   containerName,
   estimatedUsePerMin,
   formatUnits18,
@@ -21,12 +24,16 @@ import {
   PAYMENT_ASSETS,
   projectName,
   quoteOrderAmount,
+  QUOTE_MARKER_MAX,
   REQUIRED_CONFIRMATIONS,
+  SOFTWARE_BNB_PRICE_USD,
+  SOFTWARE_FEE_USD,
   resolveRisk,
   resolveTokenContracts,
   staggerSeconds,
   SUBSCRIPTION_MS,
 } from "./policy.mjs";
+import { attachSaasBackup, safeError, watchUserRecords } from "./neon-backup.mjs";
 import { openStore } from "./store.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -59,24 +66,59 @@ export function loadConfig(env = process.env) {
     dbPath: env.SAAS_DB_PATH || join(env.SAAS_DATA_ROOT || join(REPO_ROOT, "saas/runtime"), "control.sqlite"),
     apiSecret: env.CONTROL_API_SECRET?.trim() || (devSandbox ? "dev-operator-secret" : ""),
     monitorSecret: env.SAAS_MONITOR_SECRET?.trim() || (devSandbox ? "dev-monitor-secret" : ""),
-    databaseUrl: env.TENANT_DATABASE_URL?.trim() || "",
+    databaseUrl: env.TENANT_DATABASE_URL?.trim() || env.DATABASE_URL?.trim() || "",
     treasuryAddress: rawTreasury ? assertAddress(rawTreasury, "SAAS_TREASURY_ADDRESS") : "",
-    priceUsd: num("SAAS_PRICE_USD", 30),
-    bnbPriceUsd: num("SAAS_BNB_PRICE_USD", 600),
+    priceUsd: num("SAAS_PRICE_USD", SOFTWARE_FEE_USD),
+    bnbPriceUsd: num("SAAS_BNB_PRICE_USD", SOFTWARE_BNB_PRICE_USD),
     minConfirmations: num("SAAS_MIN_CONFIRMATIONS", REQUIRED_CONFIRMATIONS),
     bscRpcUrl: env.SAAS_BSC_RPC_URL?.trim() || "https://bsc-dataseed.binance.org",
+    web3ApiKey: env.OC_API_KEY?.trim() || "",
+    web3SecretKey: env.OC_SECRET_KEY?.trim() || "",
     tokenContracts: resolveTokenContracts(env),
     cellNodesEnv: env.SAAS_CELL_NODES?.trim() || "",
     edgeOnly: env.SAAS_EDGE_ONLY === "1",
     devSandbox,
     bind: env.SAAS_BIND_HOST?.trim() || "127.0.0.1",
     port: num("SAAS_CONTROL_PORT", 3910),
-    portalUrl: env.SAAS_APP_URL?.trim() || "http://127.0.0.1:3000/portal",
+    portalUrl: env.SAAS_APP_URL?.trim() || "https://neuralalpha.io/portal",
+    localPortalUrl: env.SAAS_LOCAL_APP_URL?.trim() || "http://127.0.0.1:3000/portal",
     demo: env.SAAS_DESK_DEMO === "1",
     streamIntervalMs: num("SAAS_DESK_STREAM_MS", 3000),
     operatorAgent: formatAgentId(env.SAAS_OPERATOR_AGENT_ID),
     plan,
   };
+}
+
+const LOCAL_PORTAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+export function portalLocation(req, config) {
+  const raw = String(req.headers?.host || req.headers?.["x-forwarded-host"] || "").split(",")[0].trim().toLowerCase();
+  const host = raw.startsWith("[") ? raw.slice(1, raw.indexOf("]")) : raw.split(":")[0];
+  if (host && !LOCAL_PORTAL_HOSTS.has(host)) return config.portalUrl;
+  const base = config.localPortalUrl || "http://127.0.0.1:3000/portal";
+  try {
+    const url = new URL(base);
+    if (host === "localhost" || host === "127.0.0.1") url.hostname = host;
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return base;
+  }
+}
+
+export function adminLocation(req, config) {
+  return appPath(portalLocation(req, config), "/admin");
+}
+
+function appPath(location, pathname) {
+  try {
+    const url = new URL(location);
+    url.pathname = pathname;
+    url.search = "";
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return String(location || "").replace(/\/portal\/?$/, pathname);
+  }
 }
 
 export function formatAgentId(value) {
@@ -85,8 +127,13 @@ export function formatAgentId(value) {
   return name + ".ai";
 }
 
-export function createHandler({ store, docker, config, rpc, fetchImpl, now = () => new Date() }) {
+export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice, now = () => new Date() }) {
+  const currentBnbPriceUsd = () => {
+    const live = Number(bnbPrice?.priceUsd?.());
+    return Number.isFinite(live) && live > 0 ? live : config.bnbPriceUsd;
+  };
   const limits = new Map();
+  const codeFailures = [];
   const boot = Date.now();
   let requests = 0;
   const bscRpc = rpc || (config.bscRpcUrl ? createBscRpc(config.bscRpcUrl, fetchImpl) : null);
@@ -110,9 +157,10 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
     store,
     config,
     rpc: bscRpc,
+    fetchImpl,
     now,
     onOrderPaid: (orderId, txHash) =>
-      fulfillQueued({ store, docker, config, rpc: bscRpc, now, orderId, paymentTx: txHash, fromWatcher: true }),
+      fulfillQueued({ store, docker, config, rpc: bscRpc, fetchImpl, now, orderId, paymentTx: txHash, fromWatcher: true }),
   });
   const desk = createDeskStream(async () => ({
     overview: await overview(store, docker, config, { uptimeMs: Date.now() - boot, requests }),
@@ -133,6 +181,18 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
 
       if (req.method === "GET" && url.pathname === "/health") {
         return send(res, 200, { ok: true, hostId: config.hostId });
+      }
+      if (req.method === "GET" && url.pathname === "/pricing") {
+        const bnbPriceUsd = currentBnbPriceUsd();
+        const mark = bnbPrice?.snapshot?.() || { source: "fallback", updatedAt: null };
+        return send(res, 200, {
+          feeUsd: config.priceUsd,
+          bnbPriceUsd,
+          bnbPriceSource: mark.source || "fallback",
+          bnbPriceUpdatedAt: mark.updatedAt || null,
+          bnbAmountDisplay: quoteOrderAmount({ asset: "BNB", priceUsd: config.priceUsd, bnbPriceUsd, tail: 0 }).amountDisplay,
+          refreshMs: 4 * 60 * 60 * 1000,
+        });
       }
       if (
         (req.method === "GET" || req.method === "HEAD") &&
@@ -161,17 +221,14 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
         (req.method === "GET" || req.method === "HEAD") &&
         (url.pathname === "/" || url.pathname === "/admin" || url.pathname === "/admin/")
       ) {
-        let html = ADMIN_HTML;
-        try {
-          html = readFileSync(join(HERE, "admin.html"), "utf8");
-        } catch {}
-        return sendHtml(res, html);
+        res.writeHead(302, { location: adminLocation(req, config), "cache-control": "no-store" });
+        return res.end();
       }
       if (
         (req.method === "GET" || req.method === "HEAD") &&
         (url.pathname === "/portal" || url.pathname === "/portal/")
       ) {
-        res.writeHead(302, { location: config.portalUrl, "cache-control": "no-store" });
+        res.writeHead(302, { location: portalLocation(req, config), "cache-control": "no-store" });
         return res.end();
       }
       if (url.pathname === "/admin/stream") {
@@ -232,6 +289,10 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
         const body = await readJson(req);
         return send(res, 200, openPaidSession({ store, config, now, body }));
       }
+      if (req.method === "POST" && url.pathname === "/session/code") {
+        const body = await readJson(req);
+        return send(res, 200, openByAccessCode({ store, config, now, body, failures: codeFailures }));
+      }
       if (req.method === "POST" && url.pathname === "/checkout") {
         const body = await readJson(req);
         if (body.targetHostId && body.targetHostId !== config.hostId) {
@@ -248,28 +309,57 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
             return send(res, proxied.status, proxied.body);
           }
         }
-        return send(res, 201, createCheckoutOrder({ store, config, now, body }));
+        return send(res, 201, createCheckoutOrder({ store, config, now, body, bnbPriceUsd: currentBnbPriceUsd() }));
       }
       const checkoutMatch = url.pathname.match(/^\/checkout\/(ord_[a-f0-9]{12})(\/verify|\/claim)?$/);
       if (checkoutMatch) {
         const orderId = checkoutMatch[1];
         const subAction = checkoutMatch[2] || "";
         if (req.method === "GET" && subAction === "") {
-          const order = getFreshOrder(store, config, orderId, now);
+          let order = await serializePaymentWork(() =>
+            presentCheckoutOrder({ store, config, now, orderId, bnbPriceUsd: currentBnbPriceUsd() }),
+          );
           if (!order) return send(res, 404, { error: "order not found" });
-          return send(res, 200, { order: publicOrderView(order) });
+          if (order.status === "pending" && order.payment_tx && bscRpc) {
+            try {
+              const confirmations = await readConfirmationCount(bscRpc, order.payment_tx);
+              if (typeof confirmations === "number") {
+                order = store.updateOrder(order.id, { confirmations, updated_at: now().toISOString() }) || order;
+                if (confirmations >= config.minConfirmations) {
+                  await fulfillQueued({
+                    store,
+                    docker,
+                    config,
+                    rpc: bscRpc,
+                    fetchImpl,
+                    now,
+                    orderId: order.id,
+                    paymentTx: order.payment_tx,
+                    fromWatcher: true,
+                  });
+                  order = store.getOrder(order.id) || order;
+                }
+              }
+            } catch {
+              // Keep the last saved count. The pay screen still loads.
+            }
+          }
+          return send(res, 200, { order: publicOrderView(order, config.minConfirmations) });
         }
         if (req.method === "POST" && subAction === "/verify") {
           const body = await readJson(req);
+          const payer = assertAddress(body.payer, "payer");
           const result = await fulfillQueued({
             store,
             docker,
             config,
             rpc: bscRpc,
+            fetchImpl,
             now,
             orderId,
             paymentTx: body.paymentTx,
             claimSecret: body.claimSecret,
+            expectedPayer: payer,
           });
           return send(res, 200, result);
         }
@@ -291,6 +381,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
             docker,
             config,
             rpc: bscRpc,
+            fetchImpl,
             now,
             orderId: String(body.orderId),
             paymentTx: body.paymentTx,
@@ -311,7 +402,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
               contracts: config.tokenContracts,
               minAmountWei:
                 payment.asset === "BNB"
-                  ? quoteOrderAmount({ asset: "BNB", priceUsd: config.priceUsd, bnbPriceUsd: config.bnbPriceUsd, tail: 0 }).amountWei
+                  ? quoteOrderAmount({ asset: "BNB", priceUsd: config.priceUsd, bnbPriceUsd: currentBnbPriceUsd(), tail: 0 }).amountWei
                   : parseUnits18(String(config.priceUsd)).toString(),
               minConfirmations: config.minConfirmations,
             });
@@ -322,7 +413,11 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
             config,
             now,
             payment,
-            preset: body.preset,
+            risk: resolveRisk({
+              preset: body.preset,
+              positionUsd: body.positionUsd,
+              x402PerDay: body.x402PerDay,
+            }),
             agentName: body.agentName,
             verified,
           });
@@ -366,7 +461,11 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
       }
       if (req.method === "POST" && action === "/risk") {
         const body = await readJson(req);
-        const risk = resolveRisk(body.preset);
+        const risk = resolveRisk({
+          preset: body.preset,
+          positionUsd: body.positionUsd,
+          x402PerDay: body.x402PerDay == null || body.x402PerDay === "" ? tenant.x402_per_day : body.x402PerDay,
+        });
         const updated = applySpec(store, tenant, { risk, agentMode: tenant.agent_mode }, config, now);
         if (tenant.status === "running") await docker.up(dockerTarget(updated));
         return send(res, 200, { tenant: customerView(updated) });
@@ -391,6 +490,9 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
           pairingCode: data.pairingCode,
           urlForWeb: data.urlForWeb,
         });
+      }
+      if (req.method === "POST" && action === "/access-code") {
+        return send(res, 200, { accessCode: rotateAccessCode(store, tenant, now) });
       }
       if (req.method === "POST" && action === "/pair/verify") {
         const body = await readJson(req);
@@ -422,23 +524,19 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, now = () 
   return handler;
 }
 
-function openPaidSession({ store, config, now, body }) {
-  const tx = String(body?.paymentTx || "").trim().toLowerCase();
-  if (!/^0x[a-f0-9]{64}$/.test(tx)) {
-    throw Object.assign(new Error("paymentTx must be a transaction hash"), { status: 400 });
-  }
-  const payer = assertAddress(body?.payer, "payer");
-  const order = store.listOrders().find(
-    (row) =>
-      row.host_id === config.hostId &&
-      row.status === "paid" &&
-      String(row.payment_tx || "").toLowerCase() === tx,
-  );
-  if (!order?.tenant_id) throw Object.assign(new Error("paid order not found"), { status: 404 });
-  if (!order.payer_address || order.payer_address !== payer) {
-    throw Object.assign(new Error("payer does not match this payment"), { status: 401 });
-  }
-  const tenant = localTenant(store, config, order.tenant_id);
+function agentChoice(store, order) {
+  const tenant = order.tenant_id ? store.get(order.tenant_id) : null;
+  return {
+    id: order.tenant_id,
+    container_name: tenant?.container_name || null,
+    payment_asset: tenant?.payment_asset || order.asset,
+    paid_until: tenant?.paid_until || null,
+    status: tenant?.status || null,
+  };
+}
+
+function issueSession(store, config, now, tenantId) {
+  const tenant = localTenant(store, config, tenantId);
   if (!tenant) throw Object.assign(new Error("paid order not found"), { status: 404 });
   const accessToken = randomBytes(32).toString("hex");
   const updated = store.update(tenant.id, {
@@ -451,7 +549,124 @@ function openPaidSession({ store, config, now, body }) {
   };
 }
 
-function createCheckoutOrder({ store, config, now, body }) {
+function openPaidSession({ store, config, now, body }) {
+  const payer = assertAddress(body?.payer, "payer");
+  const tx = String(body?.paymentTx || "").trim().toLowerCase();
+  if (tx && !/^0x[a-f0-9]{64}$/.test(tx)) {
+    throw Object.assign(new Error("paymentTx must be a transaction hash"), { status: 400 });
+  }
+  const tenantId = body?.tenantId ? String(body.tenantId).trim().toLowerCase() : "";
+  if (tenantId && !/^[a-f0-9]{8}$/.test(tenantId)) {
+    throw Object.assign(new Error("tenantId is invalid"), { status: 400 });
+  }
+  if (tx) {
+    const byTx = store.listOrders().find(
+      (row) =>
+        row.host_id === config.hostId &&
+        row.status === "paid" &&
+        String(row.payment_tx || "").toLowerCase() === tx,
+    );
+    if (!byTx?.tenant_id) throw Object.assign(new Error("paid order not found"), { status: 404 });
+    if (!byTx.payer_address || byTx.payer_address !== payer) {
+      throw Object.assign(new Error("payer does not match this payment"), { status: 401 });
+    }
+    if (tenantId && byTx.tenant_id !== tenantId) {
+      throw Object.assign(new Error("this wallet has not paid for an agent"), { status: 404 });
+    }
+    return issueSession(store, config, now, byTx.tenant_id);
+  }
+
+  const latestByTenant = new Map();
+  for (const order of store.listOrders()) {
+    if (order.host_id !== config.hostId || !order.payment_tx) continue;
+    if (order.status !== "paid" && order.status !== "pending") continue;
+    if (String(order.payer_address || "").toLowerCase() !== payer) continue;
+    const tenantId = order.tenant_id || store.findByPaymentTx(String(order.payment_tx).toLowerCase())?.id || null;
+    if (!tenantId || !store.get(tenantId)) continue;
+    const stamped = tenantId === order.tenant_id ? order : { ...order, tenant_id: tenantId };
+    const prev = latestByTenant.get(tenantId);
+    if (!prev || String(order.updated_at) > String(prev.updated_at)) latestByTenant.set(tenantId, stamped);
+  }
+  let rows = [...latestByTenant.values()];
+  if (tenantId) rows = rows.filter((row) => row.tenant_id === tenantId);
+  if (rows.length === 0) throw Object.assign(new Error("this wallet has not paid for an agent"), { status: 404 });
+  if (rows.length > 1) {
+    rows.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
+    return { agents: rows.map((order) => agentChoice(store, order)) };
+  }
+  return issueSession(store, config, now, rows[0].tenant_id);
+}
+
+function allocateCheckoutQuote({ store, config, now, asset, bnbPriceUsd, exceptOrderId = null }) {
+  const nowMs = now().getTime();
+  const usedWei = new Set(
+    store
+      .listOrders()
+      .filter((ord) =>
+        ord.host_id === config.hostId &&
+        ord.asset === asset &&
+        ord.status === "pending" &&
+        ord.id !== exceptOrderId &&
+        Date.parse(ord.expires_at) + CHECKOUT_SETTLEMENT_GRACE_MS > nowMs,
+      )
+      .map((ord) => String(ord.amount_wei)),
+  );
+  let tail = (randomBytes(2).readUIntBE(0, 2) % QUOTE_MARKER_MAX) + 1;
+  let quote = quoteOrderAmount({
+    asset,
+    priceUsd: config.priceUsd,
+    bnbPriceUsd: bnbPriceUsd ?? config.bnbPriceUsd,
+    tail,
+  });
+  let guard = 0;
+  while (usedWei.has(quote.amountWei)) {
+    tail = (tail % QUOTE_MARKER_MAX) + 1;
+    quote = quoteOrderAmount({
+      asset,
+      priceUsd: config.priceUsd,
+      bnbPriceUsd: bnbPriceUsd ?? config.bnbPriceUsd,
+      tail,
+    });
+    guard += 1;
+    if (guard > QUOTE_MARKER_MAX) {
+      throw Object.assign(new Error("no unique payment amount is available right now"), { status: 409 });
+    }
+  }
+  return quote;
+}
+
+/**
+ * The pay screen reads whatever pending order the browser cookie still holds.
+ * A quote from before the 3-decimal marker is replaced here, on that read,
+ * so a reload shows `15.xxx` without another checkout click.
+ */
+function presentCheckoutOrder({ store, config, now, orderId, bnbPriceUsd }) {
+  const order = store.getOrder(orderId);
+  if (!order || order.host_id !== config.hostId) return null;
+  if (order.status === "pending" && !checkoutAmountIsCurrent(order.asset, order.amount_display)) {
+    const quote = allocateCheckoutQuote({
+      store,
+      config,
+      now,
+      asset: order.asset,
+      bnbPriceUsd,
+      exceptOrderId: order.id,
+    });
+    const nowDate = now();
+    const replaced = store.replacePendingQuote(order.id, order.amount_display, {
+      amount_display: quote.amountDisplay,
+      amount_wei: quote.amountWei,
+      tail: quote.tail,
+      price_usd: quote.priceUsd,
+      expires_at: new Date(nowDate.getTime() + CHECKOUT_EXPIRY_MS).toISOString(),
+      updated_at: nowDate.toISOString(),
+    });
+    if (replaced) return replaced;
+  }
+  return getFreshOrder(store, config, orderId, now);
+}
+
+function createCheckoutOrder({ store, config, now, body, bnbPriceUsd }) {
   if (!config.treasuryAddress) {
     throw Object.assign(new Error("SAAS_TREASURY_ADDRESS is not configured on this host"), { status: 503 });
   }
@@ -459,7 +674,11 @@ function createCheckoutOrder({ store, config, now, body }) {
   if (!PAYMENT_ASSETS.includes(asset)) {
     throw Object.assign(new Error("paymentAsset must be USDT, USDC, BNB, U, or USD1"), { status: 400 });
   }
-  const risk = resolveRisk(body?.preset || "cautious");
+  const risk = resolveRisk({
+    preset: body?.preset,
+    positionUsd: body?.positionUsd,
+    x402PerDay: body?.x402PerDay,
+  });
   const tenantId = body?.tenantId ? String(body.tenantId).trim().toLowerCase() : null;
   if (tenantId) {
     const existing = localTenant(store, config, tenantId);
@@ -473,34 +692,19 @@ function createCheckoutOrder({ store, config, now, body }) {
   }
 
   const nowDate = now();
-  const nowMs = nowDate.getTime();
-  const usedTails = new Set(
-    store
-      .listOrders()
-      .filter((ord) => ord.host_id === config.hostId && ord.status === "pending" && Date.parse(ord.expires_at) > nowMs)
-      .map((ord) => Number(ord.tail)),
-  );
-  let tail = (randomBytes(3).readUIntBE(0, 3) % 9_999) + 1;
-  while (usedTails.has(tail)) {
-    tail = (tail % 9_999) + 1;
-  }
-
-  const quote = quoteOrderAmount({
-    asset,
-    priceUsd: config.priceUsd,
-    bnbPriceUsd: config.bnbPriceUsd,
-    tail,
-  });
+  const quote = allocateCheckoutQuote({ store, config, now, asset, bnbPriceUsd });
   const id = `ord_${randomBytes(6).toString("hex")}`;
   const claimSecret = randomBytes(24).toString("hex");
   const stamp = nowDate.toISOString();
-  const expiresAt = new Date(nowMs + CHECKOUT_EXPIRY_MS).toISOString();
+  const expiresAt = new Date(nowDate.getTime() + CHECKOUT_EXPIRY_MS).toISOString();
   const order = store.insertOrder({
     id,
     host_id: config.hostId,
     status: "pending",
     asset: quote.asset,
     risk_preset: risk.preset,
+    position_usd: risk.maxPositionUsd,
+    x402_per_day: risk.x402PerDay,
     agent_name: formatAgentId(body?.agentName),
     tenant_id: tenantId,
     treasury_address: config.treasuryAddress,
@@ -523,25 +727,39 @@ function createCheckoutOrder({ store, config, now, body }) {
   return { order: publicOrderView(order), claimSecret };
 }
 
+function provisionRetryOpen(order, nowMs) {
+  const expiresMs = Date.parse(order?.expires_at || "");
+  return Boolean(order?.payment_tx) && Number.isFinite(expiresMs) && expiresMs + CHECKOUT_PROVISION_RETRY_MS > nowMs;
+}
+
 function getFreshOrder(store, config, orderId, now) {
   const order = store.getOrder(orderId);
   if (!order || order.host_id !== config.hostId) return null;
+  const nowMs = now().getTime();
+  if (provisionRetryOpen(order, nowMs) && order.status !== "paid") {
+    if (order.status === "expired") {
+      return store.updateOrder(order.id, { status: "pending", updated_at: now().toISOString() }) || order;
+    }
+    return order;
+  }
   if (
     order.status === "pending" &&
-    Date.parse(order.expires_at) + CHECKOUT_SETTLEMENT_GRACE_MS <= now().getTime()
+    Date.parse(order.expires_at) + CHECKOUT_SETTLEMENT_GRACE_MS <= nowMs
   ) {
     return store.updateOrder(order.id, { status: "expired", updated_at: now().toISOString() });
   }
   return order;
 }
 
-function publicOrderView(order) {
+function publicOrderView(order, requiredConfirmations = REQUIRED_CONFIRMATIONS) {
   return {
     id: order.id,
     hostId: order.host_id,
     status: order.status,
     asset: order.asset,
     preset: order.risk_preset,
+    positionUsd: order.position_usd ?? null,
+    x402PerDay: order.x402_per_day ?? null,
     tenantId: order.tenant_id || null,
     treasuryAddress: order.treasury_address,
     tokenContract: order.token_contract,
@@ -552,6 +770,7 @@ function publicOrderView(order) {
     paidAmountDisplay: order.paid_amount_wei ? formatUnits18(order.paid_amount_wei) : null,
     overpaidDisplay: order.overpaid_wei ? formatUnits18(order.overpaid_wei) : null,
     confirmations: order.confirmations ?? null,
+    requiredConfirmations,
     expiresAt: order.expires_at,
     createdAt: order.created_at,
     updatedAt: order.updated_at,
@@ -563,15 +782,23 @@ async function fulfillOrderWithTx({
   docker,
   config,
   rpc,
+  fetchImpl,
   now,
   orderId,
   paymentTx,
   claimSecret,
+  expectedPayer = null,
   fromWatcher = false,
 }) {
   const order = getFreshOrder(store, config, orderId, now);
   if (!order) throw Object.assign(new Error("order not found"), { status: 404 });
   if (order.status === "paid") {
+    if (
+      expectedPayer &&
+      (!order.payer_address || String(order.payer_address).toLowerCase() !== expectedPayer)
+    ) {
+      throw Object.assign(new Error("the connected wallet did not send this payment"), { status: 401 });
+    }
     if (!fromWatcher && claimSecret) {
       return claimPaidOrder({ store, config, orderId, claimSecret });
     }
@@ -585,26 +812,68 @@ async function fulfillOrderWithTx({
     throw Object.assign(new Error("checkout order has expired"), { status: 410 });
   }
   const payment = assertPayment({ paymentAsset: order.asset, paymentTx });
-  if (store.findByPaymentTx(payment.tx)) {
-    throw Object.assign(new Error("paymentTx was already used"), { status: 409 });
+  const used = store.findByPaymentTx(payment.tx);
+  let resumeTenant = null;
+  if (used) {
+    const tenant = store.get(used.id);
+    const retryable =
+      tenant &&
+      tenant.host_id === config.hostId &&
+      tenant.order_id === order.id &&
+      (tenant.status === "error" || tenant.status === "provisioning");
+    if (!retryable) {
+      throw Object.assign(new Error("paymentTx was already used"), { status: 409 });
+    }
+    resumeTenant = tenant;
   }
-  if (!rpc) {
+  const useBinanceWallet = Boolean(config.web3ApiKey && config.web3SecretKey);
+  if (!useBinanceWallet && !rpc) {
     throw Object.assign(new Error("BSC RPC is not configured"), { status: 503 });
   }
 
-  const verified = await verifyBscReceipt({
-    rpc,
-    txHash: payment.tx,
-    asset: order.asset,
-    treasuryAddress: order.treasury_address,
-    contracts: config.tokenContracts,
-    minAmountWei: order.amount_wei,
-    minConfirmations: config.minConfirmations,
-    notBefore: order.created_at,
-    notAfter: order.expires_at,
-  });
+  const verified = useBinanceWallet
+    ? await verifyBinanceWalletPayment({
+        apiKey: config.web3ApiKey,
+        secretKey: config.web3SecretKey,
+        fetchImpl,
+        txHash: payment.tx,
+        asset: order.asset,
+        treasuryAddress: order.treasury_address,
+        contracts: config.tokenContracts,
+        minAmountWei: order.amount_wei,
+        minConfirmations: config.minConfirmations,
+        notBefore: order.created_at,
+        notAfter: order.expires_at,
+      })
+    : await verifyBscReceipt({
+        rpc,
+        txHash: payment.tx,
+        asset: order.asset,
+        treasuryAddress: order.treasury_address,
+        contracts: config.tokenContracts,
+        minAmountWei: order.amount_wei,
+        minConfirmations: config.minConfirmations,
+        notBefore: order.created_at,
+        notAfter: order.expires_at,
+      });
+  if (expectedPayer && verified.payerAddress !== expectedPayer) {
+    throw Object.assign(new Error("the connected wallet did not send this payment"), { status: 401 });
+  }
 
   const stamp = now().toISOString();
+  const noted = store.updateOrder(order.id, {
+    payment_tx: verified.txHash,
+    payer_address: verified.payerAddress,
+    confirmations: verified.confirmations,
+    paid_amount_wei: verified.paidWei,
+    overpaid_wei: verified.overpaidWei,
+    updated_at: stamp,
+  });
+  if (noted) {
+    order.payer_address = noted.payer_address;
+    order.payment_tx = noted.payment_tx;
+    order.confirmations = noted.confirmations;
+  }
 
   // Case 1: Renewal for an existing tenant
   if (order.tenant_id) {
@@ -613,7 +882,14 @@ async function fulfillOrderWithTx({
     const currentExpiry = Date.parse(existing.paid_until || "") || 0;
     const baseMs = Math.max(now().getTime(), currentExpiry);
     const nextPaidUntil = new Date(baseMs + SUBSCRIPTION_MS).toISOString();
-    const risk = resolveRisk(order.risk_preset || existing.risk_preset);
+    const risk = resolveRisk(
+      {
+        preset: order.risk_preset || existing.risk_preset,
+        positionUsd: order.position_usd ?? existing.max_position_usd,
+        x402PerDay: order.x402_per_day ?? existing.x402_per_day,
+      },
+      { allowLegacy: true },
+    );
     const updatedTenant = applySpec(
       store,
       existing,
@@ -647,6 +923,18 @@ async function fulfillOrderWithTx({
     };
   }
 
+  if (resumeTenant) {
+    return resumeErroredTenant({
+      store,
+      docker,
+      config,
+      now,
+      order,
+      tenant: resumeTenant,
+      verified,
+    });
+  }
+
   // Case 2: Provision new tenant container
   const created = await createTenant({
     store,
@@ -654,7 +942,14 @@ async function fulfillOrderWithTx({
     config,
     now,
     payment,
-    preset: order.risk_preset,
+    risk: resolveRisk(
+      {
+        preset: order.risk_preset,
+        positionUsd: order.position_usd,
+        x402PerDay: order.x402_per_day,
+      },
+      { allowLegacy: true },
+    ),
     agentName: order.agent_name,
     orderId: order.id,
     verified,
@@ -673,6 +968,7 @@ async function fulfillOrderWithTx({
     payer_address: verified.payerAddress,
     confirmations: verified.confirmations,
     pending_access_token: canClaimNow ? null : created.accessToken,
+    pending_access_code: canClaimNow ? null : created.accessCode,
     updated_at: stamp,
   });
 
@@ -682,6 +978,7 @@ async function fulfillOrderWithTx({
     ...(canClaimNow
       ? {
           accessToken: created.accessToken,
+          accessCode: created.accessCode,
           compoundToken: formatCompoundToken(config.hostId, created.tenant.id, created.accessToken),
         }
       : {}),
@@ -698,12 +995,18 @@ function claimPaidOrder({ store, config, orderId, claimSecret }) {
   }
   const tenant = order.tenant_id ? store.get(order.tenant_id) : null;
   const token = order.pending_access_token || null;
-  if (token) {
-    store.updateOrder(order.id, { pending_access_token: null, updated_at: new Date().toISOString() });
+  const accessCode = order.pending_access_code || null;
+  if (token || accessCode) {
+    store.updateOrder(order.id, {
+      pending_access_token: null,
+      pending_access_code: null,
+      updated_at: new Date().toISOString(),
+    });
   }
   return {
     order: publicOrderView(order),
     tenant: tenant ? customerView(tenant) : null,
+    ...(accessCode ? { accessCode } : {}),
     ...(token && tenant
       ? {
           accessToken: token,
@@ -737,7 +1040,48 @@ async function enforceSubscriptions({ store, docker, config, now }) {
   return { hostId: config.hostId, haltedCount: haltedIds.length, haltedIds };
 }
 
-async function createTenant({ store, docker, config, now, payment, preset, agentName, orderId = null, verified = null }) {
+async function resumeErroredTenant({ store, docker, config, now, order, tenant, verified }) {
+  const risk = riskFromRow(tenant);
+  writeTenantFiles(tenant.data_dir, specFrom(tenant, risk, config));
+  try {
+    await docker.ensureImage();
+    await docker.up(dockerTarget(tenant));
+  } catch (err) {
+    try {
+      await docker.down(dockerTarget(tenant));
+    } catch {
+      /* the container may never have started */
+    }
+    store.update(tenant.id, { status: "error", updated_at: now().toISOString() });
+    throw err;
+  }
+  const accessToken = randomBytes(32).toString("hex");
+  const accessCode = newAccessCode();
+  const running = store.update(tenant.id, {
+    status: "running",
+    access_token_hash: hashToken(accessToken),
+    access_code_hash: hashToken(normalizeAccessCode(accessCode)),
+    updated_at: now().toISOString(),
+  });
+  const updatedOrder = store.updateOrder(order.id, {
+    status: "paid",
+    tenant_id: running.id,
+    payment_tx: verified.txHash,
+    paid_amount_wei: verified.paidWei,
+    overpaid_wei: verified.overpaidWei,
+    payer_address: verified.payerAddress,
+    confirmations: verified.confirmations,
+    pending_access_token: accessToken,
+    pending_access_code: accessCode,
+    updated_at: now().toISOString(),
+  });
+  return {
+    order: publicOrderView(updatedOrder),
+    tenant: customerView(running),
+  };
+}
+
+async function createTenant({ store, docker, config, now, payment, risk, agentName, orderId = null, verified = null }) {
   if (store.findByPaymentTx(payment.tx)) {
     const err = new Error("paymentTx was already used");
     err.status = 409;
@@ -750,13 +1094,16 @@ async function createTenant({ store, docker, config, now, payment, preset, agent
     err.status = 409;
     throw err;
   }
+  if (!risk?.maxPositionUsd && risk?.maxPositionUsd !== 0) {
+    throw Object.assign(new Error("risk preset must be 100, 250, 500, or custom"), { status: 400 });
+  }
   const id = newId(store);
-  const risk = resolveRisk(preset || "cautious");
   const nowDate = now();
   const stamp = nowDate.toISOString();
   const paidUntil = new Date(nowDate.getTime() + SUBSCRIPTION_MS).toISOString();
   const dir = tenantDir(config.dataRoot, id);
   const accessToken = randomBytes(32).toString("hex");
+  const accessCode = newAccessCode();
   const row = {
     id,
     host_id: config.hostId,
@@ -769,8 +1116,10 @@ async function createTenant({ store, docker, config, now, payment, preset, agent
     max_drawdown_pct: 0,
     max_trade_usd: risk.maxTradeUsd,
     trade_interval_ms: config.plan.intervalMs,
+    x402_per_day: risk.x402PerDay,
     wallet_address: null,
     access_token_hash: hashToken(accessToken),
+    access_code_hash: hashToken(normalizeAccessCode(accessCode)),
     agent_api_secret: randomBytes(32).toString("hex"),
     payment_asset: payment.asset,
     payment_tx: payment.tx,
@@ -811,6 +1160,7 @@ async function createTenant({ store, docker, config, now, payment, preset, agent
   return {
     tenant: customerView(tenant),
     accessToken,
+    accessCode,
     compoundToken: formatCompoundToken(config.hostId, tenant.id, accessToken),
   };
 }
@@ -826,6 +1176,7 @@ function applySpec(store, tenant, { risk, agentMode, buysHalted, paidUntil, orde
     max_drawdown_pct: 0,
     max_trade_usd: risk.maxTradeUsd,
     trade_interval_ms: config.plan.intervalMs,
+    x402_per_day: risk.x402PerDay,
     buys_halted: halted,
     paid_until: paidUntil !== undefined ? paidUntil : tenant.paid_until,
     order_id: orderId !== undefined ? orderId : tenant.order_id,
@@ -841,6 +1192,7 @@ function applySpec(store, tenant, { risk, agentMode, buysHalted, paidUntil, orde
     max_drawdown_pct: next.max_drawdown_pct,
     max_trade_usd: next.max_trade_usd,
     trade_interval_ms: next.trade_interval_ms,
+    x402_per_day: next.x402_per_day,
     buys_halted: next.buys_halted,
     paid_until: next.paid_until,
     order_id: next.order_id,
@@ -861,7 +1213,8 @@ function specFrom(row, risk, config) {
     buysHalted: Boolean(row.buys_halted),
     paymentAsset: row.payment_asset,
     apiSecret: row.agent_api_secret,
-    databaseUrl: config.databaseUrl,
+    // The shared Neon URL stays on the control server. A customer agent with
+    // that URL would upsert the founder's public agent_state and trade rows.
   };
 }
 
@@ -874,7 +1227,14 @@ function dockerTarget(row) {
 }
 
 function riskFromRow(row) {
-  return resolveRisk(row.risk_preset);
+  return resolveRisk(
+    {
+      preset: row.risk_preset,
+      positionUsd: row.max_position_usd,
+      x402PerDay: row.x402_per_day,
+    },
+    { allowLegacy: true },
+  );
 }
 
 function localTenant(store, config, id) {
@@ -965,6 +1325,53 @@ function isOperatorRoute(method, pathname) {
   return method === "DELETE" && pathname.startsWith("/cluster/nodes/");
 }
 
+const ACCESS_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+function newAccessCode() {
+  const bytes = randomBytes(16);
+  let raw = "";
+  for (let i = 0; i < 16; i += 1) raw += ACCESS_CODE_ALPHABET[bytes[i] % ACCESS_CODE_ALPHABET.length];
+  return `${raw.slice(0, 4)}-${raw.slice(4, 8)}-${raw.slice(8, 12)}-${raw.slice(12, 16)}`;
+}
+
+function normalizeAccessCode(value) {
+  const clean = String(value || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+  if (!/^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{16}$/.test(clean)) {
+    throw Object.assign(new Error("Enter the access code as four groups, like ABCD-EFGH-JKLM-NPQR."), { status: 400 });
+  }
+  return clean;
+}
+
+function openByAccessCode({ store, config, now, body, failures }) {
+  const at = now().getTime();
+  while (failures.length && failures[0] < at - 60_000) failures.shift();
+  if (failures.length >= 8) {
+    throw Object.assign(new Error("Too many attempts. Wait a minute and try again."), { status: 429 });
+  }
+  let normalized;
+  try {
+    normalized = normalizeAccessCode(body?.code);
+  } catch (err) {
+    failures.push(at);
+    throw err;
+  }
+  const tenant = store.findByAccessCodeHash(hashToken(normalized));
+  if (!tenant || tenant.host_id !== config.hostId) {
+    failures.push(at);
+    throw Object.assign(new Error("That access code does not match an agent."), { status: 401 });
+  }
+  return issueSession(store, config, now, tenant.id);
+}
+
+function rotateAccessCode(store, tenant, now) {
+  const accessCode = newAccessCode();
+  store.update(tenant.id, {
+    access_code_hash: hashToken(normalizeAccessCode(accessCode)),
+    updated_at: now().toISOString(),
+  });
+  return accessCode;
+}
+
 function hashToken(token) {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -982,7 +1389,7 @@ function safeEqual(left, right) {
   return timingSafeEqual(a, b);
 }
 
-const HIDDEN = new Set(["access_token_hash", "agent_api_secret", "max_drawdown_pct"]);
+const HIDDEN = new Set(["access_token_hash", "access_code_hash", "agent_api_secret", "max_drawdown_pct"]);
 
 function customerView(row) {
   const view = operatorView(row);
@@ -1355,8 +1762,6 @@ function round2(value) {
   return Math.round(n * 100) / 100;
 }
 
-const ADMIN_HTML = readFileSync(join(HERE, "admin.html"), "utf8");
-
 const MAX_DESK_SUBSCRIBERS = 25;
 
 /**
@@ -1487,20 +1892,6 @@ function send(res, status, body) {
   res.end(payload);
 }
 
-function sendHtml(res, html) {
-  res.writeHead(200, {
-    "content-type": "text/html; charset=utf-8",
-    "content-length": Buffer.byteLength(html),
-    "cache-control": "no-store",
-    "x-content-type-options": "nosniff",
-    "x-frame-options": "DENY",
-    "referrer-policy": "no-referrer",
-    "content-security-policy":
-      "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; script-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-  });
-  res.end(html);
-}
-
 export function createSandboxDocker() {
   const containers = new Set();
   return {
@@ -1604,15 +1995,50 @@ export function createSandboxRpc(store, config) {
 
 export function start(config = loadConfig(), deps = {}) {
   const store = deps.store || openStore(config.dbPath);
+  const backup = { kick() {}, stop() {} };
+  let backupClosed = false;
+  watchUserRecords(store, () => backup.kick());
+  void attachSaasBackup({
+    store,
+    databaseUrl: config.databaseUrl,
+    log: (message, level) => {
+      if (level === "info") console.log(message);
+      else console.warn(message);
+    },
+  }).then((attached) => {
+    backup.kick = attached.kick;
+    backup.stop = attached.stop;
+    if (backupClosed) void attached.stop();
+  }).catch((err) => {
+    console.warn(`SaaS Neon backup unavailable — local control store remains live: ${safeError(err)}`);
+  });
   const docker =
     deps.docker ||
     (config.devSandbox ? createSandboxDocker() : createDocker({ repoRoot: config.repoRoot, composeFile: config.composeFile }));
   const rpc = deps.rpc || (config.devSandbox ? createSandboxRpc(store, config) : undefined);
-  const server = createServer(createHandler({ store, docker, config, rpc }));
+  const bnbPrice =
+    deps.bnbPrice ||
+    createBnbPriceFeed({
+      fallbackUsd: config.bnbPriceUsd,
+      cachePath: join(dirname(config.dbPath), "bnb-price.json"),
+      fetchImpl: deps.fetchImpl,
+    });
+  if (typeof bnbPrice.start === "function") {
+    bnbPrice.start().then(
+      (snap) => console.log(`  BNB/USD: ${snap.priceUsd} (${snap.source})`),
+      (err) => console.warn(`  BNB/USD fallback ${config.bnbPriceUsd}: ${err instanceof Error ? err.message : err}`),
+    );
+  }
+  const server = createServer(createHandler({ store, docker, config, rpc, bnbPrice }));
+  server.on("close", () => {
+    backupClosed = true;
+    void backup.stop();
+  });
   server.listen(config.port, config.bind, () => {
     console.log(`Neural Alpha SaaS Control (${config.hostId}) listening on http://${config.bind}:${config.port}`);
-    console.log(`  Customer portal:  ${config.portalUrl}`);
-    console.log(`  Admin Monitor:    http://${config.bind}:${config.port}/admin`);
+    console.log(`  Customer portal:  ${config.localPortalUrl}`);
+    console.log(`  Public portal:    ${config.portalUrl}`);
+    console.log(`  Admin desk:       ${appPath(config.localPortalUrl, "/admin")}`);
     if (config.devSandbox) {
       console.log(`  [DEV SANDBOX]     Monitor Secret: ${config.monitorSecret} | Operator Secret: ${config.apiSecret}`);
     }
@@ -1621,4 +2047,8 @@ export function start(config = loadConfig(), deps = {}) {
 }
 
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
-if (isMain) start();
+if (isMain) {
+  const cellEnv = join(REPO_ROOT, "saas/runtime/cell.env");
+  if (existsSync(cellEnv)) process.loadEnvFile(cellEnv);
+  start();
+}

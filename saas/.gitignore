@@ -1,4 +1,6 @@
-runtime/
+runtime/*
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+# Cell secrets (monitor key, API secret). Never commit.
+runtime/cell.env

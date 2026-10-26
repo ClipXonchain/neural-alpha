@@ -15,7 +15,7 @@ Hosted Neural Alpha. One backend on each server starts a private container per c
 - The control service starts a BSC treasury watcher automatically and scans about every 15 seconds. It provisions only after a successful BSC receipt has at least 15 confirmations, the configured token contract and treasury match, and the amount equals the quote exactly. A transfer mined before quote expiry gets a 15-minute confirmation grace period. Customers can still paste a transaction hash if automatic matching has not completed.
 - Each customer gets their own access token. That token opens only their id. A token for someone else gets the same answer as a missing customer. Customer containers do not share a Docker network, and each one has its own API secret.
 - The control API listens on `127.0.0.1:3910`. Create is limited to 10 calls a minute. Everything else is 120 a minute.
-- The admin desk is `http://127.0.0.1:3910/admin`. It uses `SAAS_MONITOR_SECRET`, which can only read. The page has no pause, trade, pair, or size controls. Put the monitor key in the browser. Keep `CONTROL_API_SECRET` off that page.
+- The admin desk is the dashboard at `/admin` (`http://127.0.0.1:3000/admin` locally). It uses `SAAS_MONITOR_SECRET`, which can only read. The page has no pause, trade, pair, or size controls. Put the monitor key in the browser. Keep `CONTROL_API_SECRET` off that page. The control process keeps the read APIs and redirects `/admin` to that dashboard.
 - A stopped container is not started again by a reboot. A running one is.
 
 ## Run the backend

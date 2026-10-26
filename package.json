@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev": "concurrently -n agent,dashboard,desk -c yellow,cyan,green \"npm run dev --workspace=neural-alpha\" \"npm run dev --workspace=dashboard\" \"npm run desk\"",
-    "desk": "node --env-file=.env saas/control/server.mjs",
+    "desk": "node --env-file=.env --env-file=saas/runtime/cell.env saas/control/server.mjs",
     "build": "npm run build --workspace=neural-alpha && npm run build --workspace=dashboard",
     "agent": "npm run start --workspace=neural-alpha",
     "agent:dev": "npm run dev --workspace=neural-alpha",

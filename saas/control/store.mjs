@@ -2,7 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-const COLUMNS = [
+export const COLUMNS = [
   "id",
   "host_id",
   "status",
@@ -16,6 +16,7 @@ const COLUMNS = [
   "trade_interval_ms",
   "wallet_address",
   "access_token_hash",
+  "access_code_hash",
   "agent_api_secret",
   "payment_asset",
   "payment_tx",
@@ -25,16 +26,19 @@ const COLUMNS = [
   "paid_amount",
   "overpaid_amount",
   "buys_halted",
+  "x402_per_day",
   "created_at",
   "updated_at",
 ];
 
-const ORDER_COLUMNS = [
+export const ORDER_COLUMNS = [
   "id",
   "host_id",
   "status",
   "asset",
   "risk_preset",
+  "position_usd",
+  "x402_per_day",
   "agent_name",
   "tenant_id",
   "treasury_address",
@@ -50,6 +54,7 @@ const ORDER_COLUMNS = [
   "confirmations",
   "claim_secret_hash",
   "pending_access_token",
+  "pending_access_code",
   "expires_at",
   "created_at",
   "updated_at",
@@ -88,6 +93,7 @@ export function openStore(dbPath) {
   `);
   for (const [name, ddl] of [
     ["access_token_hash", "TEXT"],
+    ["access_code_hash", "TEXT"],
     ["agent_api_secret", "TEXT"],
     ["payment_asset", "TEXT"],
     ["payment_tx", "TEXT"],
@@ -97,12 +103,14 @@ export function openStore(dbPath) {
     ["paid_amount", "TEXT"],
     ["overpaid_amount", "TEXT"],
     ["buys_halted", "INTEGER DEFAULT 0"],
+    ["x402_per_day", "INTEGER"],
   ]) {
     const cols = db.prepare("PRAGMA table_info(tenants)").all();
     if (!cols.some((col) => col.name === name)) db.exec(`ALTER TABLE tenants ADD COLUMN ${name} ${ddl}`);
   }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tenants_payment_tx ON tenants(payment_tx) WHERE payment_tx IS NOT NULL");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tenants_access_hash ON tenants(access_token_hash) WHERE access_token_hash IS NOT NULL");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tenants_access_code ON tenants(access_code_hash) WHERE access_code_hash IS NOT NULL");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -126,11 +134,24 @@ export function openStore(dbPath) {
       confirmations INTEGER,
       claim_secret_hash TEXT,
       pending_access_token TEXT,
+      pending_access_code TEXT,
       expires_at TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     )
   `);
+  {
+    const orderCols = db.prepare("PRAGMA table_info(orders)").all();
+    if (!orderCols.some((col) => col.name === "pending_access_code")) {
+      db.exec("ALTER TABLE orders ADD COLUMN pending_access_code TEXT");
+    }
+    if (!orderCols.some((col) => col.name === "position_usd")) {
+      db.exec("ALTER TABLE orders ADD COLUMN position_usd REAL");
+    }
+    if (!orderCols.some((col) => col.name === "x402_per_day")) {
+      db.exec("ALTER TABLE orders ADD COLUMN x402_per_day INTEGER");
+    }
+  }
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS orders_payment_tx ON orders(payment_tx) WHERE payment_tx IS NOT NULL");
 
   db.exec(`
@@ -159,6 +180,9 @@ export function openStore(dbPath) {
     findByAccessHash(hash) {
       return db.prepare(`SELECT ${COLUMNS.join(", ")} FROM tenants WHERE access_token_hash = ?`).get(hash) ?? null;
     },
+    findByAccessCodeHash(hash) {
+      return db.prepare(`SELECT ${COLUMNS.join(", ")} FROM tenants WHERE access_code_hash = ?`).get(hash) ?? null;
+    },
     findByPaymentTx(tx) {
       const tenantHit = db.prepare(`SELECT id FROM tenants WHERE payment_tx = ?`).get(tx) ?? null;
       if (tenantHit) return tenantHit;
@@ -183,6 +207,7 @@ export function openStore(dbPath) {
         "wallet_address",
         "agent_name",
         "access_token_hash",
+        "access_code_hash",
         "payment_asset",
         "payment_tx",
         "paid_until",
@@ -190,6 +215,7 @@ export function openStore(dbPath) {
         "paid_amount",
         "overpaid_amount",
         "buys_halted",
+        "x402_per_day",
         "host_id",
         "updated_at",
       ];
@@ -224,6 +250,7 @@ export function openStore(dbPath) {
         "payer_address",
         "confirmations",
         "pending_access_token",
+        "pending_access_code",
         "updated_at",
       ];
       const keys = allowed.filter((key) => patch[key] !== undefined);
@@ -233,6 +260,15 @@ export function openStore(dbPath) {
         id,
       );
       return this.getOrder(id);
+    },
+    replacePendingQuote(id, expectedDisplay, patch) {
+      const allowed = ["amount_display", "amount_wei", "tail", "price_usd", "expires_at", "updated_at"];
+      const keys = allowed.filter((key) => patch[key] !== undefined);
+      if (keys.length === 0) return null;
+      const result = db.prepare(
+        `UPDATE orders SET ${keys.map((key) => `${key} = ?`).join(", ")} WHERE id = ? AND status = 'pending' AND amount_display = ?`,
+      ).run(...keys.map((key) => patch[key]), id, expectedDisplay);
+      return result.changes === 1 ? this.getOrder(id) : null;
     },
     listNodes() {
       return db.prepare(`SELECT host_id, base_url, status, updated_at FROM cluster_nodes ORDER BY host_id`).all();

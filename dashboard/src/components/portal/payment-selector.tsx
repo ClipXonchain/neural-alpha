@@ -1,7 +1,7 @@
 "use client";
 
 import { AnimatePresence, motion } from "framer-motion";
-import Image from "next/image";
+import { useState } from "react";
 
 export type PayChoice = {
   id: string;
@@ -15,6 +15,7 @@ type PaymentMethodSelectorProps = {
   selectedId: string;
   onSelectionChange: (id: string) => void;
   layout?: "stack" | "row";
+  icons?: Record<string, string>;
 };
 
 const list = {
@@ -27,27 +28,24 @@ const item = {
   visible: { opacity: 1, y: 0, transition: { duration: 0.35, ease: [0.16, 1, 0.3, 1] as const } },
 };
 
-export function AssetLogo({ asset }: { asset: string }) {
-  if (asset === "BNB") {
-    return <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-[#f3ba2f]/10"><Image src="/brand/bnb-chain/BNB-Chain-Symbol-Yellow.svg" alt="" width={19} height={19} /></span>;
+export function AssetLogo({ asset, src }: { asset: string; src?: string }) {
+  const [failed, setFailed] = useState(false);
+  if (src && !failed) {
+    return (
+      <span className="grid h-8 w-8 shrink-0 place-items-center overflow-hidden rounded-full bg-[#101214]">
+        <img src={src} alt="" width={32} height={32} className="h-8 w-8 object-cover" onError={() => setFailed(true)} />
+      </span>
+    );
   }
-  const colors: Record<string, string> = { USDT: "#26a17b", USDC: "#2775ca", U: "#7658df", USD1: "#31798a" };
-  const color = colors[asset] || "#728087";
   return (
-    <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full" style={{ background: `${color}20`, color }} aria-hidden="true">
-      <svg viewBox="0 0 32 32" className="h-6 w-6" fill="none">
-        <circle cx="16" cy="16" r="15" fill={color} />
-        {asset === "USDT" ? <><path d="M7 8h18M16 8v16M10 12h12c2.2 0 3.5.8 3.5 2s-1.3 2-3.5 2h-6" stroke="white" strokeWidth="2.2" strokeLinecap="round"/><path d="M16 16v7" stroke="white" strokeWidth="2.2" strokeLinecap="round"/></> : null}
-        {asset === "USDC" ? <><path d="M20.6 10.2a7 7 0 1 0 0 11.6M22.3 13.2a4 4 0 1 0 0 5.6" stroke="white" strokeWidth="2.2" strokeLinecap="round"/><path d="M16 9v14" stroke="white" strokeWidth="1.7" strokeLinecap="round"/></> : null}
-        {asset === "U" ? <path d="M10 9v8a6 6 0 0 0 12 0V9" stroke="white" strokeWidth="3" strokeLinecap="round"/> : null}
-        {asset === "USD1" ? <><path d="M21 11.5c-1.1-1-2.8-1.5-4.8-1.5-2.6 0-4.3 1-4.3 2.7 0 4.4 9.3 1.8 9.3 6.5 0 1.8-1.8 3-4.8 3-2.1 0-4-.6-5.4-1.8" stroke="white" strokeWidth="1.9" strokeLinecap="round"/><path d="M16 7.5v17" stroke="white" strokeWidth="1.5" strokeLinecap="round"/></> : null}
-      </svg>
+    <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-white/[0.06] text-[11px] font-medium text-[#c5d0d4]" aria-hidden="true">
+      {asset.slice(0, 1)}
     </span>
   );
 }
 
 /** Payment list adapted from the 21st.dev Payment selector. Brand colors, no card chrome. */
-export function PaymentMethodSelector({ label, methods, selectedId, onSelectionChange, layout = "stack" }: PaymentMethodSelectorProps) {
+export function PaymentMethodSelector({ label, methods, selectedId, onSelectionChange, layout = "stack", icons }: PaymentMethodSelectorProps) {
   const row = layout === "row";
   return (
     <div>
@@ -69,10 +67,12 @@ export function PaymentMethodSelector({ label, methods, selectedId, onSelectionC
               role="radio"
               aria-checked={on}
             >
-              {row ? <AssetLogo asset={method.id} /> : null}
+              {row ? <AssetLogo asset={method.id} src={icons?.[method.id]} /> : null}
               <span className="min-w-0 flex-1">
                 <span className="block text-[13px] font-medium text-[#f1f5f9] sm:text-[14px]">{method.label}</span>
-                {method.detail ? <span className="mt-0.5 block font-mono text-[10px] text-[#7e8a97] sm:text-[11px]">{method.detail}</span> : null}
+                {method.detail ? (
+                  <span className="mt-0.5 block truncate font-mono text-[10px] leading-tight text-[#8ea0a6]">{method.detail}</span>
+                ) : null}
               </span>
               {row ? null : <span
                 className="grid h-5 w-5 place-items-center rounded-full border"

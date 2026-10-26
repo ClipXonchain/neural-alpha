@@ -11,9 +11,12 @@ import React, {
 const STORE_KEY = "na-observe-key";
 const BAR_COLORS = ["#14d47c", "#f5b027", "#58a6ff", "#a78bfa", "#f85164"];
 const TRADE_CAP_BY_PRESET: Record<string, number> = {
-  cautious: 15,
-  normal: 25,
-  active: 40,
+  "100": 100,
+  "250": 250,
+  "500": 500,
+  cautious: 50,
+  normal: 100,
+  active: 250,
 };
 
 type ViewName =
@@ -1661,9 +1664,9 @@ export default function AdminMonitorDesk() {
                           tenants.map((item) => {
                             const book = books.get(item.id);
                             const tradeCap =
-                              item.max_trade_usd ||
-                              TRADE_CAP_BY_PRESET[item.risk_preset] ||
-                              15;
+                              item.max_trade_usd ??
+                              TRADE_CAP_BY_PRESET[item.risk_preset] ??
+                              item.max_position_usd;
                             const asset = item.payment_asset || "USDT";
                             return (
                               <tr key={item.id}>
@@ -1980,9 +1983,9 @@ export default function AdminMonitorDesk() {
                         {filteredTenants.map((item) => {
                           const book = books.get(item.id);
                           const tradeCap =
-                            item.max_trade_usd ||
-                            TRADE_CAP_BY_PRESET[item.risk_preset] ||
-                            15;
+                            item.max_trade_usd ??
+                            TRADE_CAP_BY_PRESET[item.risk_preset] ??
+                            item.max_position_usd;
                           return (
                             <tr key={item.id}>
                               <td>
@@ -2477,16 +2480,16 @@ export default function AdminMonitorDesk() {
                     </div>
                     <div className="na-kv-list">
                       <div className="na-kv-row">
-                        <span>Cautious Preset</span>
-                        <strong>$50 Position Cap · $15 / Trade</strong>
+                        <span>100 USDT</span>
+                        <strong>100 USDT position</strong>
                       </div>
                       <div className="na-kv-row">
-                        <span>Normal Preset</span>
-                        <strong>$100 Position Cap · $25 / Trade</strong>
+                        <span>250 USDT</span>
+                        <strong>250 USDT position</strong>
                       </div>
                       <div className="na-kv-row">
-                        <span>Active Preset</span>
-                        <strong>$250 Position Cap · $40 / Trade</strong>
+                        <span>500 USDT</span>
+                        <strong>500 USDT position</strong>
                       </div>
                       <div className="na-kv-row">
                         <span>Monitor Access Mode</span>

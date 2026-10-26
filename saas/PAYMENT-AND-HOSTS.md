@@ -2,7 +2,7 @@
 
 The software fee and the trading money are two different transfers. The fee is paid to a company wallet on BSC. The money the agent trades with stays in the customer’s own Binance Agentic Wallet. A container is created only after the fee transfer is confirmed on chain.
 
-When `SAAS_TREASURY_ADDRESS` is configured, `POST /checkout` creates a 30-minute locked payment quote with a unique sub-cent marker (for example, `30.004281` USDT). The marker is converted using the asset's quote price, so it stays below $0.01 for BNB too. The background BSC watcher starts with the control server and scans every 15 seconds. It verifies matching transfers before provisioning. A pasted transaction hash uses the same verifier when a customer needs to recover or the watcher has not matched the payment yet. A transfer mined before the quote expires may finish its 15-block confirmation period during a 15-minute settlement grace window.
+When `SAAS_TREASURY_ADDRESS` is configured, `POST /checkout` creates a 10-minute locked payment quote. Stablecoins use a 3-digit unique marker (for example, `15.184` USDT) so the amount is exactly three decimal places. BNB quotes convert the $15 fee at the official Binance `BNBUSDT` price and put that same 3-digit marker on the live equivalent. `SAAS_BNB_PRICE_USD` is only the fallback until that price arrives. The background BSC watcher starts with the control server and scans every 15 seconds. It verifies matching transfers before provisioning. The portal polls the open order and advances when the watcher marks it paid. That exact-amount match does not ask for a wallet signature. A transfer mined before the quote expires may finish its 15-block confirmation period during a 15-minute settlement grace window.
 
 ## Receiving wallet
 
@@ -12,10 +12,10 @@ Pin one contract per asset in config: USDT, USDC, BNB, U, and USD1. BNB is the n
 
 ## How a payment gets verified
 
-1. The customer picks the asset and the size preset. The server writes an unpaid order: asset, exact amount, price, and a 30-minute expiry. No folder and no container yet.
-2. The pay screen shows the treasury address, the asset, and the exact amount. For a stablecoin the price is the software price, for example the monthly fee you set. For BNB the amount is quoted at checkout and locked for those 30 minutes. Add a unique marker worth less than $0.01 to the amount, such as `30.004281` USDT, so simultaneous payments can be matched without charging an extra dollar or more.
+1. The customer picks the asset and the size preset. The server writes an unpaid order: asset, exact amount, price, and a 10-minute expiry. No folder and no container yet.
+2. The pay screen shows the treasury address (including a QR of that address), the asset, and the exact amount. For a stablecoin the price is the software price plus a 3-digit marker, for example `15.184` USDT. For BNB the amount is the same dollar fee at the current Binance BNBUSDT price, plus a 3-digit marker, quoted at checkout and locked for those 10 minutes. Simultaneous payments are matched on that exact amount.
 3. They send that transfer from Binance or any BSC wallet before the quote expires.
-4. The cell's automatically started watcher reads incoming transfers to the treasury. The portal checks the order in the background and opens it after the watcher provisions it. A pasted hash is the same check, used if the order is not detected automatically. The receipt must pass all of these:
+4. The cell's automatically started watcher reads incoming transfers to the treasury. The portal keeps the payment screen open, polls the order, and opens it after the watcher provisions it. The receipt must pass all of these:
    - status is success
    - the RPC reports BNB Smart Chain chain id `56`
    - the token matches the order
@@ -51,20 +51,20 @@ If a cell dies, the trading funds are still in Binance. Restore that cell’s `S
 ## Implemented modules & endpoints
 
 1. **Treasury address, pinned BSC contracts, and pricing config** (`saas/control/policy.mjs`, `saas/control/server.mjs`):
-   - `SAAS_TREASURY_ADDRESS`, `SAAS_PRICE_USD` (default `30`), `SAAS_BNB_PRICE_USD` (default `600`), `SAAS_MIN_CONFIRMATIONS` (default `15`), `SAAS_BSC_RPC_URL`.
+   - `SAAS_TREASURY_ADDRESS`, `SAAS_PRICE_USD` (default `15`), `SAAS_BNB_PRICE_USD` (fallback `600`, replaced by the Binance BNBUSDT price every 4 hours), `SAAS_MIN_CONFIRMATIONS` (default `15`), `SAAS_BSC_RPC_URL`.
    - Pinned BSC contracts (18 decimals): `USDT`, `USDC`, `U`, `USD1`, plus native `BNB`.
 2. **Unpaid checkout orders** (`POST /checkout`, `GET /checkout/:id`):
-   - Writes an unpaid row in `orders` with a unique sub-cent payment marker and 30-minute expiry. `POST /tenants` refuses an unverified hash whenever `SAAS_TREASURY_ADDRESS` is configured.
+   - Writes an unpaid row in `orders` with a 3-digit unique payment marker and 10-minute expiry. `POST /tenants` refuses an unverified hash whenever `SAAS_TREASURY_ADDRESS` is configured.
 3. **BSC receipt verifier & treasury watcher** (`saas/control/payments.mjs`, `POST /checkout/:id/verify`, `POST /watcher/scan`, `POST /checkout/:id/claim`):
    - Starts automatically with the control service and scans every 15 seconds. Its last safe block is saved in SQLite so a process restart resumes the scan; a new database with pending orders looks back about 45 minutes. Verifies chain id `56`, receipt success, canonical block references, 15 confirmations, exact token contract and treasury destination, exact 18-decimal amount, quote time window, one payer address, and unused transaction hash. Unmatched values stay unpaid; a browser can claim the one-time access token after the watcher marks the order paid.
 4. **Multi-VPS Edge Router & Cell Linker** (`saas/control/edge.mjs`, `saas/link-vps.sh`, `POST /cluster/nodes`, `GET /cluster/capacity`):
    - Polls `/capacity` across linked cells, routes new checkouts to a cell with free seats and call budget, and issues a compound token (`<hostId>.<tenantId>.<accessToken>`) so requests automatically route to the customer's pinned cell.
-5. **Dedicated Customer Portal & Dashboard** (`GET /portal`, `GET /tenants/:id/state` in `saas/control/portal.html`):
+5. **Dedicated Customer Portal & Dashboard** (`GET /portal` redirects to the Next.js portal, `GET /tenants/:id/state`):
    - Self-serve checkout, Binance Agentic Wallet pairing (`pair/start` & `pair/verify`), mode/preset controls, and live per-container portfolio/FIFO PnL telemetry.
 6. **Subscription expiry (`paid_until`)** (`POST /subscriptions/sweep`):
    - Each verified payment grants 30 days (`paid_until`). When lapsed, `buys_halted = 1` writes `DISABLE_NEW_BUYS=true` and `MAX_POSITION_SIZE_USD=0` to stop new buys while leaving existing positions untouched.
 
-The admin desk (`/admin`) stays read-only. It shows the fee hash, the asset, and the BscScan link. It does not move the treasury key and it does not start a customer by hand.
+The admin desk lives in the dashboard at `/admin`. The control process redirects `/admin` there and keeps the read-only APIs. It shows the fee hash, the asset, and the BscScan link. It does not move the treasury key and it does not start a customer by hand.
 
 ## Easiest 2-step process to link a Customer Host VPS with `neuralalpha.io`
 

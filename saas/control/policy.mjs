@@ -1,21 +1,88 @@
-/** Host sizing and the hard risk ceiling. The trading process only receives these values. */
+/**
+ * Host sizing and the hard risk ceiling. The trading process only receives these values.
+ *
+ * Presets are 100, 250, and 500 USDT. Custom is any positive USDT amount up to
+ * MAX_CUSTOM_POSITION_USD. The per-order trade cap is that same position size.
+ * There is no second closed-market or off-hours number.
+ *
+ * Swap origin is always USDT. The software-fee asset is not the swap token.
+ * The daily x402 count is a floor of 2. The worker does not read
+ * X402_MIN_PAYMENTS_PER_DAY. It reads CMC_X402_INTERVAL_MS and
+ * STUDIO_X402_INTERVAL_MS, so the hosted files set those from the same count.
+ * One CMC call and one Agent Studio call together make up that daily total.
+ */
 
 export const CALLS_PER_CYCLE = 20;
 
-/** Position size only. The hosted product does not use a drawdown halt. */
-export const PRESETS = {
-  cautious: { maxPositionUsd: 50, maxTradeUsd: 15, minBuyIntervalMs: 600_000 },
-  normal: { maxPositionUsd: 100, maxTradeUsd: 25, minBuyIntervalMs: 600_000 },
-  active: { maxPositionUsd: 250, maxTradeUsd: 40, minBuyIntervalMs: 600_000 },
+/** Position size in USDT. The trade cap written for the worker equals this number. */
+export const POSITION_PRESETS = {
+  "100": 100,
+  "250": 250,
+  "500": 500,
+};
+
+export const DEFAULT_POSITION_PRESET = "100";
+/** Largest custom position a customer may type. Stops a nonsense multi-billion cap. */
+export const MAX_CUSTOM_POSITION_USD = 10_000;
+export const MIN_BUY_INTERVAL_MS = 600_000;
+
+/** Paid x402 calls the portal asks each hosted user to make per day. */
+export const DEFAULT_X402_PER_DAY = 2;
+export const MIN_X402_PER_DAY = 2;
+export const MAX_X402_PER_DAY = 48;
+/** CMC and Agent Studio. The daily count is split across both. */
+export const X402_SOURCES = 2;
+const DAY_MS = 86_400_000;
+
+/**
+ * Gap between paid calls of one source. Two sources at this gap land on
+ * `perDay` settled attempts across a day, when free USDT covers the fee.
+ */
+export function x402IntervalMs(perDay) {
+  const n = Number(perDay);
+  const count = Number.isInteger(n) && n >= MIN_X402_PER_DAY && n <= MAX_X402_PER_DAY
+    ? n
+    : DEFAULT_X402_PER_DAY;
+  return Math.floor((X402_SOURCES * DAY_MS) / count);
+}
+
+/** Worker swap/quote token. Software fees may use other assets; swaps do not. */
+export const SWAP_PAYMENT_TOKEN = "USDT";
+
+/** Older rows. Kept so a mode change or renewal can still read them. Trade cap follows the stored position. */
+const LEGACY_PRESETS = {
+  cautious: 50,
+  normal: 100,
+  active: 250,
 };
 
 export const PAYMENT_ASSETS = ["USDT", "USDC", "BNB", "U", "USD1"];
 
+/** Software subscription in USD. Stables are charged this amount; BNB is the equivalent. */
+export const SOFTWARE_FEE_USD = 15;
+/** Static BNB/USD mark used only to convert the software fee. Not a live price. */
+export const SOFTWARE_BNB_PRICE_USD = 600;
+
 export const BSC_CHAIN_ID = 56;
 export const REQUIRED_CONFIRMATIONS = 15;
-export const CHECKOUT_EXPIRY_MS = 30 * 60_000;
+export const CHECKOUT_EXPIRY_MS = 10 * 60_000;
+/** Checkout uniqueness is a 3-digit marker, 001–999. */
+export const QUOTE_MARKER_MAX = 999;
+
+/**
+ * Stablecoin checkouts are stored as exactly three decimal places (`15.184`).
+ * BNB quotes are a live-price amount and are not rewritten into that shape.
+ */
+export function checkoutAmountIsCurrent(asset, amountDisplay) {
+  const upper = String(asset || "").trim().toUpperCase();
+  if (upper === "BNB" || !PAYMENT_ASSETS.includes(upper)) return true;
+  return /^\d+\.\d{3}$/.test(String(amountDisplay || "").trim());
+}
+
 /** Time for a payment mined before expiry to reach the required confirmations. */
 export const CHECKOUT_SETTLEMENT_GRACE_MS = 15 * 60_000;
+/** How long a matched transfer can wait for the customer container after the quote grace. */
+export const CHECKOUT_PROVISION_RETRY_MS = 6 * 60 * 60_000;
 export const SUBSCRIPTION_DAYS = 30;
 export const SUBSCRIPTION_MS = SUBSCRIPTION_DAYS * 86_400_000;
 
@@ -66,43 +133,70 @@ export function formatUnits18(weiValue) {
 }
 
 /**
- * Computes the locked checkout price and adds a unique micro-dollar tail
- * (less than $0.01) so concurrent buyers can be matched without a material surcharge.
+ * Locked checkout price plus a 3-digit unique marker.
+ * Stables are exactly three decimal places (`15.184`). BNB keeps the live
+ * dollar equivalent and puts that same 3-digit marker in the last places,
+ * rounded up so the quote is never below the live price. `tail` 0 is the
+ * unmarked fee shown on an asset button.
  */
-export function quoteOrderAmount({ asset, priceUsd = 30, bnbPriceUsd = 600, tail = 1 }) {
+export function quoteOrderAmount({ asset, priceUsd = SOFTWARE_FEE_USD, bnbPriceUsd = SOFTWARE_BNB_PRICE_USD, tail = 1 }) {
   const upper = String(asset || "").trim().toUpperCase();
   if (!PAYMENT_ASSETS.includes(upper)) {
     throw Object.assign(new Error("paymentAsset must be USDT, USDC, BNB, U, or USD1"), { status: 400 });
   }
   const safePrice = positive(Number(priceUsd), "priceUsd");
   const requestedTail = Math.floor(Number(tail) || 0);
-  const microTail = requestedTail <= 0 ? 0 : Math.min(9_999, requestedTail);
-  let tailWei;
+  const marker = requestedTail <= 0 ? 0 : Math.min(QUOTE_MARKER_MAX, requestedTail);
 
-  let baseWei;
   if (upper === "BNB") {
     const safeBnb = positive(Number(bnbPriceUsd), "bnbPriceUsd");
-    // Convert the base quote to 6-decimal BNB precision before adding a sub-cent marker.
-    const baseMicroBnb = BigInt(Math.max(1, Math.round((safePrice / safeBnb) * 1_000_000)));
-    baseWei = baseMicroBnb * 10n ** 12n;
-    const bnbPriceMicroUsd = BigInt(Math.max(1, Math.round(safeBnb * 1_000_000)));
-    // Convert the sub-cent USD identifier to BNB wei using integer arithmetic.
-    const numerator = BigInt(microTail) * 10n ** 18n;
-    tailWei = (numerator + bnbPriceMicroUsd / 2n) / bnbPriceMicroUsd;
-  } else {
-    const baseCents = BigInt(Math.round(safePrice * 100));
-    baseWei = baseCents * 10n ** 16n;
-    // One micro-dollar is one micro-token for these USD-pegged payment assets.
-    tailWei = BigInt(microTail) * 10n ** 12n;
+    if (marker === 0) {
+      const baseMicroBnb = BigInt(Math.max(1, Math.round((safePrice / safeBnb) * 1_000_000)));
+      const amountWei = baseMicroBnb * 10n ** 12n;
+      return quoteResult(upper, safePrice, 0, amountWei, formatUnits18(amountWei));
+    }
+    const priceMicroUsd = BigInt(Math.round(safePrice * 1_000_000));
+    const bnbMicroUsd = BigInt(Math.max(1, Math.round(safeBnb * 1_000_000)));
+    const numerator = priceMicroUsd * 1_000_000n;
+    const trueMicroFloor = numerator / bnbMicroUsd;
+    const minMicro = numerator % bnbMicroUsd === 0n ? trueMicroFloor : trueMicroFloor + 1n;
+    let high = minMicro / 1000n;
+    if (high * 1000n + BigInt(marker) < minMicro) high += 1n;
+    const amountMicro = high * 1000n + BigInt(marker);
+    const amountWei = amountMicro * 10n ** 12n;
+    return quoteResult(upper, safePrice, marker, amountWei, formatScaled(amountMicro, 6));
   }
-  const amountWei = baseWei + tailWei;
+
+  const cents = BigInt(Math.round(safePrice * 100));
+  if (marker === 0) {
+    const amountWei = cents * 10n ** 16n;
+    return quoteResult(upper, safePrice, 0, amountWei, formatUnits18(amountWei));
+  }
+  const thousandths = cents * 10n + BigInt(marker);
+  const amountWei = thousandths * 10n ** 15n;
+  return quoteResult(upper, safePrice, marker, amountWei, formatScaled(thousandths, 3));
+}
+
+function quoteResult(asset, priceUsd, tail, amountWei, amountDisplay) {
   return {
-    asset: upper,
-    priceUsd: safePrice,
-    tail: microTail,
+    asset,
+    priceUsd,
+    tail,
     amountWei: amountWei.toString(),
-    amountDisplay: formatUnits18(amountWei),
+    amountDisplay,
   };
+}
+
+function formatScaled(units, places) {
+  const base = 10n ** BigInt(places);
+  const whole = units / base;
+  const frac = (units % base).toString().padStart(places, "0");
+  return `${whole}.${frac}`;
+}
+
+/** Base fee shown on an asset button, before the per-order 3-digit marker. */
+export function softwareFeeDisplay(asset) {
+  return quoteOrderAmount({ asset, tail: 0 }).amountDisplay;
 }
 
 export function assertPayment(body) {
@@ -132,10 +226,75 @@ export function projectName(id) {
   return containerName(id);
 }
 
-export function resolveRisk(preset = "cautious") {
-  const risk = PRESETS[preset];
-  if (!risk) throw new Error("risk preset must be cautious, normal, or active");
-  return { preset, ...risk };
+export function resolveX402PerDay(value) {
+  if (value == null || value === "") return DEFAULT_X402_PER_DAY;
+  const n = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isInteger(n) || n < MIN_X402_PER_DAY || n > MAX_X402_PER_DAY) {
+    throw Object.assign(
+      new Error(`x402PerDay must be an integer from ${MIN_X402_PER_DAY} to ${MAX_X402_PER_DAY}`),
+      { status: 400 },
+    );
+  }
+  return n;
+}
+
+export function assertPositionUsd(value) {
+  if (typeof value === "boolean" || value == null || value === "") {
+    throw Object.assign(new Error("position size must be a positive USDT amount"), { status: 400 });
+  }
+  const n = typeof value === "number" ? value : Number(String(value).trim());
+  if (!Number.isFinite(n) || n <= 0) {
+    throw Object.assign(new Error("position size must be a positive USDT amount"), { status: 400 });
+  }
+  if (n > MAX_CUSTOM_POSITION_USD) {
+    throw Object.assign(
+      new Error(`position size cannot exceed ${MAX_CUSTOM_POSITION_USD} USDT`),
+      { status: 400 },
+    );
+  }
+  const cents = Math.round(n * 100);
+  if (Math.abs(n - cents / 100) > 1e-6 || cents < 1) {
+    throw Object.assign(new Error("position size must be a positive USDT amount with at most 2 decimals"), { status: 400 });
+  }
+  return cents / 100;
+}
+
+function packRisk(preset, maxPositionUsd, x402PerDay) {
+  return {
+    preset,
+    maxPositionUsd,
+    maxTradeUsd: maxPositionUsd,
+    minBuyIntervalMs: MIN_BUY_INTERVAL_MS,
+    x402PerDay,
+  };
+}
+
+/**
+ * @param {string | { preset?: string, positionUsd?: number | string, x402PerDay?: number | string } | null | undefined} input
+ * @param {{ allowLegacy?: boolean }} [opts]
+ */
+export function resolveRisk(input = DEFAULT_POSITION_PRESET, opts = {}) {
+  const body = input != null && typeof input === "object" ? input : { preset: input };
+  const presetRaw =
+    body.preset == null || String(body.preset).trim() === ""
+      ? DEFAULT_POSITION_PRESET
+      : String(body.preset).trim();
+  const x402PerDay = resolveX402PerDay(body.x402PerDay);
+
+  if (Object.hasOwn(POSITION_PRESETS, presetRaw)) {
+    return packRisk(presetRaw, POSITION_PRESETS[presetRaw], x402PerDay);
+  }
+  if (presetRaw === "custom") {
+    return packRisk("custom", assertPositionUsd(body.positionUsd), x402PerDay);
+  }
+  if (opts.allowLegacy && Object.hasOwn(LEGACY_PRESETS, presetRaw)) {
+    const amount =
+      body.positionUsd == null || body.positionUsd === ""
+        ? LEGACY_PRESETS[presetRaw]
+        : assertPositionUsd(body.positionUsd);
+    return packRisk(presetRaw, amount, x402PerDay);
+  }
+  throw Object.assign(new Error("risk preset must be 100, 250, 500, or custom"), { status: 400 });
 }
 
 /**

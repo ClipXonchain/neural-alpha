@@ -37,9 +37,26 @@ export function parseSession(raw: string | undefined) {
   return null;
 }
 
-export const cookieBase = {
-  httpOnly: true,
-  sameSite: "lax" as const,
-  path: "/",
-  secure: process.env.NODE_ENV === "production",
-};
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
+
+function requestHost(req: Request) {
+  const raw = (req.headers.get("x-forwarded-host") || req.headers.get("host") || "").split(",")[0].trim().toLowerCase();
+  if (raw.startsWith("[")) {
+    const end = raw.indexOf("]");
+    return end > 1 ? raw.slice(1, end) : "";
+  }
+  return raw.split(":")[0];
+}
+
+/** Secure on neuralalpha.io. Left unset on localhost so an http test still keeps the session. */
+export function portalCookie(req: Request) {
+  const host = requestHost(req);
+  const proto = (req.headers.get("x-forwarded-proto") || "").split(",")[0].trim().toLowerCase();
+  const local = !host || LOCAL_HOSTS.has(host);
+  return {
+    httpOnly: true,
+    sameSite: "lax" as const,
+    path: "/",
+    secure: !local && proto !== "http",
+  };
+}

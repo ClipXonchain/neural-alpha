@@ -1,11 +1,11 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { control, cookieBase, ORDER_COOKIE, SESSION_COOKIE } from "@/lib/portal-server";
+import { control, portalCookie, ORDER_COOKIE, SESSION_COOKIE } from "@/lib/portal-server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-export async function GET() {
+export async function GET(req: Request) {
   const jar = await cookies();
   let saved: { id?: string; secret?: string } = {};
   try {
@@ -38,10 +38,15 @@ export async function GET() {
   });
   const compound = typeof claimed.data.compoundToken === "string" ? claimed.data.compoundToken : "";
   if (claimed.status === 200 && compound) {
-    jar.set(SESSION_COOKIE, compound, { ...cookieBase, maxAge: 60 * 60 * 24 * 30 });
+    jar.set(SESSION_COOKIE, compound, { ...portalCookie(req), maxAge: 60 * 60 * 24 * 30 });
     jar.delete(ORDER_COOKIE);
   }
-  const payload = { order, activated: Boolean(compound), tenant: claimed.data.tenant };
+  const payload = {
+    order,
+    activated: Boolean(compound),
+    tenant: claimed.data.tenant,
+    ...(typeof claimed.data.accessCode === "string" ? { accessCode: claimed.data.accessCode } : {}),
+  };
   return NextResponse.json(payload, {
     status: claimed.status === 200 ? 200 : claimed.status,
     headers: { "cache-control": "no-store" },

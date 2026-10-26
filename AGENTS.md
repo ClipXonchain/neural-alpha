@@ -1,5 +1,9 @@
 # Agent Instructions
 
+## Git Workflow Rule
+
+- **Primary Branch (`HEAD`):** Always keep the workspace checked out on and commit/push changes to the `SaaS` branch (`origin/SaaS`) unless explicitly instructed by the user to change branches.
+
 ## Quick Reference
 
 - **Project:** Neural Alpha — autonomous bStock trading agent

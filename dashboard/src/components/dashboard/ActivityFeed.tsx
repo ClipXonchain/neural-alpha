@@ -185,7 +185,9 @@ export function ActivityFeed({
         .sort((a, b) => (a.score ?? 0) - (b.score ?? 0)),
     [open]
   );
-  const lead = buys[0] ?? sells[0] ?? null;
+  const queue = useMemo(() => [...buys.slice(0, 8), ...sells.slice(0, 4)], [buys, sells]);
+  const [cursor, setCursor] = useState(0);
+  const lead = queue.length ? queue[cursor % queue.length] : null;
   const side: "buy" | "sell" = lead?.action === "sell" || (lead && (lead.score ?? 0) < 0) ? "sell" : "buy";
   const armed = lead?.action === "buy" || lead?.action === "sell";
   const owns = lead ? heldSet.has(lead.symbol.toUpperCase()) : false;
@@ -193,16 +195,24 @@ export function ActivityFeed({
   const blocked = activity.some((item) => /isn.?t signed in|not logged in|can.?t send/i.test(item.message));
 
   useEffect(() => {
+    if (queue.length) return;
+    setCursor(0);
     setStage(0);
-  }, [leadKey]);
+  }, [queue.length]);
 
   useEffect(() => {
-    if (paused || reduce || !lead) return;
+    if (paused || reduce || !queue.length) return;
     const id = window.setInterval(() => {
-      setStage((value) => (value + 1) % 4);
+      setStage((value) => {
+        if (value >= 3) {
+          if (queue.length > 1) setCursor((current) => current + 1);
+          return 0;
+        }
+        return value + 1;
+      });
     }, STAGE_MS);
     return () => window.clearInterval(id);
-  }, [paused, reduce, lead]);
+  }, [paused, reduce, queue.length]);
 
   const lines = lead
     ? thoughtsFor(lead, side, owns, blocked, signals.length, buys.length, sells.length, Boolean(armed))

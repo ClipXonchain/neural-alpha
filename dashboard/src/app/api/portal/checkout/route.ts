@@ -1,6 +1,7 @@
 import { cookies } from "next/headers";
 import { NextResponse } from "next/server";
-import { control, cookieBase, ORDER_COOKIE } from "@/lib/portal-server";
+import { control, portalCookie, ORDER_COOKIE } from "@/lib/portal-server";
+import { CHECKOUT_EXPIRY_MS, CHECKOUT_PROVISION_RETRY_MS, CHECKOUT_SETTLEMENT_GRACE_MS } from "@/lib/software-fee";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,8 +17,8 @@ export async function POST(req: Request) {
   if (upstream.status === 201 && order?.id && claimSecret) {
     const jar = await cookies();
     jar.set(ORDER_COOKIE, JSON.stringify({ id: order.id, secret: claimSecret }), {
-      ...cookieBase,
-      maxAge: 30 * 60,
+      ...portalCookie(req),
+      maxAge: Math.ceil((CHECKOUT_EXPIRY_MS + CHECKOUT_SETTLEMENT_GRACE_MS + CHECKOUT_PROVISION_RETRY_MS) / 1000),
     });
   }
   const payload = { ...upstream.data };

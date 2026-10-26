@@ -1,0 +1,61 @@
+.button {
+  --flow: #0e3d2c;
+  --flow-mid: #18cf7a;
+  --flow-hi: #b8f5d8;
+  --speed: 8s;
+  position: relative;
+  isolation: isolate;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  min-height: 3rem;
+  padding: 0.5rem 1.25rem;
+  border-radius: 0.75rem;
+  border: 1px solid transparent;
+  color: #edf3f3;
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.25rem;
+  white-space: nowrap;
+  background-image:
+    linear-gradient(#101316, #101316),
+    linear-gradient(90deg, var(--flow), var(--flow-mid), var(--flow-hi), var(--flow-mid), var(--flow));
+  background-size: auto, 220% 100%;
+  background-clip: padding-box, border-box;
+  background-origin: border-box;
+  animation: portal-flow var(--speed) linear infinite;
+}
+
+.button:hover {
+  --speed: 5s;
+}
+
+.button:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(24, 207, 122, 0.4);
+}
+
+.button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+  animation-play-state: paused;
+}
+
+.label {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+@keyframes portal-flow {
+  0% {
+    background-position: 0 0, 0% 0;
+  }
+  100% {
+    background-position: 0 0, 220% 0;
+  }
+}
