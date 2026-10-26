@@ -94,6 +94,11 @@ export interface AgentState {
   cashBalance: number;
   /** Competition / wallet baseline for lifetime PnL (USDT deposited). */
   initialNavUsd: number;
+  /**
+   * awaiting: the agent has not placed its own swap yet, so headline P&L is zero.
+   * first-trade: baseline is the wallet value at that first swap, including the fill.
+   */
+  pnlBasis?: "awaiting" | "first-trade";
   /** Yesterday's UTC close NAV — Daily = current − this. */
   dayStartNavUsd?: number;
   /** Non-swap transfers out of / into the wallet — excluded from PnL. */

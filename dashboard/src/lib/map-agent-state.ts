@@ -610,6 +610,118 @@ function mapActivity(logs: LogEntry[]): ActivityItem[] {
   return mapActivityLogs(logs);
 }
 
+/** Agent swaps are `order-…` with a real tx. Paper fills and chain backfill do not start P&L. */
+function firstAgentSwap(trades: Trade[]): Trade | null {
+  let first: Trade | null = null;
+  for (const trade of trades) {
+    if (!trade.id.startsWith("order-")) continue;
+    const hash = trade.txHash ?? "";
+    if (!hash || hash.startsWith("paper-") || hash.startsWith("binance-web3-")) continue;
+    if (!first || trade.timestamp < first.timestamp) first = trade;
+  }
+  return first;
+}
+
+function curveClock(ts: number): string {
+  return new Date(ts).toLocaleTimeString("en", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** $1,000 / $2,000 bookkeeping marks are not a wallet. */
+function placeholderNav(value: number, nav: number): boolean {
+  if (!(nav > 0) || Math.abs(value - nav) / nav < 0.05) return false;
+  return Math.abs(value - 1000) < 1 || Math.abs(value - 2000) < 1;
+}
+
+const tradingBasisMemory = new Map<string, number>();
+
+function rememberTradingBasis(tradeId: string, nav: number): number {
+  const known = tradingBasisMemory.get(tradeId);
+  if (known && known > 0) return known;
+  if (typeof sessionStorage !== "undefined") {
+    const saved = Number(sessionStorage.getItem(`na-trade-basis:${tradeId}`));
+    if (saved > 0) {
+      tradingBasisMemory.set(tradeId, saved);
+      return saved;
+    }
+    sessionStorage.setItem(`na-trade-basis:${tradeId}`, String(nav));
+  }
+  tradingBasisMemory.set(tradeId, nav);
+  return nav;
+}
+
+/**
+ * Headline P&L starts at the agent's first own swap.
+ * The baseline is the wallet's USDT value at that moment, trade included.
+ * A configured deposit and the simulator seed are not a result.
+ */
+function applyTradingBasis(state: AgentState): AgentState {
+  const nav = state.portfolioValue;
+  const first = firstAgentSwap(state.trades);
+  if (!first || !(nav > 0)) {
+    const ts = Date.now();
+    const flat = nav > 0
+      ? [
+          { time: curveClock(ts - 60_000), value: roundNum(nav, 2), pnl: 0, ts: ts - 60_000 },
+          { time: curveClock(ts), value: roundNum(nav, 2), pnl: 0, ts },
+        ]
+      : [];
+    return {
+      ...state,
+      pnlBasis: "awaiting",
+      totalPnl: 0,
+      totalPnlPct: 0,
+      dailyPnl: 0,
+      dailyPnlPct: 0,
+      initialNavUsd: 0,
+      dayStartNavUsd: roundNum(nav, 2),
+      equityCurve: flat,
+    };
+  }
+
+  const after = state.equityCurve
+    .filter((point) => (point.ts ?? 0) >= first.timestamp - 15_000 && point.value > 0)
+    .filter((point) => !placeholderNav(point.value, nav))
+    .filter((point) => {
+      const ratio = point.value / nav;
+      return ratio >= 0.5 && ratio <= 1.5;
+    })
+    .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0));
+  const nearSwap = after.find((point) => (point.ts ?? 0) <= first.timestamp + 3 * 60_000);
+  const basis = nearSwap
+    ? nearSwap.value
+    : rememberTradingBasis(first.id, after[0]?.value ?? nav);
+  const deposit = state.initialNavUsd;
+  const curveHasDeposit = deposit > 0 && state.equityCurve.some((point) =>
+    point.value > 0 && Math.abs(point.value - deposit) / deposit <= 0.08
+  );
+  if (curveHasDeposit || (deposit > 0 && basis > 0 && Math.abs(deposit - basis) / basis <= 0.08)) {
+    return state;
+  }
+
+  const flows = flowTotals((state.externalFlows ?? []).filter((flow) => flow.timestamp >= first.timestamp));
+  const capital = basis + flows.inUsd;
+  const pnl = nav + flows.outUsd - capital;
+  const todayStart = utcDayStartMs();
+  const dayRef = first.timestamp >= todayStart
+    ? basis
+    : (state.dayStartNavUsd && state.dayStartNavUsd > 0 ? state.dayStartNavUsd : basis);
+  const daily = nav + flows.outTodayUsd - flows.inTodayUsd - dayRef;
+  const curve = (after.length > 0 ? after : [{ time: curveClock(first.timestamp), value: roundNum(basis, 2), pnl: 0, ts: first.timestamp }])
+    .map((point) => ({ ...point, pnl: roundNum(point.value - basis, 2) }));
+
+  return {
+    ...state,
+    pnlBasis: "first-trade",
+    totalPnl: roundNum(pnl, 2),
+    totalPnlPct: capital > 0 ? roundNum((pnl / capital) * 100, 2) : 0,
+    dailyPnl: roundNum(daily, 2),
+    dailyPnlPct: dayRef > 0 ? roundNum((daily / dayRef) * 100, 2) : 0,
+    initialNavUsd: roundNum(basis, 2),
+    dayStartNavUsd: roundNum(dayRef, 2),
+    equityCurve: curve,
+  };
+}
+
 function mapEquityCurve(snap: Track1Snapshot) {
   const snaps = snap.snapshots.length > 0 ? snap.snapshots : [snap.portfolio];
   const initial = snap.portfolio.initialNavUsd ?? 0;
@@ -840,7 +952,7 @@ export function enrichStateWithWallet(
   const { dailyPnl, dailyPnlPct } = daily;
   const dayStartNav = nav - dailyPnl;
 
-  return {
+  return applyTradingBasis({
     ...state,
     portfolioValue: roundNum(nav, 2),
     cashBalance: roundNum(cashUsd, 2),
@@ -855,7 +967,7 @@ export function enrichStateWithWallet(
     dayStartNavUsd: roundNum(dayStartNav, 2),
     positions: mapped,
     equityCurve,
-  };
+  });
 }
 
 export function mapTrack1ToDashboard(
@@ -954,7 +1066,7 @@ export function mapTrack1ToDashboard(
   if (snap.binancePositions && snap.binancePositions.length > 0) {
     return enrichStateWithWallet(base, snap.binancePositions);
   }
-  return base;
+  return applyTradingBasis(base);
 }
 
 /** Overlay Binance Web3 wallet poll prices onto signal rows (30s refresh). */

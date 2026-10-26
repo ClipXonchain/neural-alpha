@@ -575,8 +575,14 @@ function sentOutUsd(state: AgentState): number {
 }
 
 function portfolioBasisLabel(state: AgentState): string {
-  if (!(state.initialNavUsd > 0)) return "Live wallet value";
+  if (state.pnlBasis === "awaiting") return "P&L starts at the first trade";
   const out = sentOutUsd(state);
+  if (state.pnlBasis === "first-trade" && state.initialNavUsd > 0) {
+    return out > 0
+      ? `Since first trade ${formatUsd(state.initialNavUsd)} · ${formatUsd(out)} sent out`
+      : `Since first trade ${formatUsd(state.initialNavUsd)}`;
+  }
+  if (!(state.initialNavUsd > 0)) return "Live wallet value";
   return out > 0
     ? `Deposit ${formatUsd(state.initialNavUsd)} · ${formatUsd(out)} sent out`
     : `Deposit ${formatUsd(state.initialNavUsd)}`;
