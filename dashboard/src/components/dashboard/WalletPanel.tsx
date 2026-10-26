@@ -326,10 +326,23 @@ type BinancePosition = NonNullable<WalletSnapshot["binancePositions"]>[number];
 /** Match backend / portfolio MIN_POSITION_VALUE_USD — hide dust & airdrop spam. */
 const DUST_THRESHOLD_USD = 1;
 
+/** Binance repeats the same page, so one symbol can arrive many times. Keep the largest copy. */
+function uniqueHoldings(positions: BinancePosition[]): BinancePosition[] {
+  const bySymbol = new Map<string, BinancePosition>();
+  for (const position of positions) {
+    const symbol = position.symbol.toUpperCase();
+    const value = position.valueUsd > 0 ? position.valueUsd : position.remainQty * position.price;
+    const prev = bySymbol.get(symbol);
+    const prevValue = prev ? (prev.valueUsd > 0 ? prev.valueUsd : prev.remainQty * prev.price) : -1;
+    if (!prev || value > prevValue) bySymbol.set(symbol, { ...position, symbol });
+  }
+  return [...bySymbol.values()];
+}
+
 function TokenHoldings({ positions }: { positions?: BinancePosition[] }) {
   if (!positions || positions.length === 0) return null;
 
-  const withValue = positions.map((p) => ({
+  const withValue = uniqueHoldings(positions).map((p) => ({
     ...p,
     valueUsd: p.valueUsd > 0 ? p.valueUsd : p.remainQty * p.price,
   }));
@@ -360,7 +373,7 @@ function TokenHoldings({ positions }: { positions?: BinancePosition[] }) {
           const up = p.percentChange24h >= 0;
           return (
             <div
-              key={`${p.symbol}-${p.contractAddress}`}
+              key={p.symbol}
               className="flex items-center justify-between gap-2 py-1 border-b border-border-dim/40 last:border-b-0"
             >
               <div className="flex items-center gap-2 min-w-0">
