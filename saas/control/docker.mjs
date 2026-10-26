@@ -86,6 +86,22 @@ export function createDocker({ repoRoot, composeFile, run = runCommand }) {
       );
       return parseCliJson(stdout);
     },
+    async walletStatus(container) {
+      const { stdout } = await run("docker", ["exec", container, "baw", "wallet", "status", "--json"], {
+        timeoutMs: 20_000,
+      });
+      return parseCliJson(stdout);
+    },
+    async containerIp(container) {
+      if (!/^na-[a-z0-9]{8}$/.test(container)) throw new Error("container name is invalid");
+      const { stdout } = await run("docker", [
+        "inspect",
+        "-f",
+        "{{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}",
+        container,
+      ]);
+      return stdout.trim().split(/\s+/).find(Boolean) || "";
+    },
     async walletAddress(container) {
       const { stdout } = await run("docker", ["exec", container, "baw", "wallet", "address", "--json"], {
         timeoutMs: 30_000,

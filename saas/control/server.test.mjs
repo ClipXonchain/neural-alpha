@@ -243,6 +243,7 @@ test("each customer gets a separate container and the third is refused", async (
     const listed = await call(url, "/tenants");
     const row = listed.body.tenants.find((tenant) => tenant.id === first.body.tenant.id);
     const env = readFileSync(join(row.data_dir, "tenant.env"), "utf8");
+    assert.match(env, /AGENT_MODE=live/);
     assert.match(env, /MAX_POSITION_SIZE_USD=100/);
     assert.match(env, /HACKATHON_MAX_TRADE_USD=100/);
     assert.match(env, /X402_MIN_PAYMENTS_PER_DAY=2/);

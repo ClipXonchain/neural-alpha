@@ -1,5 +1,6 @@
 "use client";
 
+import { CustomerDashboard } from "@/components/portal/CustomerDashboard";
 import { AssetLogo, PaymentMethodSelector } from "@/components/portal/payment-selector";
 import { RainbowButton } from "@/components/portal/rainbow-button";
 import { TreasuryQr } from "@/components/portal/treasury-qr";
@@ -730,6 +731,10 @@ export function PortalDesk() {
   const panel = "rounded-2xl border border-white/[0.09] bg-[#101316] shadow-[0_24px_80px_rgba(0,0,0,.25)]";
   const buttonQuiet = "inline-flex min-h-12 items-center justify-center gap-2 rounded-xl border border-white/10 bg-white/[0.035] px-5 text-sm font-medium text-[#dce4e9] transition hover:border-white/20 hover:bg-white/[0.07]";
   const progressLabels = ["Plan", "Payment", "Activate"];
+
+  if (!booting && step === "agent") {
+    return <CustomerDashboard />;
+  }
 
   return (
     <div className={`${step === "agent" ? "lg:h-screen lg:overflow-hidden" : "min-h-screen"} bg-[#080b0d] text-[#edf3f3] selection:bg-[#18cf7a]/30`}>

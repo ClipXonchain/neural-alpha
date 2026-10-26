@@ -154,6 +154,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
     fetchImpl,
   });
   const pairings = new Map();
+  void promotePaperTenants({ store, docker, config, now }).catch(() => undefined);
   const watcher = createTreasuryWatcher({
     store,
     config,
@@ -426,7 +427,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
         return send(res, 201, await created);
       }
 
-      const match = url.pathname.match(/^\/tenants\/([a-z0-9]{8})(\/[^/]+(?:\/[^/]+)?)?$/);
+      const match = url.pathname.match(/^\/tenants\/([a-z0-9]{8})(\/.*)?$/);
       if (!match) return send(res, 404, { error: "not found" });
       if (actor?.role === "remote_customer" && actor.tenantId === match[1] && actor.hostId !== config.hostId) {
         const body = req.method === "POST" ? await readJson(req) : undefined;
@@ -445,6 +446,9 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
 
       if (req.method === "GET" && action === "") {
         return send(res, 200, { tenant: customerView(tenant), pairing: publicPairing(pairings.get(tenant.id)) });
+      }
+      if (action.startsWith("/agent/") || action === "/agent") {
+        return proxyTenantAgent(req, res, docker, tenant, action, url);
       }
       if (req.method === "GET" && action === "/state") {
         const state = await readDesk(docker, tenant);
@@ -1127,7 +1131,7 @@ async function createTenant({ store, docker, config, now, payment, risk, agentNa
     container_name: containerName(id),
     data_dir: dir,
     risk_preset: risk.preset,
-    agent_mode: "paper",
+    agent_mode: "live",
     max_position_usd: risk.maxPositionUsd,
     max_drawdown_pct: 0,
     max_trade_usd: risk.maxTradeUsd,
@@ -1234,6 +1238,77 @@ function specFrom(row, risk, config) {
   };
 }
 
+async function promotePaperTenants({ store, docker, config, now }) {
+  const rows = store.list().filter((row) => row.host_id === config.hostId && row.agent_mode === "paper" && row.data_dir);
+  for (const row of rows) {
+    try {
+      const updated = applySpec(store, row, { risk: riskFromRow(row), agentMode: "live" }, config, now);
+      if (row.status === "running" || row.status === "paused") {
+        await docker.up(dockerTarget(updated));
+        store.update(updated.id, { status: "running", updated_at: now().toISOString() });
+      }
+    } catch {
+      /* the next restart tries this tenant again */
+    }
+  }
+}
+
+async function proxyTenantAgent(req, res, docker, tenant, action, url) {
+  if (tenant.status !== "running" && tenant.status !== "paused") {
+    return send(res, 409, { error: "tenant container is not running" });
+  }
+  const ip = typeof docker.containerIp === "function" ? await docker.containerIp(tenant.container_name) : "";
+  if (!/^\d{1,3}(?:\.\d{1,3}){3}$/.test(ip)) return send(res, 409, { error: "agent is not running" });
+  const sub = action.replace(/^\/agent/, "") || "/state";
+  const target = `http://${ip}:3848/api${sub}${url.search || ""}`;
+  const headers = { authorization: `Bearer ${tenant.agent_api_secret}` };
+  if (req.headers["content-type"]) headers["content-type"] = req.headers["content-type"];
+  const init = { method: req.method || "GET", headers };
+  if (req.method !== "GET" && req.method !== "HEAD") init.body = await readRaw(req);
+  let upstream;
+  try {
+    upstream = await fetch(target, init);
+  } catch {
+    return send(res, 502, { error: "agent unreachable" });
+  }
+  const contentType = upstream.headers.get("content-type") || "application/json";
+  res.writeHead(upstream.status, {
+    "content-type": contentType,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  if (!upstream.body) return res.end();
+  const reader = upstream.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      res.write(value);
+    }
+  } catch {
+    /* the browser closed the stream */
+  }
+  return res.end();
+}
+
+function readRaw(req, max = 1_000_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on("data", (chunk) => {
+      size += chunk.length;
+      if (size > max) {
+        reject(Object.assign(new Error("body too large"), { status: 413 }));
+        req.destroy();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => resolve(Buffer.concat(chunks)));
+    req.on("error", reject);
+  });
+}
+
 function publicPairing(job) {
   if (!job) return null;
   return { status: job.status || "", error: job.error || "" };
@@ -1241,18 +1316,33 @@ function publicPairing(job) {
 
 function beginPairWatch(pairings, ctx, tenant, qrCodeId) {
   pairings.set(tenant.id, { status: "waiting", qrCodeId, error: "", address: "" });
+  const stillCurrent = () => pairings.get(tenant.id)?.qrCodeId === qrCodeId;
+  void ctx.docker.verify(tenant.container_name, qrCodeId).catch(() => undefined);
   void (async () => {
+    const deadline = Date.now() + 180_000;
+    let address = "";
+    while (Date.now() < deadline && stillCurrent() && !address) {
+      try {
+        const payload = await ctx.docker.walletStatus(tenant.container_name);
+        const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+        const status = String(data?.status || "").toUpperCase();
+        if (status === "CONNECTED" || status === "ALREADY_CONNECTED") {
+          address = await ctx.docker.walletAddress(tenant.container_name);
+        }
+      } catch {
+        /* Binance is still waiting for the scan */
+      }
+      if (!address && stillCurrent()) await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    if (!stillCurrent()) return;
     try {
-      await ctx.docker.verify(tenant.container_name, qrCodeId);
-      const address = await ctx.docker.walletAddress(tenant.container_name);
+      if (!address) address = await ctx.docker.walletAddress(tenant.container_name);
       const fresh = ctx.store.get(tenant.id) || tenant;
       const updated = await connectPairedWallet(ctx, fresh, address);
-      const current = pairings.get(tenant.id);
-      if (current && current.qrCodeId !== qrCodeId) return;
+      if (!stillCurrent()) return;
       pairings.set(tenant.id, { status: "connected", qrCodeId, error: "", address: updated.wallet_address });
     } catch (err) {
-      const current = pairings.get(tenant.id);
-      if (current && current.qrCodeId !== qrCodeId) return;
+      if (!stillCurrent()) return;
       pairings.set(tenant.id, {
         status: "failed",
         qrCodeId,

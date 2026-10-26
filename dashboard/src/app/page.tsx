@@ -5,7 +5,7 @@ import { Info } from "lucide-react";
 import { ClipxApp } from "@/components/clipx/ClipxApp";
 import { useAgentConnection } from "@/hooks/useAgentConnection";
 import { useReadOnly } from "@/hooks/useReadOnly";
-import { blacklistToken, unblacklistToken } from "@/lib/agent-api";
+import { blacklistToken, setAgentApiBase, unblacklistToken } from "@/lib/agent-api";
 
 function DashboardSkeleton() {
   return (
@@ -32,6 +32,7 @@ function DashboardSkeleton() {
 }
 
 export default function DashboardPage() {
+  setAgentApiBase(null);
   const readOnly = useReadOnly();
   const {
     connected,

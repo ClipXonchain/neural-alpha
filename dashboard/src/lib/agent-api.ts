@@ -1,7 +1,13 @@
 /** Neural Alpha agent HTTP API — proxied via Next.js rewrites at /api/agent/* */
 
-const AGENT_BASE =
-  process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
+let agentApiBase = process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
+let agentSseBase = process.env.NEXT_PUBLIC_AGENT_SSE_URL || "/api/agent";
+
+/** Portal customers use their own agent proxy. The public desk keeps the default. */
+export function setAgentApiBase(base: string | null) {
+  agentApiBase = base || process.env.NEXT_PUBLIC_AGENT_API_URL || "/api/agent";
+  agentSseBase = base || process.env.NEXT_PUBLIC_AGENT_SSE_URL || "/api/agent";
+}
 
 export interface AutonomousStatus {
   phase: "stopped" | "scanning" | "idle" | "blocked";
@@ -226,7 +232,7 @@ export interface LogEntry {
 
 async function agentFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const timeout = init?.signal ?? AbortSignal.timeout(8_000);
-  const res = await fetch(`${AGENT_BASE}${path}`, {
+  const res = await fetch(`${agentApiBase}${path}`, {
     ...init,
     signal: timeout,
     headers: { "Content-Type": "application/json", ...init?.headers },
@@ -382,13 +388,11 @@ export async function unblacklistToken(symbol: string): Promise<{ ok: boolean; r
   });
 }
 
-const SSE_BASE = process.env.NEXT_PUBLIC_AGENT_SSE_URL || "/api/agent";
-
 export function subscribeAgentEvents(
   onState: (state: Track1Snapshot) => void,
   onLog?: (log: LogEntry) => void
 ): () => void {
-  const es = new EventSource(`${SSE_BASE}/events`);
+  const es = new EventSource(`${agentSseBase}/events`);
 
   es.addEventListener("state", (e) => {
     try {
@@ -418,4 +422,4 @@ export async function checkAgentConnection(): Promise<boolean> {
   }
 }
 
-export { AGENT_BASE };
+export { agentApiBase as AGENT_BASE };

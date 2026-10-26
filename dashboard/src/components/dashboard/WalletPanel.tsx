@@ -1,6 +1,7 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { motion } from "framer-motion";
 import {
   Wallet,
@@ -38,6 +39,7 @@ export function WalletPanel({
   const [copied, setCopied] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [signingIn, setSigningIn] = useState(false);
+  const watchedQr = useRef("");
   const [verifying, setVerifying] = useState(false);
   const [signin, setSignin] = useState<{
     urlForWeb?: string;
@@ -76,18 +78,30 @@ export function WalletPanel({
         return;
       }
       setSignin({ urlForWeb: r.urlForWeb, qrCodeId: r.qrCodeId, pairingCode: r.pairingCode });
-      if (r.urlForWeb) window.open(r.urlForWeb, "_blank", "noopener,noreferrer");
-      setActionMsg(
-        r.pairingCode
-          ? `Pairing code ${r.pairingCode} — confirm in the Binance App, then click I've confirmed.`
-          : "Confirm sign-in in the Binance App, then click I've confirmed."
-      );
+      setActionMsg("Scan the code with the Binance app. This page confirms the login by itself.");
     } catch (e) {
       setActionMsg(String(e));
     } finally {
       setSigningIn(false);
     }
   };
+
+  useEffect(() => {
+    const id = signin?.qrCodeId;
+    if (readOnly || !id || watchedQr.current === id) return;
+    watchedQr.current = id;
+    setVerifying(true);
+    setActionMsg("Approve the login in the Binance app. This page is waiting.");
+    void onVerify(id)
+      .then(() => {
+        setSignin(null);
+        setActionMsg("Agentic Wallet connected");
+      })
+      .catch((e) => {
+        setActionMsg(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => setVerifying(false));
+  }, [signin?.qrCodeId, readOnly, onVerify]);
 
   const handleVerify = async () => {
     if (!signin?.qrCodeId) return;
@@ -239,6 +253,16 @@ export function WalletPanel({
           </div>
         </div>
       )}
+
+      {!readOnly && signin?.urlForWeb ? (
+        <div className="mb-4 flex flex-col items-center gap-2">
+          <div className="rounded-xl bg-white p-2">
+            <QRCodeSVG value={signin.urlForWeb} size={148} level="M" marginSize={1} bgColor="#ffffff" fgColor="#07140e" title="Binance Agentic Wallet sign-in QR" />
+          </div>
+          <p className="text-center text-[10px] text-text-secondary">Scan with the Binance app. This page confirms the login by itself.</p>
+          {signin.pairingCode ? <p className="font-mono text-xs tracking-[.2em] text-neon">{signin.pairingCode}</p> : null}
+        </div>
+      ) : null}
 
       {/* Actions */}
       <div className="flex flex-wrap gap-2">
