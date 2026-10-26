@@ -5,7 +5,7 @@ FROM node:20-bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \
-  && npm install -g @binance/agentic-wallet \
+  && npm install -g @binance/agentic-wallet@1.12.0 \
   && rm -rf /var/lib/apt/lists/*
 
 ARG UPSTREAM_REPO=https://github.com/ClipXonchain/neural-alpha.git

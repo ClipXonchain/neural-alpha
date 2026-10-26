@@ -189,6 +189,8 @@ export interface Track1Snapshot {
 
 export interface WalletSnapshot {
   address: string | null;
+  /** Binance Agent ID for this wallet, e.g. alice.ai. Absent until one is claimed. */
+  agentId?: string | null;
   bnbBalance: number;
   usdtBalance: number;
   walletMode: string;

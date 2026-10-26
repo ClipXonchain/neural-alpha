@@ -414,6 +414,7 @@ export function ClipxApp({
   const [selected, setSelected] = useState<LedgerRow | null>(null);
   const [range, setRange] = useState<keyof typeof RANGES>("30D");
   const funded = walletChecked ? Boolean(wallet?.address) : true;
+  const agentName = agentIdLabel(wallet?.agentId);
   const rows = useMemo(() => buildRows(funded ? state.trades : []), [state.trades, funded]);
   const title = NAV.find((item) => item.id === view)?.label ?? "Overview";
   const address = wallet?.address ? shortenHash(wallet.address) : "Not connected";
@@ -489,7 +490,11 @@ export function ClipxApp({
           </div>
           <div className="top-actions">
             <button className="select-button"><BnbMark /> BNB Chain <ChevronDown size={15} /></button>
-            <button className="wallet-pill" onClick={() => go("wallet")}><Wallet size={15} /> {address} <ExternalLink size={13} /></button>
+            <button className="wallet-pill" onClick={() => go("wallet")} title={wallet?.address || undefined}>
+              <Wallet size={15} />
+              {agentName ? <><span className="agent-id">{agentName}</span><span className="wallet-short">{address}</span></> : address}
+              <ExternalLink size={13} />
+            </button>
             <WalletAvatar address={wallet?.address} />
           </div>
         </header>}
@@ -568,6 +573,11 @@ export function ClipxApp({
       {selected && <TradeDrawer row={selected} icon={icons.get(selected.symbol.toUpperCase())} onClose={() => setSelected(null)} />}
     </div>
   );
+}
+
+function agentIdLabel(value?: string | null): string {
+  const name = String(value || "").trim().toLowerCase();
+  return /^[a-z0-9]{3,15}\.ai$/.test(name) ? name : "";
 }
 
 function sentOutUsd(state: AgentState): number {

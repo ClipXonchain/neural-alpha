@@ -1253,6 +1253,24 @@ async function promotePaperTenants({ store, docker, config, now }) {
   }
 }
 
+const agentIdCache = new Map();
+
+async function cachedAgentId(docker, container) {
+  if (!container || typeof docker.agentId !== "function") return "";
+  const hit = agentIdCache.get(container);
+  const nowMs = Date.now();
+  if (hit && nowMs < hit.until) return hit.name;
+  let name = "";
+  try {
+    name = await docker.agentId(container);
+  } catch {
+    name = "";
+  }
+  if (typeof name !== "string") name = "";
+  agentIdCache.set(container, { name, until: nowMs + (name ? 10 * 60_000 : 60_000) });
+  return name;
+}
+
 async function proxyTenantAgent(req, res, docker, tenant, action, url) {
   if (tenant.status !== "running" && tenant.status !== "paused") {
     return send(res, 409, { error: "tenant container is not running" });
@@ -1272,6 +1290,25 @@ async function proxyTenantAgent(req, res, docker, tenant, action, url) {
     return send(res, 502, { error: "agent unreachable" });
   }
   const contentType = upstream.headers.get("content-type") || "application/json";
+  if (req.method === "GET" && sub === "/wallet" && upstream.ok) {
+    const text = await upstream.text();
+    let body = null;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = null;
+    }
+    if (body && typeof body === "object" && !body.agentId) {
+      const agentId = await cachedAgentId(docker, tenant.container_name);
+      if (agentId) body.agentId = agentId;
+    }
+    res.writeHead(upstream.status, {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    });
+    return res.end(body ? JSON.stringify(body) : text);
+  }
   res.writeHead(upstream.status, {
     "content-type": contentType,
     "cache-control": "no-store",

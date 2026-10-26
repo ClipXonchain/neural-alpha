@@ -102,6 +102,27 @@ export function createDocker({ repoRoot, composeFile, run = runCommand }) {
       ]);
       return stdout.trim().split(/\s+/).find(Boolean) || "";
     },
+    async agentId(container) {
+      if (!/^na-[a-z0-9]{8}$/.test(container)) throw new Error("container name is invalid");
+      const args = ["exec", container, "baw", "wallet", "agent-id", "--json"];
+      try {
+        const { stdout } = await run("docker", args, { timeoutMs: 15_000 });
+        return agentIdFromCli(parseCliJson(stdout));
+      } catch (err) {
+        if (!/unknown command/i.test(String(err?.message || err))) throw err;
+        const { stdout } = await run("docker", [
+          "exec",
+          container,
+          "npx",
+          "--yes",
+          "@binance/agentic-wallet@1.12.0",
+          "wallet",
+          "agent-id",
+          "--json",
+        ], { timeoutMs: 60_000 });
+        return agentIdFromCli(parseCliJson(stdout));
+      }
+    },
     async walletAddress(container) {
       const { stdout } = await run("docker", ["exec", container, "baw", "wallet", "address", "--json"], {
         timeoutMs: 30_000,
@@ -126,6 +147,14 @@ export function createDocker({ repoRoot, composeFile, run = runCommand }) {
         .filter(Boolean);
     },
   };
+}
+
+/** `baw wallet agent-id --json` → `alice.ai`, or "" when this wallet has not claimed one. */
+export function agentIdFromCli(payload) {
+  const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+  if (!data || data.claimed !== true) return "";
+  const name = String(data.agentId || "").trim().toLowerCase();
+  return /^[a-z0-9]{3,15}\.ai$/.test(name) ? name : "";
 }
 
 export function parseCliJson(text) {
