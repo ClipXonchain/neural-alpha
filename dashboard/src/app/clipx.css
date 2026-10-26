@@ -148,3 +148,14 @@ img.token-logo.sm,.token-logo.sm{width:24px;height:24px}
 .wallet-pill{display:inline-flex;align-items:center;gap:6px}
 .wallet-pill .agent-id{color:#3ee08f;font-weight:650}
 .wallet-pill .wallet-short{color:#8b98a3;font-size:10px}
+.desk-head{position:sticky;top:0;z-index:20}
+.desk-head .topbar{position:static}
+.start-ad{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:10px 26px;text-decoration:none;color:inherit;border-bottom:1px solid rgba(24,207,122,.22);background:linear-gradient(90deg,rgba(24,207,122,.10),rgba(24,207,122,.03) 46%,transparent)}
+.start-ad-copy{min-width:0}
+.start-ad-copy strong{display:block;font-size:13px;font-weight:650;letter-spacing:-.02em}
+.start-ad-copy span{display:block;margin-top:2px;color:#8b98a3;font-size:12px}
+.start-ad-cta{flex:none;display:inline-flex;align-items:center;gap:6px;min-height:34px;padding:0 12px;border-radius:8px;color:#edf3f3;font-size:12px;font-weight:650;border:1px solid transparent;background-image:linear-gradient(#101316,#101316),linear-gradient(90deg,#0e3d2c,#18cf7a,#b8f5d8,#18cf7a,#0e3d2c);background-size:auto,220% 100%;background-clip:padding-box,border-box;background-origin:border-box;animation:start-ad-flow 8s linear infinite}
+.start-ad:hover .start-ad-cta{animation-duration:5s}
+@keyframes start-ad-flow{to{background-position:0 0,220% 0}}
+@media(max-width:760px){.start-ad{padding:10px 14px}}
+@media(max-width:500px){.start-ad-copy span{display:none}}

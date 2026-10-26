@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 import {
   Activity,
   Aperture,
+  ArrowRight,
   Atom,
   BarChart3,
   Bell,
@@ -476,7 +477,8 @@ export function ClipxApp({
       </aside>}
 
       <main className="main">
-        {!showcaseView && <header className="topbar">
+        {!showcaseView && <div className="desk-head">
+        <header className="topbar">
           <button className="mobile-menu" onClick={() => setOpen((value) => !value)} aria-label="Open menu"><Menu size={18} /></button>
           <div className="page-title">
             <h1>{title}</h1>
@@ -497,7 +499,17 @@ export function ClipxApp({
             </button>
             <WalletAvatar address={wallet?.address} />
           </div>
-        </header>}
+        </header>
+        {readOnly && (
+          <a className="start-ad" href="/portal">
+            <span className="start-ad-copy">
+              <strong>Start your agent</strong>
+              <span>Your own desk on your Binance wallet. $15 for 30 days.</span>
+            </span>
+            <span className="start-ad-cta">Start now <ArrowRight size={14} /></span>
+          </a>
+        )}
+        </div>}
 
         {!connected && error && <div className="page" style={{ paddingBottom: 0 }}><div className="feature-note">{error}</div></div>}
 
