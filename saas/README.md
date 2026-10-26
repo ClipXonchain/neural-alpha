@@ -10,8 +10,12 @@ Hosted Neural Alpha. One backend on each server starts a private container per c
 
 - The container name is `na-` plus an 8 character id. The project name and the folder are that same id. Two customers cannot receive the same folder.
 - The trade loop is sized for a full server. On a 16 GB host the default is 20 customers and one cycle about every 7 minutes, which stays near 60 upstream calls a minute. Signing another customer up does not make the others poll faster.
-- Risk is one of three presets: cautious, normal, active. The loosest position is $250, and drawdown protection stays on. The backend writes those values into the customer folder. The trading code reads them as it already does.
+- A risk preset caps each automatic buy: cautious $50, normal $100, active $250. In closed/overnight sessions a smaller per-order cap applies ($15/$25/$40). This is not a portfolio balance or loss limit. A position may grow above its entry cap, and full sells remain allowed.
+- A customer pays in USDT, USDC, BNB, U, or USD1. Creating a customer requires that asset and a transaction hash. The same hash cannot start a second customer. The trading balance they send into the Agentic Wallet is separate from this fee.
+- The control service starts a BSC treasury watcher automatically and scans about every 15 seconds. It provisions only after a successful BSC receipt has at least 15 confirmations, the configured token contract and treasury match, and the amount equals the quote exactly. A transfer mined before quote expiry gets a 15-minute confirmation grace period. Customers can still paste a transaction hash if automatic matching has not completed.
+- Each customer gets their own access token. That token opens only their id. A token for someone else gets the same answer as a missing customer. Customer containers do not share a Docker network, and each one has its own API secret.
 - The control API listens on `127.0.0.1:3910`. Create is limited to 10 calls a minute. Everything else is 120 a minute.
+- The admin desk is `http://127.0.0.1:3910/admin`. It uses `SAAS_MONITOR_SECRET`, which can only read. The page has no pause, trade, pair, or size controls. Put the monitor key in the browser. Keep `CONTROL_API_SECRET` off that page.
 - A stopped container is not started again by a reboot. A running one is.
 
 ## Run the backend
@@ -22,11 +26,13 @@ From the repo root, on this branch:
 node saas/control/server.mjs
 ```
 
-`CONTROL_API_SECRET` is required before this port is reachable by anything except this machine. `SAAS_HOST_ID` names the server. `SAAS_DATA_ROOT` is the folder of customer directories. `TENANT_DATABASE_URL` is copied into each container so the trade book also lands in Neon.
+`CONTROL_API_SECRET` operates the API. `SAAS_MONITOR_SECRET` is the read-only admin desk. `SAAS_HOST_ID` names the server. `SAAS_DATA_ROOT` is the folder of customer directories. `TENANT_DATABASE_URL` is copied into each container so the trade book also lands in Neon.
 
 ```bash
-curl -s -H "Authorization: Bearer $CONTROL_API_SECRET" http://127.0.0.1:3910/capacity
-curl -s -X POST -H "Authorization: Bearer $CONTROL_API_SECRET" http://127.0.0.1:3910/tenants
+curl -s -H "Authorization: Bearer $SAAS_MONITOR_SECRET" http://127.0.0.1:3910/admin/overview
+curl -s -X POST -H "Content-Type: application/json" \
+  -d '{"paymentAsset":"USDT","paymentTx":"0xabc...64 hex chars"}' \
+  http://127.0.0.1:3910/tenants
 ```
 
 Paper mode is the start. After `pair/start` and `pair/verify`, `mode` can be set to `live`.

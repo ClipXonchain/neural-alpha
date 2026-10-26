@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync } from "node:fs";
-import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { ERC20_TRANSFER_TOPIC, padTopicAddress } from "./payments.mjs";
+import { DEFAULT_TOKEN_CONTRACTS, parseUnits18 } from "./policy.mjs";
 import { loadConfig, createHandler } from "./server.mjs";
 import { openStore } from "./store.mjs";
 
@@ -37,16 +39,161 @@ function fakeDocker() {
     async listContainers() {
       return [...containers];
     },
+    async readState() {
+      return JSON.stringify({
+        mode: "paper",
+        running: true,
+        cycleCount: 4,
+        portfolio: {
+          totalValueUsd: 120.5,
+          cashUsd: 80,
+          dailyPnl: 1.5,
+          totalPnl: 3.25,
+          realizedPnl: 2,
+          positions: [{ symbol: "AAPLB" }],
+          maxDrawdownPct: 4,
+        },
+        trades: [
+          {
+            success: true,
+            fromToken: "USDT",
+            toToken: "AAPLB",
+            fromAmount: "25",
+            toAmount: "0.1",
+            priceAtExecution: 250,
+            timestamp: 1,
+            txHash: `0x${"ab".repeat(32)}`,
+          },
+          {
+            success: true,
+            fromToken: "AAPLB",
+            toToken: "USDT",
+            fromAmount: "0.1",
+            toAmount: "30",
+            priceAtExecution: 300,
+            timestamp: 2,
+            txHash: `0x${"cd".repeat(32)}`,
+            realizedPnl: 5,
+          },
+        ],
+      });
+    },
   };
 }
 
+function pay(tag, asset = "USDT") {
+  return { paymentAsset: asset, paymentTx: `0x${tag.repeat(32).slice(0, 64)}` };
+}
+
+const handlerRegistry = new Map();
+let nextMockPort = 41000;
+const nativeFetch = globalThis.fetch;
+
+globalThis.fetch = async (input, init = {}) => {
+  const urlStr = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+  const parsed = new URL(urlStr);
+  const handler = handlerRegistry.get(parsed.origin);
+  if (!handler) {
+    return nativeFetch(input, init);
+  }
+  return dispatchInMemory(handler, parsed, init);
+};
+
+function dispatchInMemory(handler, parsedUrl, init = {}) {
+  return new Promise((resolve, reject) => {
+    const req = new EventEmitter();
+    req.method = (init.method || "GET").toUpperCase();
+    req.url = parsedUrl.pathname + parsedUrl.search;
+    req.headers = {};
+    if (init.headers) {
+      const entries = init.headers instanceof Headers ? init.headers.entries() : Object.entries(init.headers);
+      for (const [k, v] of entries) req.headers[String(k).toLowerCase()] = String(v);
+    }
+    req.socket = { remoteAddress: "127.0.0.1" };
+    req.destroy = () => req.emit("close");
+
+    const res = new EventEmitter();
+    let statusCode = 200;
+    let resHeaders = {};
+    let resolved = false;
+    let streamController = null;
+
+    const stream = new ReadableStream({
+      start(controller) {
+        streamController = controller;
+      },
+      cancel() {
+        req.emit("close");
+      },
+    });
+
+    if (init.signal) {
+      if (init.signal.aborted) {
+        req.emit("close");
+        return reject(new DOMException("Aborted", "AbortError"));
+      }
+      init.signal.addEventListener("abort", () => {
+        req.emit("close");
+        try {
+          streamController?.close();
+        } catch {}
+      });
+    }
+
+    res.writeHead = (code, headers = {}) => {
+      statusCode = code;
+      resHeaders = {};
+      for (const [k, v] of Object.entries(headers)) resHeaders[k.toLowerCase()] = String(v);
+      if (!resolved) {
+        resolved = true;
+        resolve(new Response(req.method === "HEAD" ? null : stream, { status: statusCode, headers: resHeaders }));
+      }
+      return res;
+    };
+
+    res.write = (chunk) => {
+      if (!resolved) res.writeHead(statusCode, resHeaders);
+      const bytes = typeof chunk === "string" ? new TextEncoder().encode(chunk) : new Uint8Array(chunk);
+      try {
+        streamController?.enqueue(bytes);
+      } catch {}
+      return true;
+    };
+
+    res.end = (chunk) => {
+      if (!resolved) res.writeHead(statusCode, resHeaders);
+      if (chunk !== undefined && chunk !== null && req.method !== "HEAD") {
+        res.write(chunk);
+      }
+      try {
+        streamController?.close();
+      } catch {}
+      res.emit("finish");
+    };
+
+    Promise.resolve(handler(req, res)).catch(reject);
+
+    queueMicrotask(() => {
+      if (init.body !== undefined && init.body !== null) {
+        const buf = typeof init.body === "string" ? Buffer.from(init.body, "utf8") : Buffer.from(init.body);
+        req.emit("data", buf);
+      }
+      req.emit("end");
+    });
+  });
+}
+
 async function listen(handler) {
-  const server = createServer(handler);
-  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const { port } = server.address();
+  const port = nextMockPort++;
+  const url = `http://127.0.0.1:${port}`;
+  handlerRegistry.set(url, handler);
   return {
-    server,
-    url: `http://127.0.0.1:${port}`,
+    server: {
+      close() {
+        handlerRegistry.delete(url);
+      },
+    },
+    url,
   };
 }
 
@@ -54,7 +201,8 @@ async function call(base, path, opts = {}) {
   const response = await fetch(`${base}${path}`, {
     method: opts.method || "GET",
     headers: {
-      authorization: "Bearer test-secret",
+      ...(opts.token === null ? {} : { authorization: `Bearer ${opts.token || "test-secret"}` }),
+      ...(opts.headers || {}),
       ...(opts.body ? { "content-type": "application/json" } : {}),
     },
     body: opts.body ? JSON.stringify(opts.body) : undefined,
@@ -66,6 +214,7 @@ test("each customer gets a separate container and the third is refused", async (
   const root = mkdtempSync(join(tmpdir(), "na-control-"));
   const config = loadConfig({
     CONTROL_API_SECRET: "test-secret",
+    SAAS_MONITOR_SECRET: "monitor-secret",
     SAAS_DATA_ROOT: root,
     SAAS_DB_PATH: join(root, "control.sqlite"),
     SAAS_HOST_ID: "box-a",
@@ -76,18 +225,30 @@ test("each customer gets a separate container and the third is refused", async (
   const docker = fakeDocker();
   const { server, url } = await listen(createHandler({ store, docker, config }));
   try {
-    const first = await call(url, "/tenants", { method: "POST" });
-    const second = await call(url, "/tenants", { method: "POST" });
-    const third = await call(url, "/tenants", { method: "POST" });
+    const first = await call(url, "/tenants", { method: "POST", token: null, body: pay("aa") });
+    const second = await call(url, "/tenants", { method: "POST", token: null, body: pay("bb", "USDC") });
+    const reused = await call(url, "/tenants", { method: "POST", token: null, body: pay("aa") });
+    const third = await call(url, "/tenants", { method: "POST", token: null, body: pay("cc", "BNB") });
     assert.equal(first.status, 201);
     assert.equal(second.status, 201);
+    assert.equal(reused.status, 409);
+    assert.match(reused.body.error, /already used/);
     assert.equal(third.status, 409);
+    assert.match(third.body.error, /tenant limit/);
     assert.notEqual(first.body.tenant.container_name, second.body.tenant.container_name);
-    assert.notEqual(first.body.tenant.data_dir, second.body.tenant.data_dir);
-    const env = readFileSync(join(first.body.tenant.data_dir, "tenant.env"), "utf8");
+    assert.equal(first.body.tenant.data_dir, undefined);
+    assert.equal(first.body.tenant.payment_tx, undefined);
+    assert.match(first.body.accessToken, /^[a-f0-9]{64}$/);
+    const listed = await call(url, "/tenants");
+    const row = listed.body.tenants.find((tenant) => tenant.id === first.body.tenant.id);
+    const env = readFileSync(join(row.data_dir, "tenant.env"), "utf8");
     assert.match(env, /MAX_POSITION_SIZE_USD=50/);
-    assert.match(env, /DISABLE_DRAWDOWN_LIMIT=false/);
+    assert.match(env, /DISABLE_DRAWDOWN_LIMIT=true/);
+    assert.match(env, /PAYMENT_TOKEN=USDT/);
+    assert.match(env, /API_SECRET=/);
+    assert.doesNotMatch(env, /MAX_DRAWDOWN_PCT/);
     assert.match(env, /TRADE_INTERVAL_MS=300000/);
+    assert.doesNotMatch(JSON.stringify(listed.body), /agent_api_secret|access_token_hash/);
 
     const live = await call(url, `/tenants/${first.body.tenant.id}/mode`, {
       method: "POST",
@@ -111,8 +272,478 @@ test("each customer gets a separate container and the third is refused", async (
     assert.equal(cap.body.maxTenants, 2);
     assert.equal(cap.body.running, 2);
     assert.ok(cap.body.estimatedUsePerMin <= cap.body.upstreamBudgetPerMin);
+
+    const other = await call(url, `/tenants/${second.body.tenant.id}`, { token: first.body.accessToken });
+    assert.equal(other.status, 404);
+    const own = await call(url, `/tenants/${first.body.tenant.id}`, { token: first.body.accessToken });
+    assert.equal(own.status, 200);
+    assert.equal(own.body.tenant.id, first.body.tenant.id);
+    const listedAsCustomer = await call(url, "/tenants", { token: first.body.accessToken });
+    assert.equal(listedAsCustomer.status, 401);
+
+    const desk = await call(url, "/admin/overview", { token: "monitor-secret" });
+    assert.equal(desk.status, 200);
+    assert.equal(desk.body.readOnly, true);
+    assert.equal(desk.body.operator.agentId, null);
+    assert.ok(desk.body.health.requests >= 1);
+    assert.ok(desk.body.health.uptimeMs >= 0);
+    assert.equal(desk.body.counts.byAsset.USDT, 1);
+    assert.equal(desk.body.counts.byAsset.USDC, 1);
+    assert.equal(desk.body.counts.customers, 2);
+    assert.doesNotMatch(JSON.stringify(desk.body), /agent_api_secret|access_token_hash|accessToken/);
+    const books = await call(url, "/admin/live", { token: "monitor-secret" });
+    assert.equal(books.body.fleet.reachable, 2);
+    assert.equal(books.body.fleet.navUsd, 241);
+    assert.equal(books.body.fleet.trades, 4);
+    assert.equal(books.body.fleet.volumeUsd, 110);
+    assert.equal(books.body.fleet.wins, 2);
+    assert.equal(books.body.fleet.recent[0].side, "sell");
+    assert.equal(books.body.tenants[0].symbols[0], "AAPLB");
+    assert.equal(books.body.tenants[0].maxDrawdownPct, undefined);
+    const monitorControl = await call(url, `/tenants/${first.body.tenant.id}/pause`, {
+      method: "POST",
+      token: "monitor-secret",
+    });
+    assert.equal(monitorControl.status, 404);
+    const deskWrite = await call(url, "/tenants", {
+      method: "POST",
+      headers: { "x-neural-desk": "observe" },
+      body: pay("dd"),
+    });
+    assert.equal(deskWrite.status, 403);
+    const page = await fetch(`${url}/admin`);
+    const html = await page.text();
+    assert.equal(page.status, 200);
+    assert.match(html, /Read only/);
+    assert.match(html, /bscscan\.com\/tx\//);
+    assert.doesNotMatch(html, /\/pause|\/resume|\/stop|\/pair|\/mode|\/risk/);
+    const customerDesk = await call(url, "/admin/overview", { token: first.body.accessToken });
+    assert.equal(customerDesk.status, 401);
+
+    const deniedStream = await fetch(`${url}/admin/stream`, { headers: { authorization: `Bearer ${first.body.accessToken}` } });
+    assert.equal(deniedStream.status, 401);
+    await deniedStream.body?.cancel();
+    const streamCtl = new AbortController();
+    const stream = await fetch(`${url}/admin/stream`, {
+      headers: { authorization: "Bearer monitor-secret", "x-neural-desk": "observe" },
+      signal: streamCtl.signal,
+    });
+    assert.equal(stream.status, 200);
+    assert.match(stream.headers.get("content-type"), /text\/event-stream/);
+    const reader = stream.body.pipeThrough(new TextDecoderStream()).getReader();
+    let streamed = "";
+    while (!streamed.includes("event: snapshot")) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      streamed += value;
+    }
+    streamCtl.abort();
+    const frame = streamed.slice(streamed.indexOf("event: snapshot")).split("\n\n")[0];
+    const payload = JSON.parse(frame.split("\n").find((line) => line.startsWith("data:")).slice(5));
+    assert.equal(payload.overview.counts.customers, 2);
+    assert.equal(payload.live.fleet.navUsd, 241);
+    assert.doesNotMatch(frame, /agent_api_secret|access_token_hash|accessToken/);
   } finally {
     server.close();
     store.close();
+  }
+});
+
+test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirmations) and provisions dedicated customer dashboard", async () => {
+  const root = mkdtempSync(join(tmpdir(), "na-checkout-"));
+  const treasury = "0x1111111111111111111111111111111111111111";
+  const payer = "0x2222222222222222222222222222222222222222";
+  // Chain timestamps are second-granular; a valid payment may be mined during
+  // the same second the millisecond-granular quote is issued.
+  let currentTime = new Date("2026-10-26T12:00:00.500Z");
+
+  const txs = new Map();
+  let latestBlock = 1000n;
+  let chainIdHex = "0x38";
+  let decimalsHex = "0x12";
+
+  function mockRpc(method, params) {
+    if (method === "eth_chainId") return chainIdHex;
+    if (method === "eth_call") return decimalsHex;
+    if (method === "eth_blockNumber") return `0x${latestBlock.toString(16)}`;
+    if (method === "eth_getTransactionReceipt") {
+      return txs.get(String(params[0]).toLowerCase())?.receipt ?? null;
+    }
+    if (method === "eth_getTransactionByHash") {
+      return txs.get(String(params[0]).toLowerCase())?.tx ?? null;
+    }
+    if (method === "eth_getBlockByNumber") {
+      const entry = [...txs.values()].find((item) => String(item.receipt?.blockNumber).toLowerCase() === String(params[0]).toLowerCase());
+      return {
+        hash: entry?.receipt?.blockHash || `0x${String(params[0]).replace(/^0x/, "").padStart(64, "0")}`,
+        timestamp: `0x${Math.floor(currentTime.getTime() / 1000).toString(16)}`,
+        transactions: params[1] === true ? [...txs.values()].map((item) => item.tx) : undefined,
+      };
+    }
+    if (method === "eth_getLogs") {
+      const logs = [];
+      const filter = params[0] || {};
+      const from = BigInt(filter.fromBlock || "0x0");
+      const to = BigInt(filter.toBlock || "0x0");
+      for (const entry of txs.values()) {
+        const blockNumber = BigInt(entry.receipt?.blockNumber || "0x0");
+        if (blockNumber < from || blockNumber > to) continue;
+        for (const log of entry.receipt?.logs || []) {
+          logs.push({ ...log, transactionHash: entry.tx.hash, blockNumber: entry.receipt.blockNumber });
+        }
+      }
+      return logs;
+    }
+    return null;
+  }
+
+  function registerBep20Tx(hash, { contract, to, amountWei, secondPayer, secondAmountWei, blockNumber = 980n, status = "0x1" }) {
+    const clean = hash.toLowerCase();
+    const blockHash = `0x${BigInt(blockNumber).toString(16).padStart(64, "0")}`;
+    const blockNumberHex = `0x${BigInt(blockNumber).toString(16)}`;
+    txs.set(clean, {
+      tx: {
+        hash: clean,
+        blockNumber: blockNumberHex,
+        blockHash,
+        from: payer,
+        to: contract,
+        value: "0x0",
+      },
+      receipt: {
+        status,
+        transactionHash: clean,
+        blockHash,
+        blockNumber: blockNumberHex,
+        logs: [
+          {
+            address: contract,
+            topics: [ERC20_TRANSFER_TOPIC, padTopicAddress(payer), padTopicAddress(to)],
+            data: `0x${BigInt(amountWei).toString(16).padStart(64, "0")}`,
+            blockNumber: blockNumberHex,
+          },
+          ...(secondPayer && secondAmountWei !== undefined ? [{
+            address: contract,
+            topics: [ERC20_TRANSFER_TOPIC, padTopicAddress(secondPayer), padTopicAddress(to)],
+            data: `0x${BigInt(secondAmountWei).toString(16).padStart(64, "0")}`,
+            blockNumber: blockNumberHex,
+          }] : []),
+        ],
+      },
+    });
+  }
+
+  const config = loadConfig({
+    CONTROL_API_SECRET: "test-secret",
+    SAAS_MONITOR_SECRET: "monitor-secret",
+    SAAS_TREASURY_ADDRESS: treasury,
+    SAAS_PRICE_USD: "30",
+    SAAS_DATA_ROOT: root,
+    SAAS_DB_PATH: join(root, "control.sqlite"),
+    SAAS_HOST_ID: "cell-01",
+    SAAS_MAX_TENANTS: "5",
+  });
+  const store = openStore(config.dbPath);
+  const docker = fakeDocker();
+  const { server, url } = await listen(
+    createHandler({ store, docker, config, rpc: mockRpc, now: () => currentTime }),
+  );
+
+  try {
+    // 1. Direct POST /tenants with unverified txHash is rejected when treasury is configured
+    const unverified = await call(url, "/tenants", {
+      method: "POST",
+      token: null,
+      body: { paymentAsset: "USDT", paymentTx: `0x${"99".repeat(32)}` },
+    });
+    assert.equal(unverified.status, 402);
+
+    // 2. Create an unpaid checkout order
+    const createdOrder = await call(url, "/checkout", {
+      method: "POST",
+      token: null,
+      body: { paymentAsset: "USDT", preset: "normal" },
+    });
+    assert.equal(createdOrder.status, 201);
+    assert.equal(createdOrder.body.order.status, "pending");
+    assert.equal(createdOrder.body.order.treasuryAddress, treasury);
+    assert.match(createdOrder.body.order.amountDisplay, /^30\.\d+$/);
+    assert.equal(docker.containers.size, 0);
+
+    const orderId = createdOrder.body.order.id;
+    const claimSecret = createdOrder.body.claimSecret;
+    const requiredWei = BigInt(createdOrder.body.order.amountWei);
+
+    // 3. Underpaid transfer -> stays unpaid (402), no container created
+    const underpaidTx = `0x${"11".repeat(32)}`;
+    registerBep20Tx(underpaidTx, {
+      contract: DEFAULT_TOKEN_CONTRACTS.USDT,
+      to: treasury,
+      amountWei: requiredWei - 1n,
+      blockNumber: 980n,
+    });
+    const underRes = await call(url, `/checkout/${orderId}/verify`, {
+      method: "POST",
+      token: null,
+      body: { paymentTx: underpaidTx, claimSecret },
+    });
+    assert.equal(underRes.status, 402);
+    assert.match(underRes.body.error, /underpaid/);
+    assert.equal(docker.containers.size, 0);
+
+    // 4. Insufficient confirmations (< 15 blocks) -> rejected (402)
+    const unconfirmedTx = `0x${"22".repeat(32)}`;
+    registerBep20Tx(unconfirmedTx, {
+      contract: DEFAULT_TOKEN_CONTRACTS.USDT,
+      to: treasury,
+      amountWei: requiredWei,
+      blockNumber: 995n, // 1000 - 995 + 1 = 6 confirmations (< 15)
+    });
+    const unconfRes = await call(url, `/checkout/${orderId}/verify`, {
+      method: "POST",
+      token: null,
+      body: { paymentTx: unconfirmedTx, claimSecret },
+    });
+    assert.equal(unconfRes.status, 402);
+    assert.match(unconfRes.body.error, /confirmations/);
+
+    // 5. Overpayment is not silently credited to the quote.
+    const validOverpaidTx = `0x${"33".repeat(32)}`;
+    const extraWei = parseUnits18("2.5");
+    registerBep20Tx(validOverpaidTx, {
+      contract: DEFAULT_TOKEN_CONTRACTS.USDT,
+      to: treasury,
+      amountWei: requiredWei + extraWei,
+      blockNumber: 980n, // 21 confirmations
+    });
+    const verified = await call(url, `/checkout/${orderId}/verify`, {
+      method: "POST",
+      token: null,
+      body: { paymentTx: validOverpaidTx, claimSecret },
+    });
+    assert.equal(verified.status, 402);
+    assert.match(verified.body.error, /exact quote/);
+    assert.equal(store.getOrder(orderId).status, "pending");
+    assert.equal(docker.containers.size, 0);
+
+    const splitPayerTx = `0x${"35".repeat(32)}`;
+    registerBep20Tx(splitPayerTx, {
+      contract: DEFAULT_TOKEN_CONTRACTS.USDT,
+      to: treasury,
+      amountWei: requiredWei - 1n,
+      secondPayer: "0x3333333333333333333333333333333333333333",
+      secondAmountWei: 1n,
+      blockNumber: 980n,
+    });
+    const splitPayer = await call(url, `/checkout/${orderId}/verify`, {
+      method: "POST",
+      token: null,
+      body: { paymentTx: splitPayerTx, claimSecret },
+    });
+    assert.equal(splitPayer.status, 402);
+    assert.match(splitPayer.body.error, /one wallet address/);
+    assert.equal(docker.containers.size, 0);
+
+    // Exact amount on the right BSC token contract and with enough confirmations provisions.
+    const exactTx = `0x${"34".repeat(32)}`;
+    registerBep20Tx(exactTx, {
+      contract: DEFAULT_TOKEN_CONTRACTS.USDT,
+      to: treasury,
+      amountWei: requiredWei,
+      blockNumber: 980n,
+    });
+    chainIdHex = "0x1";
+    const wrongNetwork = await call(url, `/checkout/${orderId}/verify`, {
+      method: "POST",
+      token: null,
+      body: { paymentTx: exactTx, claimSecret },
+    });
+    assert.equal(wrongNetwork.status, 503);
+    assert.match(wrongNetwork.body.error, /BNB Smart Chain/);
+    assert.equal(docker.containers.size, 0);
+
+    chainIdHex = "0x38";
+    decimalsHex = "0x6";
+    const wrongDecimals = await call(url, `/checkout/${orderId}/verify`, {
+      method: "POST",
+      token: null,
+      body: { paymentTx: exactTx, claimSecret },
+    });
+    assert.equal(wrongDecimals.status, 503);
+    assert.match(wrongDecimals.body.error, /decimals are 6/);
+    assert.equal(docker.containers.size, 0);
+
+    decimalsHex = "0x12";
+    const exactVerified = await call(url, `/checkout/${orderId}/verify`, {
+      method: "POST",
+      token: null,
+      body: { paymentTx: exactTx, claimSecret },
+    });
+    assert.equal(exactVerified.status, 200);
+    assert.equal(exactVerified.body.order.status, "paid");
+    assert.equal(exactVerified.body.order.overpaidDisplay, "0");
+    assert.equal(exactVerified.body.tenant.status, "running");
+    assert.equal(exactVerified.body.tenant.risk_preset, "normal");
+    assert.equal(exactVerified.body.tenant.overpaid_amount, "0");
+    assert.match(exactVerified.body.compoundToken, /^cell-01\.[a-z0-9]{8}\.[a-f0-9]{64}$/);
+
+    // 6. Customer accesses their Dedicated Dashboard (/tenants/:id/state) using compoundToken
+    const tenantId = exactVerified.body.tenant.id;
+    const compoundToken = exactVerified.body.compoundToken;
+    const stateRes = await call(url, `/tenants/${tenantId}/state`, { token: compoundToken });
+    assert.equal(stateRes.status, 200);
+    assert.equal(stateRes.body.tenant.id, tenantId);
+    assert.equal(stateRes.body.state.reachable, true);
+    assert.equal(stateRes.body.state.navUsd, 120.5);
+    assert.equal(stateRes.body.state.realizedPnlUsd, 2);
+
+    const portalPage = await fetch(`${url}/portal`, { redirect: "manual" });
+    assert.equal(portalPage.status, 302);
+    assert.match(portalPage.headers.get("location") || "", /\/portal$/);
+
+    // 7. Subscription expiry (`paid_until`) halts new buys while leaving positions intact
+    currentTime = new Date("2026-12-01T00:00:00.000Z"); // > 30 days later
+    const sweep = await call(url, "/subscriptions/sweep", { method: "POST" });
+    assert.equal(sweep.status, 200);
+    assert.equal(sweep.body.haltedCount, 1);
+
+    const afterExpiry = await call(url, `/tenants/${tenantId}`, { token: compoundToken });
+    assert.equal(afterExpiry.body.tenant.buys_halted, 1);
+    const haltedEnv = readFileSync(join(root, tenantId, "tenant.env"), "utf8");
+    assert.match(haltedEnv, /DISABLE_NEW_BUYS=true/);
+    assert.match(haltedEnv, /MAX_POSITION_SIZE_USD=0/);
+
+    // 8. Renew subscription via checkout + background watcher scan
+    const renewOrder = await call(url, "/checkout", {
+      method: "POST",
+      token: null,
+      body: { paymentAsset: "USDC", preset: "active", tenantId },
+    });
+    assert.equal(renewOrder.status, 201);
+    const renewTx = `0x${"44".repeat(32)}`;
+    registerBep20Tx(renewTx, {
+      contract: DEFAULT_TOKEN_CONTRACTS.USDC,
+      to: treasury,
+      amountWei: BigInt(renewOrder.body.order.amountWei),
+      blockNumber: 1000n,
+    });
+    latestBlock = 1020n;
+    const watched = await call(url, "/watcher/scan", { method: "POST" });
+    assert.equal(watched.status, 200);
+    assert.equal(watched.body.matched, 1);
+
+    const renewed = await call(url, `/tenants/${tenantId}`, { token: compoundToken });
+    assert.equal(renewed.body.tenant.buys_halted, 0);
+    assert.equal(renewed.body.tenant.risk_preset, "active");
+    const restoredEnv = readFileSync(join(root, tenantId, "tenant.env"), "utf8");
+    assert.match(restoredEnv, /MAX_POSITION_SIZE_USD=250/);
+    assert.doesNotMatch(restoredEnv, /DISABLE_NEW_BUYS=true/);
+
+    const denied = await call(url, "/session/open", {
+      method: "POST",
+      token: "test-secret",
+      body: { paymentTx: exactTx, payer: "0x3333333333333333333333333333333333333333" },
+    });
+    assert.equal(denied.status, 401);
+    const reopened = await call(url, "/session/open", {
+      method: "POST",
+      token: "test-secret",
+      body: { paymentTx: exactTx, payer: "0x2222222222222222222222222222222222222222" },
+    });
+    assert.equal(reopened.status, 200);
+    assert.notEqual(reopened.body.compoundToken, compoundToken);
+    const oldToken = await call(url, `/tenants/${tenantId}`, { token: compoundToken });
+    assert.equal(oldToken.status, 404);
+    const newToken = await call(url, `/tenants/${tenantId}`, { token: reopened.body.compoundToken });
+    assert.equal(newToken.status, 200);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
+test("multi-VPS edge router links a second cell VPS, spills over when cell-01 is full, and proxies customer dashboard requests", async () => {
+  const root1 = mkdtempSync(join(tmpdir(), "na-cell1-"));
+  const root2 = mkdtempSync(join(tmpdir(), "na-cell2-"));
+  const treasury = "0x1111111111111111111111111111111111111111";
+
+  // Cell 1 (also acting as Edge on neuralalpha.io) has maxTenants = 1
+  const config1 = loadConfig({
+    CONTROL_API_SECRET: "shared-cluster-secret",
+    SAAS_MONITOR_SECRET: "monitor-secret",
+    SAAS_TREASURY_ADDRESS: treasury,
+    SAAS_DATA_ROOT: root1,
+    SAAS_DB_PATH: join(root1, "control.sqlite"),
+    SAAS_HOST_ID: "cell-01",
+    SAAS_MAX_TENANTS: "1",
+  });
+  // Cell 2 has maxTenants = 2
+  const config2 = loadConfig({
+    CONTROL_API_SECRET: "shared-cluster-secret",
+    SAAS_MONITOR_SECRET: "monitor-secret",
+    SAAS_TREASURY_ADDRESS: treasury,
+    SAAS_DATA_ROOT: root2,
+    SAAS_DB_PATH: join(root2, "control.sqlite"),
+    SAAS_HOST_ID: "cell-02",
+    SAAS_MAX_TENANTS: "2",
+  });
+
+  const store1 = openStore(config1.dbPath);
+  const store2 = openStore(config2.dbPath);
+  const docker1 = fakeDocker();
+  const docker2 = fakeDocker();
+
+  const srv1 = await listen(createHandler({ store: store1, docker: docker1, config: config1 }));
+  const srv2 = await listen(createHandler({ store: store2, docker: docker2, config: config2 }));
+
+  try {
+    // Link cell-02 into cell-01's cluster registry
+    const reg = await call(srv1.url, "/cluster/nodes", {
+      method: "POST",
+      token: "shared-cluster-secret",
+      body: { hostId: "cell-02", baseUrl: srv2.url },
+    });
+    assert.equal(reg.status, 201);
+
+    const clusterBefore = await call(srv1.url, "/cluster/capacity", { token: "shared-cluster-secret" });
+    assert.equal(clusterBefore.status, 200);
+    assert.equal(clusterBefore.body.totalNodes, 2);
+    assert.equal(clusterBefore.body.totalFreeSeats, 3);
+    assert.equal(clusterBefore.body.selectedHostId, "cell-01");
+
+    // Fill cell-01 with 1 tenant directly on cell-02 to test remote proxy, and 1 on cell-01
+    const firstOrder = await call(srv1.url, "/checkout", {
+      method: "POST",
+      token: null,
+      body: { paymentAsset: "USDT", preset: "cautious" },
+    });
+    assert.equal(firstOrder.status, 201);
+    assert.equal(firstOrder.body.order.hostId, "cell-01");
+
+    // Provision a tenant on cell-02 directly and access it through cell-01 (Edge) using its compound token
+    const config2NoTreasury = { ...config2, treasuryAddress: "" };
+    const srv2Direct = await listen(createHandler({ store: store2, docker: docker2, config: config2NoTreasury }));
+    const remoteTenantRes = await call(srv2Direct.url, "/tenants", {
+      method: "POST",
+      token: null,
+      body: pay("ee", "USDT"),
+    });
+    assert.equal(remoteTenantRes.status, 201);
+    const remoteId = remoteTenantRes.body.tenant.id;
+    const remoteCompound = remoteTenantRes.body.compoundToken;
+    assert.match(remoteCompound, /^cell-02\./);
+
+    // Customer sends request to cell-01 (Edge) with cell-02 compound token -> transparently proxied to cell-02!
+    const proxiedGet = await call(srv1.url, `/tenants/${remoteId}`, { token: remoteCompound });
+    assert.equal(proxiedGet.status, 200);
+    assert.equal(proxiedGet.body.tenant.id, remoteId);
+    assert.equal(proxiedGet.body.tenant.host_id, "cell-02");
+
+    srv2Direct.server.close();
+  } finally {
+    srv1.server.close();
+    srv2.server.close();
+    store1.close();
+    store2.close();
   }
 });

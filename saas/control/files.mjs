@@ -17,23 +17,28 @@ export function writeTenantFiles(dir, spec) {
 }
 
 export function renderEnv(spec) {
+  const halted = Boolean(spec.buysHalted);
+  const minBuyIntervalMs = halted ? 315_360_000_000 : spec.risk.minBuyIntervalMs;
+  const maxPositionUsd = halted ? 0 : spec.risk.maxPositionUsd;
+  const maxTradeUsd = halted ? 0 : spec.risk.maxTradeUsd;
   const lines = [
     `AGENT_MODE=${spec.agentMode}`,
-    "PAYMENT_TOKEN=USDT",
     "BRIDGE_MODE=auto",
     "DASHBOARD_PORT=3847",
     "SQLITE_PATH=/data/book/neural-alpha.sqlite",
     "EXTERNAL_FLOWS_FILE=/data/book/external-flows.json",
     `TRADE_INTERVAL_MS=${spec.intervalMs}`,
-    `MIN_BUY_INTERVAL_MS=${spec.risk.minBuyIntervalMs}`,
-    `MAX_POSITION_SIZE_USD=${spec.risk.maxPositionUsd}`,
-    `MAX_DRAWDOWN_PCT=${spec.risk.maxDrawdownPct}`,
-    `HACKATHON_MAX_TRADE_USD=${spec.risk.maxTradeUsd}`,
-    "DISABLE_DRAWDOWN_LIMIT=false",
+    `PAYMENT_TOKEN=${spec.paymentAsset}`,
+    `MIN_BUY_INTERVAL_MS=${minBuyIntervalMs}`,
+    `MAX_POSITION_SIZE_USD=${maxPositionUsd}`,
+    `HACKATHON_MAX_TRADE_USD=${maxTradeUsd}`,
+    "DISABLE_DRAWDOWN_LIMIT=true",
+    `API_SECRET=${spec.apiSecret}`,
     "BINANCE_MARKET_CONCURRENCY=2",
     "BINANCE_KLINE_CONCURRENCY=2",
     `SAAS_START_DELAY_SEC=${spec.staggerSec}`,
   ];
+  if (halted) lines.push("DISABLE_NEW_BUYS=true");
   if (spec.databaseUrl) lines.push(`DATABASE_URL=${spec.databaseUrl}`);
   return `${lines.join("\n")}\n`;
 }
@@ -41,6 +46,10 @@ export function renderEnv(spec) {
 export function renderOverride(spec) {
   const path = spec.dataDir;
   if (path.includes("\n") || path.includes('"')) throw new Error("tenant path cannot be quoted safely");
+  const halted = Boolean(spec.buysHalted);
+  const minBuyIntervalMs = halted ? 315_360_000_000 : spec.risk.minBuyIntervalMs;
+  const maxPositionUsd = halted ? 0 : spec.risk.maxPositionUsd;
+  const maxTradeUsd = halted ? 0 : spec.risk.maxTradeUsd;
   return `services:
   worker:
     container_name: ${spec.containerName}
@@ -50,17 +59,17 @@ export function renderOverride(spec) {
       AGENT_MODE: "${spec.agentMode}"
       HOME: /data/home
       DASHBOARD_PORT: "3847"
+      PAYMENT_TOKEN: "${spec.paymentAsset}"
       SAAS_START_DELAY_SEC: "${spec.staggerSec}"
       TRADE_INTERVAL_MS: "${spec.intervalMs}"
-      MIN_BUY_INTERVAL_MS: "${spec.risk.minBuyIntervalMs}"
-      MAX_POSITION_SIZE_USD: "${spec.risk.maxPositionUsd}"
-      MAX_DRAWDOWN_PCT: "${spec.risk.maxDrawdownPct}"
-      HACKATHON_MAX_TRADE_USD: "${spec.risk.maxTradeUsd}"
-      DISABLE_DRAWDOWN_LIMIT: "false"
+      MIN_BUY_INTERVAL_MS: "${minBuyIntervalMs}"
+      MAX_POSITION_SIZE_USD: "${maxPositionUsd}"
+      HACKATHON_MAX_TRADE_USD: "${maxTradeUsd}"
+      DISABLE_DRAWDOWN_LIMIT: "true"
+      DISABLE_NEW_BUYS: "${halted ? "true" : "false"}"
+      API_SECRET: "${spec.apiSecret}"
       BINANCE_MARKET_CONCURRENCY: "2"
       BINANCE_KLINE_CONCURRENCY: "2"
-    networks:
-      - neural-saas
     restart: unless-stopped
 `;
 }

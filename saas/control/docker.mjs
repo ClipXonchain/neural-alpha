@@ -1,5 +1,8 @@
 import { spawn } from "node:child_process";
 
+const AGENT_STATE_SCRIPT =
+  'fetch("http://127.0.0.1:3847/api/state").then(async (r)=>{if(!r.ok)throw new Error(String(r.status));process.stdout.write(await r.text())}).catch((e)=>{process.stderr.write(String(e));process.exit(1)})';
+
 export function runCommand(command, args, opts = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(command, args, { cwd: opts.cwd, stdio: ["ignore", "pipe", "pipe"] });
@@ -91,6 +94,13 @@ export function createDocker({ repoRoot, composeFile, run = runCommand }) {
       const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
       const address = data?.address || data?.walletAddress || "";
       return typeof address === "string" ? address : "";
+    },
+    async readState(container) {
+      if (!/^na-[a-z0-9]{8}$/.test(container)) throw new Error("container name is invalid");
+      const { stdout } = await run("docker", ["exec", container, "node", "-e", AGENT_STATE_SCRIPT], {
+        timeoutMs: 8_000,
+      });
+      return stdout;
     },
     async listContainers() {
       const { stdout } = await run("docker", ["ps", "-a", "--format", "{{.Names}}"]);

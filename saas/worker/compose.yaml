@@ -8,9 +8,6 @@ services:
     build:
       context: ../..
       dockerfile: saas/worker/Dockerfile
-    networks:
-      - neural-saas
-
   bridge:
     image: neural-saas-bridge:local
     build:
@@ -20,8 +17,3 @@ services:
     depends_on:
       - worker
     restart: unless-stopped
-
-networks:
-  neural-saas:
-    external: true
-    name: neural-saas
