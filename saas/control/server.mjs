@@ -153,6 +153,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
     localCapacity: () => capacity(store, docker, config),
     fetchImpl,
   });
+  const pairings = new Map();
   const watcher = createTreasuryWatcher({
     store,
     config,
@@ -442,7 +443,9 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
       if (!tenant || !canAccess(actor, tenant.id)) return send(res, 404, { error: "not found" });
       const action = match[2] || "";
 
-      if (req.method === "GET" && action === "") return send(res, 200, { tenant: customerView(tenant) });
+      if (req.method === "GET" && action === "") {
+        return send(res, 200, { tenant: customerView(tenant), pairing: publicPairing(pairings.get(tenant.id)) });
+      }
       if (req.method === "GET" && action === "/state") {
         const state = await readDesk(docker, tenant);
         return send(res, 200, { tenant: customerView(tenant), state });
@@ -482,13 +485,22 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
         return send(res, 200, { tenant: customerView(store.update(updated.id, { status, updated_at: now().toISOString() })) });
       }
       if (req.method === "POST" && action === "/pair/start") {
-        if (tenant.status !== "running") return send(res, 409, { error: "tenant container is not running" });
-        const payload = await docker.signin(tenant.container_name);
+        let current = tenant;
+        if (current.status === "paused") {
+          await docker.start(dockerTarget(current));
+          current = store.update(current.id, { status: "running", updated_at: now().toISOString() });
+        }
+        if (current.status !== "running") return send(res, 409, { error: "tenant container is not running" });
+        const payload = await docker.signin(current.container_name);
         const data = payload?.data && typeof payload.data === "object" ? payload.data : payload;
+        const qrCodeId = String(data.qrCodeId || "");
+        const urlForWeb = data.urlForWeb || data.url || data.qrCodeUrl || data.deepLink || "";
+        if (QR_RE.test(qrCodeId)) beginPairWatch(pairings, { store, docker, config, now }, current, qrCodeId);
         return send(res, 200, {
-          qrCodeId: data.qrCodeId,
+          qrCodeId,
           pairingCode: data.pairingCode,
-          urlForWeb: data.urlForWeb || data.url || data.qrCodeUrl || data.deepLink || "",
+          urlForWeb,
+          listening: QR_RE.test(qrCodeId),
         });
       }
       if (req.method === "POST" && action === "/access-code") {
@@ -497,17 +509,21 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
       if (req.method === "POST" && action === "/pair/verify") {
         const body = await readJson(req);
         if (!QR_RE.test(body.qrCodeId || "")) return send(res, 400, { error: "qrCodeId is invalid" });
-        await docker.verify(tenant.container_name, body.qrCodeId);
-        const address = await docker.walletAddress(tenant.container_name);
-        if (tenant.wallet_address && address && tenant.wallet_address !== address) {
-          return send(res, 409, { error: "wallet address changed; refusing to replace it" });
+        const job = pairings.get(tenant.id);
+        if (job?.status === "waiting" && job.qrCodeId === body.qrCodeId) {
+          return send(res, 200, { listening: true, pairing: publicPairing(job) });
         }
-        return send(res, 200, {
-          tenant: customerView(store.update(tenant.id, {
-            wallet_address: address || tenant.wallet_address,
-            updated_at: now().toISOString(),
-          })),
-        });
+        let current = tenant;
+        if (current.status === "paused") {
+          await docker.start(dockerTarget(current));
+          current = store.update(current.id, { status: "running", updated_at: now().toISOString() });
+        }
+        if (current.status !== "running") return send(res, 409, { error: "tenant container is not running" });
+        await docker.verify(current.container_name, body.qrCodeId);
+        const address = await docker.walletAddress(current.container_name);
+        const updated = await connectPairedWallet({ store, docker, config, now }, current, address);
+        pairings.set(current.id, { status: "connected", qrCodeId: body.qrCodeId, error: "", address: updated.wallet_address });
+        return send(res, 200, { tenant: customerView(updated) });
       }
       return send(res, 404, { error: "not found" });
     } catch (err) {
@@ -1216,6 +1232,51 @@ function specFrom(row, risk, config) {
     // The shared Neon URL stays on the control server. A customer agent with
     // that URL would upsert the founder's public agent_state and trade rows.
   };
+}
+
+function publicPairing(job) {
+  if (!job) return null;
+  return { status: job.status || "", error: job.error || "" };
+}
+
+function beginPairWatch(pairings, ctx, tenant, qrCodeId) {
+  pairings.set(tenant.id, { status: "waiting", qrCodeId, error: "", address: "" });
+  void (async () => {
+    try {
+      await ctx.docker.verify(tenant.container_name, qrCodeId);
+      const address = await ctx.docker.walletAddress(tenant.container_name);
+      const fresh = ctx.store.get(tenant.id) || tenant;
+      const updated = await connectPairedWallet(ctx, fresh, address);
+      const current = pairings.get(tenant.id);
+      if (current && current.qrCodeId !== qrCodeId) return;
+      pairings.set(tenant.id, { status: "connected", qrCodeId, error: "", address: updated.wallet_address });
+    } catch (err) {
+      const current = pairings.get(tenant.id);
+      if (current && current.qrCodeId !== qrCodeId) return;
+      pairings.set(tenant.id, {
+        status: "failed",
+        qrCodeId,
+        error: err instanceof Error ? err.message : "Binance did not confirm",
+        address: "",
+      });
+    }
+  })();
+}
+
+async function connectPairedWallet({ store, docker, config, now }, tenant, address) {
+  if (!address) {
+    throw Object.assign(new Error("Binance did not connect a wallet. Scan the new code and approve it in the app while this page stays open."), { status: 409 });
+  }
+  if (tenant.wallet_address && tenant.wallet_address !== address) {
+    throw Object.assign(new Error("wallet address changed; refusing to replace it"), { status: 409 });
+  }
+  let updated = store.update(tenant.id, { wallet_address: address, updated_at: now().toISOString() });
+  if (updated.agent_mode !== "live") {
+    updated = applySpec(store, updated, { risk: riskFromRow(updated), agentMode: "live" }, config, now);
+    await docker.up(dockerTarget(updated));
+    updated = store.update(updated.id, { status: "running", updated_at: now().toISOString() });
+  }
+  return updated;
 }
 
 function dockerTarget(row) {

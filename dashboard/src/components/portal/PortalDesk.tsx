@@ -315,6 +315,7 @@ export function PortalDesk() {
   const [busy, setBusy] = useState("");
   const [pairCode, setPairCode] = useState("");
   const [pairUrl, setPairUrl] = useState("");
+  const [pairListening, setPairListening] = useState(false);
   const [qr, setQr] = useState("");
   const [icons, setIcons] = useState<Record<string, string>>({});
   const [bnbAmount, setBnbAmount] = useState(() => softwareFeeDisplay("BNB"));
@@ -384,6 +385,39 @@ export function PortalDesk() {
       stop = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (!qr || !pairListening) return;
+    let stop = false;
+    const poll = async () => {
+      try {
+        const live = await readJson(await fetch("/api/portal/session", { cache: "no-store" }));
+        if (stop) return;
+        if (live.tenant) setTenant(live.tenant);
+        if (live.state) setBook(live.state);
+        if (live.tenant?.wallet_address) {
+          setQr("");
+          setPairUrl("");
+          setPairCode("");
+          setPairListening(false);
+          setError("");
+          return;
+        }
+        if (live.pairing?.status === "failed") {
+          setPairListening(false);
+          setError(String(live.pairing.error || "Binance did not confirm. Refresh the QR and approve the new code while this page stays open."));
+        }
+      } catch {
+        /* the next poll retries while the QR stays on screen */
+      }
+    };
+    const id = window.setInterval(poll, 2000);
+    void poll();
+    return () => {
+      stop = true;
+      window.clearInterval(id);
+    };
+  }, [qr, pairListening]);
 
   useEffect(() => {
     const id = tenant?.risk_preset;
@@ -630,12 +664,23 @@ export function PortalDesk() {
         setPairCode(String(data.pairingCode || ""));
         setPairUrl(String(data.urlForWeb || data.url || ""));
         setQr(String(data.qrCodeId || ""));
-      } else {
-        if (op === "pair-verify") {
+        setPairListening(Boolean(data.listening));
+      } else if (op === "pair-verify") {
+        if (data.listening) {
+          setPairListening(true);
+        } else if (data.tenant?.wallet_address) {
           setPairCode("");
           setPairUrl("");
           setQr("");
+          setPairListening(false);
+          setTenant(data.tenant);
+          const live = await fetch("/api/portal/session").then(readJson);
+          setTenant(live.tenant || data.tenant);
+          setBook(live.state || null);
+        } else {
+          setError("Binance did not connect a wallet. Refresh the QR and approve it while this page stays open.");
         }
+      } else {
         const live = await fetch("/api/portal/session").then(readJson);
         setTenant(live.tenant || null);
         setBook(live.state || null);
@@ -687,20 +732,20 @@ export function PortalDesk() {
   const progressLabels = ["Plan", "Payment", "Activate"];
 
   return (
-    <div className="min-h-screen bg-[#080b0d] text-[#edf3f3] selection:bg-[#18cf7a]/30">
+    <div className={`${step === "agent" ? "lg:h-screen lg:overflow-hidden" : "min-h-screen"} bg-[#080b0d] text-[#edf3f3] selection:bg-[#18cf7a]/30`}>
       {toast ? <div role="status" className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-full border border-[#18cf7a]/35 bg-[#10211a] px-4 py-2.5 text-sm text-[#d7f8e8] shadow-[0_12px_40px_rgba(0,0,0,.45)]">{toast}</div> : null}
-      <div className="mx-auto max-w-[1280px] px-5 pb-20 sm:px-8">
-        <div className="flex h-[76px] items-center justify-between">
+      <div className={`mx-auto flex w-full max-w-[1280px] flex-col px-5 sm:px-8 ${step === "agent" ? "lg:h-full lg:pb-3" : "pb-20"}`}>
+        <div className={`flex shrink-0 items-center justify-between ${step === "agent" ? "h-14" : "h-[76px]"}`}>
           <a href="/portal" aria-label="Neural Alpha home"><Image src="/brand/neural-alpha-logo.png" alt="Neural Alpha" width={174} height={50} priority className="h-auto w-[148px] sm:w-[168px]" /></a>
           <div className="flex items-center gap-3 sm:gap-6">
             {step === "agent" ? <button className={buttonQuiet + " min-h-9 px-3 text-xs"} onClick={() => setStep("quote")}>Account</button> : step === "confirmed" ? <button className={buttonQuiet + " min-h-9 px-3 text-xs"} onClick={() => setStep("agent")}>Open workspace</button> : <a href="#access-code" className="inline-flex items-center gap-2 text-xs text-[#aab6bc] transition hover:text-white"><LockKeyhole size={14} /> <span className="hidden sm:inline">Access code</span><span className="sm:hidden">Sign in</span></a>}
           </div>
         </div>
 
-        <main className="pt-7 sm:pt-10">
-        <div className="mb-8 flex items-center justify-end gap-2 border-b border-white/[0.07] pb-5 sm:gap-3">
+        <main className={step === "agent" ? "flex min-h-0 flex-1 flex-col pt-1" : "pt-7 sm:pt-10"}>
+        {step === "agent" ? null : <div className="mb-8 flex items-center justify-end gap-2 border-b border-white/[0.07] pb-5 sm:gap-3">
             {progressLabels.map((label, index) => { const active = progress >= [0, 0.4, 0.72][index]; return <div key={label} className="flex items-center gap-2 text-[10px] sm:text-xs"><span className={`grid h-6 w-6 place-items-center rounded-full border ${active ? "border-[#18cf7a]/50 bg-[#18cf7a]/10 text-[#18cf7a]" : "border-white/10 text-[#647177]"}`}>{progress > [0.08, 0.4, 0.72][index] ? <Check size={12} /> : index + 1}</span><span className={active ? "text-[#c8d2d5]" : "hidden text-[#647177] sm:inline"}>{label}</span>{index < 2 ? <span className="mx-0.5 h-px w-3 bg-white/10 sm:w-7" /> : null}</div>; })}
-        </div>
+        </div>}
 
         {booting ? <div className={`${panel} grid min-h-64 place-items-center text-sm text-[#8c999f]`}><span className="animate-pulse">Opening your workspace…</span></div> : null}
         {!booting ? <AnimatePresence mode="wait">
@@ -757,12 +802,34 @@ export function PortalDesk() {
 
           {step === "confirmed" ? <motion.div key="confirmed" {...SHIFT} className="mx-auto max-w-[760px]"><section className="overflow-hidden rounded-2xl border border-[#18cf7a]/20 bg-[#101614] shadow-[0_28px_90px_rgba(0,0,0,.3)]"><div className="relative overflow-hidden border-b border-dashed border-[#30423a] px-6 py-7 sm:px-9"><div className="pointer-events-none absolute -right-16 -top-24 h-64 w-64 rounded-full border border-[#18cf7a]/10"/><div className="relative flex items-start gap-4"><div className="grid h-12 w-12 shrink-0 place-items-center rounded-full border border-[#18cf7a]/25 bg-[#18cf7a]/10 text-[#42da99]"><Check size={23}/></div><div className="min-w-0 flex-1"><p className="text-[10px] font-semibold uppercase tracking-[.2em] text-[#42da99]">Payment confirmed</p><h1 className="mt-1.5 text-2xl font-medium tracking-[-.035em] sm:text-3xl">Your order is complete</h1><p className="mt-2 text-sm leading-6 text-[#8e9d98]">The payment has been matched to your quote and confirmed on BNB Smart Chain.</p></div><span className="hidden rounded-full border border-[#18cf7a]/20 bg-[#18cf7a]/[.06] px-3 py-1.5 font-mono text-[10px] text-[#42da99] sm:inline-flex">PAID</span></div></div><div className="grid gap-6 px-6 py-6 sm:grid-cols-[1fr_210px] sm:px-9"><div><p className="text-[9px] font-semibold uppercase tracking-[.18em] text-[#73827b]">Receipt</p><div className="mt-4 flex items-center gap-3"><AssetLogo asset={order?.asset || asset} src={icons[order?.asset || asset]}/><div><p className="text-[10px] text-[#84938d]">Received amount</p><p className="mt-0.5 font-mono text-lg font-medium text-[#edf5f0]">{order?.paidAmountDisplay || order?.amountDisplay || "—"} <span className="text-sm text-[#a7b3ad]">{order?.asset || asset}</span></p></div></div><dl className="mt-5 grid gap-3 border-t border-white/[.07] pt-4 text-xs"><div className="flex justify-between gap-4"><dt className="text-[#7f8d86]">Order reference</dt><dd className="font-mono text-[#c4cec8]">{order?.id || "—"}</dd></div><div className="flex justify-between gap-4"><dt className="text-[#7f8d86]">Plan</dt><dd className="text-right text-[#c4cec8]">Neural Alpha · 30 days</dd></div><div className="flex justify-between gap-4"><dt className="text-[#7f8d86]">Network</dt><dd className="text-[#c4cec8]">BNB Smart Chain</dd></div><div className="flex justify-between gap-4"><dt className="text-[#7f8d86]">Confirmed</dt><dd className="text-right text-[#c4cec8]">{confirmationDate}</dd></div><div className="flex justify-between gap-4"><dt className="text-[#7f8d86]">Confirmations</dt><dd className="font-mono text-[#42da99]">{order?.confirmations ?? 15} blocks</dd></div></dl>{order?.paymentTx && /^0x[a-fA-F0-9]{64}$/.test(order.paymentTx) ? <a href={`https://bscscan.com/tx/${order.paymentTx}`} target="_blank" rel="noreferrer" className="mt-4 inline-flex items-center gap-2 text-[11px] text-[#42da99] hover:text-[#75efb3]">View transaction on BscScan <ArrowRight size={12}/></a> : null}</div><aside className="flex flex-col justify-between rounded-xl border border-white/[.07] bg-[#0b100e] p-4"><div><p className="text-[9px] font-semibold uppercase tracking-[.16em] text-[#75837d]">Next step</p><h2 className="mt-2 text-sm font-medium">Connect Binance</h2><p className="mt-1.5 text-[11px] leading-5 text-[#84918b]">Pair your Binance Agentic Wallet to let the agent begin operating.</p></div><div className="mt-6 rounded-lg border border-[#18cf7a]/15 bg-[#18cf7a]/[.045] p-3"><p className="text-[9px] uppercase tracking-[.15em] text-[#74827b]">Agent</p><p className="mt-1 font-mono text-sm text-[#cbd7d0]">{tenant?.container_name || "Provisioned"}</p><p className="mt-1 text-[10px] text-[#42da99]">{tenant?.status || "Ready"}</p></div></aside></div>{accessCode ? <div className="mx-6 mb-2 rounded-xl border border-[#18cf7a]/20 bg-[#18cf7a]/[0.05] px-4 py-3 sm:mx-9"><p className="text-[10px] uppercase tracking-[.16em] text-[#42da99]">Access code</p><div className="mt-1 flex items-center gap-3"><p className="font-mono text-xl tracking-[.14em] text-[#edf5f0]">{accessCode}</p><button type="button" aria-label="Copy access code" className="grid h-8 w-8 place-items-center rounded-lg border border-white/10 text-[#42da99]" onClick={() => copy(accessCode)}><Copy size={14} /></button></div><p className="mt-1 text-[11px] text-[#8e9d98]">Save it. This opens the agent on another browser.</p></div> : null}<div className="flex flex-col gap-3 border-t border-white/[.07] px-6 py-5 sm:flex-row sm:items-center sm:justify-between sm:px-9"><p className="text-[10px] text-[#75827c]">Keep this receipt for your records.</p><RainbowButton onClick={() => setStep("agent")}>Continue to agent <ArrowRight size={15}/></RainbowButton></div></section></motion.div> : null}
 
-          {step === "agent" ? <motion.div key="agent" {...SHIFT}>
-            <section className="relative mb-6 overflow-hidden rounded-2xl border border-white/10 bg-[#0d1414] p-6 sm:p-8"><div className="pointer-events-none absolute -right-10 -top-28 h-72 w-72 rounded-full bg-[#18cf7a]/[0.08] blur-3xl"/><div className="relative flex flex-wrap items-start justify-between gap-5"><div><p className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-[.2em] text-[#42da99]"><span className="h-1.5 w-1.5 rounded-full bg-[#42da99]"/> Your agent workspace</p><h1 className="mt-3 text-3xl font-medium tracking-[-.04em] sm:text-4xl">{tenant?.container_name || "Neural Alpha"}</h1><p className="mt-2 text-sm text-[#87959a]">{[tenant?.status, tenant?.agent_mode, tenant?.payment_asset].filter(Boolean).join(" · ")}{tenant?.paid_until ? ` · active through ${tenant.paid_until.slice(0, 10)}` : ""}</p>{accessCode ? <div className="mt-4"><p className="text-[10px] uppercase tracking-[.16em] text-[#7f8c91]">Access code</p><div className="mt-1 flex items-center gap-2"><p className="font-mono text-lg tracking-[.12em] text-[#edf3f3]">{accessCode}</p><button type="button" aria-label="Copy access code" className="grid h-8 w-8 place-items-center rounded-lg border border-white/10 text-[#42da99]" onClick={() => copy(accessCode)}><Copy size={14} /></button></div><button type="button" className="mt-2 text-[11px] text-[#7f8c91] hover:text-white" disabled={busy === "fresh-code"} onClick={freshCode}>{busy === "fresh-code" ? "Replacing…" : "Replace this code"}</button></div> : <button type="button" className="mt-4 text-xs text-[#8d9a9f] hover:text-white" disabled={busy === "fresh-code"} onClick={freshCode}>{busy === "fresh-code" ? "Creating…" : "New access code"}</button>}</div><span className="rounded-full border border-[#18cf7a]/20 bg-[#18cf7a]/[0.07] px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-[#42da99]">{tenant?.status || "Ready"}</span></div></section>
-            {tenant?.agent_mode !== "live" ? <p className="mb-3 text-xs leading-5 text-[#87959a]">Paper balances. These amounts are simulated. They are not funds in your Binance wallet.</p> : null}
-            <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">{[["Portfolio value", book?.navUsd, "NAV"], ["Available cash", book?.cashUsd, "LIQUIDITY"], ["Today’s P&L", book?.dailyPnlUsd, "24 HOURS"], ["Realized P&L", book?.realizedPnlUsd, "ALL TIME"]].map(([label, value, tag]) => <div key={String(label)} className={`${panel} p-4 sm:p-5`}><p className="text-[9px] font-semibold uppercase tracking-[.17em] text-[#718087]">{tag}</p><p className="mt-2 text-xs text-[#92a0a5]">{label}</p><p className="mt-1 text-xl font-medium tabular-nums tracking-[-.03em] sm:text-2xl">{money(value)}</p></div>)}</div>
-            <div className="mt-6 grid items-start gap-6 lg:grid-cols-[minmax(0,1fr)_370px]"><section className={`${panel} p-5 sm:p-6`}><div className="flex items-center justify-between border-b border-white/[0.07] pb-4"><div><p className="text-[10px] font-semibold uppercase tracking-[.2em] text-[#718087]">Activity</p><h2 className="mt-1 text-lg font-medium">Recent trades</h2></div><span className="font-mono text-[10px] text-[#718087]">{book?.trades ?? 0} total</span></div><div className="mt-1">{(book?.recent || []).slice(0, 8).length ? (book?.recent || []).slice(0, 8).map((trade, i) => <div key={`${trade.symbol}-${i}`} className="flex items-center justify-between gap-4 border-b border-white/[0.055] py-3 last:border-0"><span className="flex items-center gap-3"><span className={`grid h-8 w-8 place-items-center rounded-lg text-[10px] font-semibold ${trade.side?.toLowerCase() === "sell" ? "bg-[#f06c72]/10 text-[#f08085]" : "bg-[#18cf7a]/10 text-[#42da99]"}`}>{trade.side?.slice(0, 1)}</span><span><span className="block text-sm font-medium">{trade.symbol || "—"}</span><span className="mt-0.5 block text-[10px] text-[#718087]">{trade.side || "Trade"}</span></span></span><span className="font-mono text-xs tabular-nums text-[#bac5c9]">{money(trade.usd)}</span></div>) : <div className="grid min-h-40 place-items-center text-center"><div><p className="text-sm text-[#a4b0b4]">No trades yet</p><p className="mt-1 text-xs text-[#6f7d82]">Your agent activity will appear here.</p></div></div>}</div></section>
-              <div className="grid gap-4">
+          {step === "agent" ? <motion.div key="agent" {...SHIFT} className="flex min-h-0 flex-1 flex-col gap-3">
+            <section className={`${panel} flex flex-wrap items-center justify-between gap-3 px-4 py-3`}>
+              <div className="min-w-0">
+                <p className="text-[10px] font-semibold uppercase tracking-[.18em] text-[#42da99]">Your agent</p>
+                <h1 className="truncate text-xl font-medium tracking-[-.03em]">{tenant?.container_name || "Neural Alpha"}</h1>
+                <p className="mt-0.5 text-[11px] text-[#87959a]">{[tenant?.status, tenant?.agent_mode, tenant?.payment_asset].filter(Boolean).join(" · ")}{tenant?.paid_until ? ` · through ${tenant.paid_until.slice(0, 10)}` : ""}{tenant?.agent_mode !== "live" ? " · simulator balances, not your Binance wallet" : ""}</p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button type="button" className="text-[11px] text-[#8d9a9f] hover:text-white" disabled={busy === "fresh-code"} onClick={freshCode}>{accessCode ? accessCode : busy === "fresh-code" ? "Creating…" : "Access code"}</button>
+                <span className="rounded-full border border-[#18cf7a]/20 bg-[#18cf7a]/[0.07] px-3 py-1 text-[10px] font-semibold uppercase tracking-wide text-[#42da99]">{tenant?.status || "Ready"}</span>
+              </div>
+            </section>
+            <div className="grid shrink-0 grid-cols-2 gap-2 lg:grid-cols-4">{[["Portfolio value", book?.navUsd], ["Available cash", book?.cashUsd], ["Today’s P&L", book?.dailyPnlUsd], ["Realized P&L", book?.realizedPnlUsd]].map(([label, value]) => <div key={String(label)} className={`${panel} px-3 py-2.5`}><p className="text-[10px] text-[#92a0a5]">{label}</p><p className="mt-0.5 text-lg font-medium tabular-nums tracking-[-.03em]">{money(value)}</p></div>)}</div>
+            <div className="grid min-h-0 flex-1 items-stretch gap-3 lg:grid-cols-[minmax(0,1fr)_360px]"><section className={`${panel} flex min-h-[220px] flex-col p-4 lg:min-h-0`}><div className="flex items-center justify-between border-b border-white/[0.07] pb-3"><div><p className="text-[10px] font-semibold uppercase tracking-[.2em] text-[#718087]">Activity</p><h2 className="mt-0.5 text-base font-medium">Recent trades</h2></div><span className="font-mono text-[10px] text-[#718087]">{book?.trades ?? 0} total</span></div><div className="mt-1 min-h-0 flex-1 overflow-y-auto">{(book?.recent || []).slice(0, 8).length ? (book?.recent || []).slice(0, 8).map((trade, i) => <div key={`${trade.symbol}-${i}`} className="flex items-center justify-between gap-4 border-b border-white/[0.055] py-2.5 last:border-0"><span className="flex items-center gap-3"><span className={`grid h-7 w-7 place-items-center rounded-lg text-[10px] font-semibold ${trade.side?.toLowerCase() === "sell" ? "bg-[#f06c72]/10 text-[#f08085]" : "bg-[#18cf7a]/10 text-[#42da99]"}`}>{trade.side?.slice(0, 1)}</span><span><span className="block text-sm font-medium">{trade.symbol || "—"}</span><span className="mt-0.5 block text-[10px] text-[#718087]">{trade.side || "Trade"}</span></span></span><span className="font-mono text-xs tabular-nums text-[#bac5c9]">{money(trade.usd)}</span></div>) : <div className="grid h-full min-h-24 place-items-center text-center"><div><p className="text-sm text-[#a4b0b4]">No trades yet</p><p className="mt-1 text-xs text-[#6f7d82]">Live trades appear here after Binance is connected.</p></div></div>}</div></section>
+              <div className="grid content-start gap-3 lg:overflow-y-auto">
+                <div className={`${panel} p-4`}>
+                  <p className="text-[10px] font-semibold uppercase tracking-[.2em] text-[#718087]">Wallet</p>
+                  <h2 className="mt-1 text-base font-medium">Binance Agentic Wallet</h2>
+                  <p className="mt-1 break-all font-mono text-[11px] text-[#8b999e]">{tenant?.wallet_address || "Not paired yet"}</p>
+                  {tenant?.wallet_address && tenant?.agent_mode === "live" ? <p className="mt-2 text-[11px] leading-5 text-[#42da99]">Connected. The agent is live and trades with funds in this wallet.</p> : null}
+                  {pairUrl || pairCode ? <div className="mt-3 rounded-xl border border-[#18cf7a]/20 bg-[#18cf7a]/[0.05] p-3"><p className="text-[9px] uppercase tracking-[.17em] text-[#849397]">{pairListening ? "Waiting for Binance" : "Scan with Binance"}</p>{pairUrl ? <div className="mt-2 flex justify-center"><TreasuryQr value={pairUrl} title="Binance Agentic Wallet sign-in QR" size={132} /></div> : null}<p className="mt-2 text-[11px] leading-5 text-[#c5d0d4]">{pairListening ? "Approve the login in the Binance app. This page is already listening, so you do not need another button." : "Approve this code in the Binance app while this page stays open."}</p>{pairCode ? <p className="mt-1 text-center font-mono text-sm tracking-[.2em] text-[#42da99]">{pairCode}</p> : null}</div> : null}
+                  {error ? <p role="alert" className="mt-3 text-xs leading-5 text-[#ff8e97]">{error}</p> : null}
+                  <div className="mt-3 grid gap-2">
+                    <RainbowButton className="w-full" disabled={busy === "pair-start" || pairListening} onClick={() => act("pair-start")}>{busy === "pair-start" ? "Requesting QR…" : pairListening ? "Waiting for Binance…" : pairUrl || pairCode ? "Refresh QR" : "Pair Binance wallet"}</RainbowButton>
+                    {qr && !pairListening ? <RainbowButton className="w-full" disabled={busy === "pair-verify"} onClick={() => act("pair-verify", { qrCodeId: qr })}>{busy === "pair-verify" ? "Confirming…" : "I confirmed in Binance"}</RainbowButton> : null}
+                    <button type="button" className="text-[11px] text-[#8d9a9f] hover:text-white" onClick={() => act(tenant?.status === "paused" ? "resume" : "pause")}>{tenant?.status === "paused" ? "Resume agent" : "Pause agent"}</button>
+                  </div>
+                </div>
                 <PositionSizeCard
                   preset={preset}
                   customSize={customSize}
@@ -773,11 +840,10 @@ export function PortalDesk() {
                   onSave={savePosition}
                   kicker="Risk"
                 />
-                <div className={`${panel} p-5`}><p className="text-[10px] font-semibold uppercase tracking-[.2em] text-[#718087]">Wallet connection</p><h2 className="mt-1 text-lg font-medium">Binance Agentic Wallet</h2><p className="mt-2 break-all font-mono text-[11px] text-[#8b999e]">{tenant?.wallet_address || "Not paired yet"}</p>{pairUrl || pairCode ? <div className="mt-4 rounded-xl border border-[#18cf7a]/20 bg-[#18cf7a]/[0.05] p-4"><p className="text-[9px] uppercase tracking-[.17em] text-[#849397]">Scan with Binance</p>{pairUrl ? <div className="mt-3 flex justify-center"><TreasuryQr value={pairUrl} title="Binance Agentic Wallet sign-in QR" size={168} /></div> : null}<p className="mt-3 text-[10px] leading-4 text-[#78868b]">{pairUrl ? "Open the Binance app and scan this code, then confirm below." : "Enter this code in Binance, then confirm below."}</p>{pairCode ? <p className="mt-2 text-center font-mono text-sm tracking-[.2em] text-[#42da99]">{pairCode}</p> : null}</div> : null}<div className="mt-4 grid gap-2"><RainbowButton className="w-full" disabled={busy === "pair-start"} onClick={() => act("pair-start")}>{busy === "pair-start" ? "Requesting QR…" : pairUrl || pairCode ? "Refresh QR" : "Pair Binance wallet"}</RainbowButton>{qr ? <RainbowButton className="w-full" disabled={busy === "pair-verify"} onClick={() => act("pair-verify", { qrCodeId: qr })}>{busy === "pair-verify" ? "Confirming…" : "I confirmed in Binance"}</RainbowButton> : null}<button type="button" className={buttonQuiet + " w-full"} onClick={() => act(tenant?.status === "paused" ? "resume" : "pause")}>{tenant?.status === "paused" ? "Resume agent" : "Pause agent"}</button></div><div className="mt-5 flex items-start gap-2 border-t border-white/[0.07] pt-4 text-[10px] leading-5 text-[#748187]"><ShieldCheck size={14} className="mt-0.5 shrink-0 text-[#42da99]"/> Your trading funds remain in your Binance wallet. Neural Alpha never takes custody.</div></div></div></div>
-            {error ? <p role="alert" className="mt-4 text-sm text-[#ff8e97]">{error}</p> : null}
+              </div></div>
           </motion.div> : null}
         </AnimatePresence> : null}
-        <footer className="mt-10 flex flex-col justify-between gap-3 border-t border-white/[0.07] pt-5 text-[10px] text-[#5f6d72] sm:flex-row sm:items-center"><span>© Neural Alpha · Autonomous bStock trading</span><span className="flex items-center gap-2"><ShieldCheck size={12} /> Payments verified on BNB Smart Chain</span></footer>
+        {step === "agent" ? null : <footer className="mt-10 flex flex-col justify-between gap-3 border-t border-white/[0.07] pt-5 text-[10px] text-[#5f6d72] sm:flex-row sm:items-center"><span>© Neural Alpha · Autonomous bStock trading</span><span className="flex items-center gap-2"><ShieldCheck size={12} /> Payments verified on BNB Smart Chain</span></footer>}
         </main>
       </div>
     </div>

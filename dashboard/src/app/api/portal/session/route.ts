@@ -16,5 +16,9 @@ export async function GET() {
   if (info.status !== 200) {
     return NextResponse.json({ error: "this browser's agent is no longer valid" }, { status: info.status });
   }
-  return NextResponse.json({ tenant: info.data.tenant, state: live.status === 200 ? live.data.state : null });
+  return NextResponse.json({
+    tenant: info.data.tenant,
+    state: live.status === 200 ? live.data.state : null,
+    pairing: info.data.pairing || null,
+  });
 }

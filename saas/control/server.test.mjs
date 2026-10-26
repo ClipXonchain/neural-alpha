@@ -283,6 +283,7 @@ test("each customer gets a separate container and the third is refused", async (
       body: { qrCodeId: "qr-1" },
     });
     assert.equal(pair.body.tenant.wallet_address, "0xabc");
+    assert.equal(pair.body.tenant.agent_mode, "live");
     const allowed = await call(url, `/tenants/${first.body.tenant.id}/mode`, {
       method: "POST",
       body: { mode: "live" },
