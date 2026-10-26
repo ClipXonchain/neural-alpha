@@ -2,18 +2,26 @@
 
 import { QRCodeSVG } from "qrcode.react";
 
-/** Scannable QR of the treasury address. The payload is the address itself, not a token contract. */
-export function TreasuryQr({ value }: { value: string }) {
+/** Scannable QR. Payment screens encode the treasury address. Pairing encodes the Binance sign-in link. */
+export function TreasuryQr({
+  value,
+  title = "QR code of the treasury address",
+  size = 132,
+}: {
+  value: string;
+  title?: string;
+  size?: number;
+}) {
   return (
     <div className="w-fit rounded-xl bg-white p-2.5">
       <QRCodeSVG
         value={value}
-        size={132}
+        size={size}
         level="M"
         marginSize={1}
         bgColor="#ffffff"
         fgColor="#07140e"
-        title="QR code of the treasury address"
+        title={title}
       />
     </div>
   );

@@ -488,7 +488,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
         return send(res, 200, {
           qrCodeId: data.qrCodeId,
           pairingCode: data.pairingCode,
-          urlForWeb: data.urlForWeb,
+          urlForWeb: data.urlForWeb || data.url || data.qrCodeUrl || data.deepLink || "",
         });
       }
       if (req.method === "POST" && action === "/access-code") {
