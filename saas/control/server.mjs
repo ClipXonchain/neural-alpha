@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createBnbPriceFeed } from "./bnb-price.mjs";
 import { createDocker } from "./docker.mjs";
+import { createAttemptLimiter } from "./limiter.mjs";
 import { planLifecycle, reminderText, subscriptionState } from "./lifecycle.mjs";
 import { rollout, TAG_RE } from "./rollout.mjs";
 import { backupAll, parseBackupKey, syncOffsite } from "./tenant-backup.mjs";
@@ -53,6 +54,9 @@ import { openStore } from "./store.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(HERE, "../..");
 const QR_RE = /^[A-Za-z0-9_-]{4,128}$/;
+/** Signed-in browsers per agent, counting the original purchase token. */
+export const MAX_SESSIONS = 3;
+const WALLET_RE = /^0x[a-f0-9]{40}$/;
 
 export function loadConfig(env = process.env) {
   const num = (name, fallback) => {
@@ -165,7 +169,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
     return Number.isFinite(live) && live > 0 ? live : config.bnbPriceUsd;
   };
   const limits = new Map();
-  const codeFailures = [];
+  const codeAttempts = createAttemptLimiter({ max: 8, windowMs: 60_000 });
   const boot = Date.now();
   let requests = 0;
   const bscRpc = rpc || (config.bscRpcUrl ? createBscRpc(config.bscRpcUrl, fetchImpl) : null);
@@ -186,6 +190,20 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
     fetchImpl,
   });
   const pairings = new Map();
+  // An agent, an order or a wallet belongs to the cell that took it. When this server has no record,
+  // it asks the registered cells, so sign-in and checkout also work through an edge-only mother.
+  const remoteCells = () => edge.listRegisteredNodes().filter((n) => n.hostId !== config.hostId);
+  async function askCells(method, path, body, headers, accept) {
+    for (const node of remoteCells()) {
+      try {
+        const r = await edge.forwardJson(node.hostId, method, path, body, undefined, headers);
+        if (accept(r)) return r;
+      } catch {
+        /* a cell that is down cannot answer */
+      }
+    }
+    return null;
+  }
   void promotePaperTenants({ store, docker, config, now }).catch(() => undefined);
   const watcher = createTreasuryWatcher({
     store,
@@ -369,11 +387,33 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
       }
       if (req.method === "POST" && url.pathname === "/session/open") {
         const body = await readJson(req);
-        return send(res, 200, openPaidSession({ store, config, now, body }));
+        try {
+          return send(res, 200, openPaidSession({ store, config, now, body }));
+        } catch (err) {
+          if (err.status === 404 && remoteCells().length) {
+            const r = await askCells("POST", "/session/open", body, {}, (x) => x.status === 200);
+            if (r) return send(res, 200, r.body);
+          }
+          throw err;
+        }
       }
       if (req.method === "POST" && url.pathname === "/session/code") {
         const body = await readJson(req);
-        return send(res, 200, openByAccessCode({ store, config, now, body, failures: codeFailures }));
+        // The portal passes the visitor's address (trusted only from the operator-authenticated portal);
+        // a direct caller is limited by its own connection. One guesser never blocks another customer.
+        const client =
+          actor?.role === "operator" && req.headers["x-portal-client"]
+            ? String(req.headers["x-portal-client"]).slice(0, 64)
+            : req.socket?.remoteAddress || "unknown";
+        try {
+          return send(res, 200, openByAccessCode({ store, config, now, body, limiter: codeAttempts, client }));
+        } catch (err) {
+          if (err.status === 401 && remoteCells().length) {
+            const r = await askCells("POST", "/session/code", body, { "x-portal-client": client }, (x) => x.status === 200);
+            if (r) return send(res, 200, r.body);
+          }
+          throw err;
+        }
       }
       if (req.method === "POST" && url.pathname === "/checkout") {
         const body = await readJson(req);
@@ -401,7 +441,11 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
           let order = await serializePaymentWork(() =>
             presentCheckoutOrder({ store, config, now, orderId, bnbPriceUsd: currentBnbPriceUsd() }),
           );
-          if (!order) return send(res, 404, { error: "order not found" });
+          if (!order) {
+            const r = remoteCells().length ? await askCells("GET", `/checkout/${orderId}`, undefined, {}, (x) => x.status === 200) : null;
+            if (r) return send(res, 200, r.body);
+            return send(res, 404, { error: "order not found" });
+          }
           if (order.status === "pending" && order.payment_tx && bscRpc) {
             try {
               const confirmations = await readConfirmationCount(bscRpc, order.payment_tx);
@@ -428,8 +472,14 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
           }
           return send(res, 200, { order: publicOrderView(order, config.minConfirmations) });
         }
+        // The order may live on another cell: ask them when this server has no such order.
+        const orderIsLocal = () => Boolean(store.getOrder(orderId));
         if (req.method === "POST" && subAction === "/verify") {
           const body = await readJson(req);
+          if (!orderIsLocal() && remoteCells().length) {
+            const r = await askCells("POST", `/checkout/${orderId}/verify`, body, {}, (x) => x.status !== 404);
+            if (r) return send(res, r.status, r.body);
+          }
           const payer = assertAddress(body.payer, "payer");
           const result = await fulfillQueued({
             store,
@@ -447,6 +497,10 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
         }
         if (req.method === "POST" && subAction === "/claim") {
           const body = await readJson(req);
+          if (!orderIsLocal() && remoteCells().length) {
+            const r = await askCells("POST", `/checkout/${orderId}/claim`, body, {}, (x) => x.status !== 404);
+            if (r) return send(res, r.status, r.body);
+          }
           return send(res, 200, claimPaidOrder({ store, config, orderId, claimSecret: body.claimSecret }));
         }
       }
@@ -525,7 +579,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
       const action = match[2] || "";
 
       if (req.method === "GET" && action === "") {
-        return send(res, 200, { tenant: customerView(tenant), pairing: publicPairing(pairings.get(tenant.id)) });
+        return send(res, 200, { tenant: customerView(tenant, store), pairing: publicPairing(pairings.get(tenant.id)) });
       }
       if (action.startsWith("/agent/") || action === "/agent") {
         return proxyTenantAgent(req, res, docker, tenant, action, url);
@@ -570,6 +624,29 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
         const updated = applySpec(store, flagged, { risk: riskFromRow(flagged), agentMode: flagged.agent_mode }, config, now);
         if (tenant.status === "running") await docker.up(dockerTarget(updated));
         return send(res, 200, { tenant: customerView(updated) });
+      }
+      if (req.method === "POST" && action === "/wallets") {
+        // The portal checked the wallet's signature; only it (the operator) may add a login wallet.
+        if (actor?.role !== "operator") return send(res, 401, { error: "unauthorized" });
+        const body = await readJson(req);
+        const address = String(body.address || "").toLowerCase();
+        if (!WALLET_RE.test(address)) return send(res, 400, { error: "address must be a 0x wallet address" });
+        store.addWallet(tenant.id, address, now().toISOString());
+        return send(res, 200, { tenant: customerView(store.get(tenant.id), store) });
+      }
+      const walletDel = action.match(/^\/wallets\/(0x[a-fA-F0-9]{40})$/);
+      if (req.method === "DELETE" && walletDel) {
+        store.removeWallet(tenant.id, walletDel[1].toLowerCase());
+        return send(res, 200, { tenant: customerView(store.get(tenant.id), store) });
+      }
+      if (req.method === "POST" && action === "/sessions/revoke") {
+        // Signs out every other browser. The one asking stays signed in.
+        const raw = bearer(req);
+        const parsed = parseCompoundToken(raw);
+        const mine = actor?.role === "customer" || actor?.role === "remote_customer" ? hashToken(parsed.compound ? parsed.accessToken : raw) : null;
+        if (!mine) return send(res, 400, { error: "sign in as the customer to sign out other browsers" });
+        store.revokeSessionsExcept(tenant.id, mine);
+        return send(res, 200, { tenant: customerView(store.get(tenant.id), store) });
       }
       if (req.method === "POST" && action === "/cancel") {
         const body = await readJson(req);
@@ -664,7 +741,7 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
   handler.routeTelegram = async ({ chatId, text }) => {
     const local = await handleInbound({ store, config, now, chatId, text, describe: (row) => describeTenant(docker, row, now) });
     if (local.handled) return local.reply;
-    for (const node of store.listNodes()) {
+    for (const node of edge.listRegisteredNodes()) {
       if (node.hostId === config.hostId) continue;
       try {
         const r = await edge.forwardJson(node.hostId, "POST", "/telegram/inbound", { chatId, text });
@@ -693,10 +770,8 @@ function issueSession(store, config, now, tenantId) {
   const tenant = localTenant(store, config, tenantId);
   if (!tenant) throw Object.assign(new Error("paid order not found"), { status: 404 });
   const accessToken = randomBytes(32).toString("hex");
-  const updated = store.update(tenant.id, {
-    access_token_hash: hashToken(accessToken),
-    updated_at: now().toISOString(),
-  });
+  store.addSession(tenant.id, hashToken(accessToken), now().toISOString(), MAX_SESSIONS);
+  const updated = store.get(tenant.id);
   return {
     tenant: customerView(updated),
     compoundToken: formatCompoundToken(config.hostId, updated.id, accessToken),
@@ -741,9 +816,16 @@ function openPaidSession({ store, config, now, body }) {
     const prev = latestByTenant.get(tenantId);
     if (!prev || String(order.updated_at) > String(prev.updated_at)) latestByTenant.set(tenantId, stamped);
   }
+  // A wallet the customer linked from Settings opens that agent too, even if it never paid.
+  for (const linkedId of store.tenantIdsByWallet(payer)) {
+    const linked = localTenant(store, config, linkedId);
+    if (linked && !latestByTenant.has(linkedId)) {
+      latestByTenant.set(linkedId, { tenant_id: linkedId, asset: linked.payment_asset, updated_at: linked.updated_at || "" });
+    }
+  }
   let rows = [...latestByTenant.values()];
   if (tenantId) rows = rows.filter((row) => row.tenant_id === tenantId);
-  if (rows.length === 0) throw Object.assign(new Error("this wallet has not paid for an agent"), { status: 404 });
+  if (rows.length === 0) throw Object.assign(new Error("this wallet has not paid for an agent and is not linked to one"), { status: 404 });
   if (rows.length > 1) {
     rows.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
     return { agents: rows.map((order) => agentChoice(store, order)) };
@@ -1747,7 +1829,8 @@ function identify(req, config, store) {
     };
   }
   const lookupToken = parsed.compound ? parsed.accessToken : token;
-  const row = store.findByAccessHash(hashToken(lookupToken));
+  const tokenHash = hashToken(lookupToken);
+  const row = store.findByAccessHash(tokenHash) || store.findBySessionHash(tokenHash);
   if (!row || row.host_id !== config.hostId) return null;
   if (parsed.compound && parsed.tenantId !== row.id) return null;
   return { role: "customer", tenantId: row.id };
@@ -1795,22 +1878,21 @@ function normalizeAccessCode(value) {
   return clean;
 }
 
-function openByAccessCode({ store, config, now, body, failures }) {
+function openByAccessCode({ store, config, now, body, limiter, client }) {
   const at = now().getTime();
-  while (failures.length && failures[0] < at - 60_000) failures.shift();
-  if (failures.length >= 8) {
+  if (!limiter.allowed(client, at)) {
     throw Object.assign(new Error("Too many attempts. Wait a minute and try again."), { status: 429 });
   }
   let normalized;
   try {
     normalized = normalizeAccessCode(body?.code);
   } catch (err) {
-    failures.push(at);
+    limiter.fail(client, at);
     throw err;
   }
   const tenant = store.findByAccessCodeHash(hashToken(normalized));
   if (!tenant || tenant.host_id !== config.hostId) {
-    failures.push(at);
+    limiter.fail(client, at);
     throw Object.assign(new Error("That access code does not match an agent."), { status: 401 });
   }
   return issueSession(store, config, now, tenant.id);
@@ -1854,10 +1936,14 @@ const HIDDEN = new Set([
   "reminder_stage",
 ]);
 
-function customerView(row) {
+function customerView(row, store = null) {
   const view = operatorView(row);
   delete view.data_dir;
   delete view.payment_tx;
+  if (store) {
+    view.login_wallets = store.listWallets(row.id);
+    view.signed_in_browsers = store.sessionCount(row.id);
+  }
   view.telegram_linked = Boolean(row.telegram_chat_id);
   view.subscription = subscriptionState(row, Date.now());
   return view;
@@ -2421,7 +2507,8 @@ export function createSandboxDocker() {
 }
 
 export function createSandboxRpc(store, config) {
-  const payer = "0x9999999999999999999999999999999999999999";
+  // The fake chain pays from this address; set it to a test wallet to exercise wallet sign-in.
+  const payer = (process.env.SAAS_SANDBOX_PAYER || "0x9999999999999999999999999999999999999999").toLowerCase();
   return async function sandboxRpc(method, params) {
     if (method === "eth_blockNumber") return "0x3e8"; // block 1000
     if (method === "eth_chainId") return "0x38"; // BNB Smart Chain mainnet

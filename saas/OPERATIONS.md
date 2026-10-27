@@ -72,6 +72,36 @@ Open positions are never sold when a subscription lapses. New buys stop; exits k
 **Renew** button opens `/portal?renew=1` (plan and payment for the same agent). **Don't renew** skips
 the grace and the reminders and stops new buys when the month ends; **Keep my subscription** undoes it.
 
+## Signing in, and getting back in
+
+A customer can open their agent three ways, and up to **3 browsers** stay signed in at once (signing in on a
+new device does not sign out the others; the oldest one makes room for a fourth):
+
+1. **Access code**, shown once at checkout (with a download and a "I saved it" box). They can make a new one
+   any time from Settings; it replaces the old one.
+2. **The wallet that paid.** Sign in with your wallet signs a plain message with the wallet that sent the fee.
+   Not available if they paid from an exchange, because the exchange's address cannot sign.
+3. **A wallet they linked** in Settings, up to 3. This is the answer for exchange payers: link a browser wallet once
+   and a lost code no longer matters. If one wallet opens several agents, the portal lists them to choose from.
+
+A browser wallet is used for **identity and the one fee payment only**. Signing in or linking asks for a message
+signature, which cannot move funds. "Pay with wallet" sends exactly the quoted amount to the treasury and nothing
+else. It never asks for a token approval, never trades, and never touches the Binance Agentic Wallet.
+
+Wrong access codes are limited to 8 a minute **per visitor address**, so one guesser never blocks another customer.
+That needs the proxy headers in SETUP.md.
+
+**A customer is locked out** (no code, no signed-in browser, no linked wallet): have them send the fee
+transaction hash, find the agent with `GET /tenants` (the operator view lists `payment_tx`), check the amount
+and time match, then mint a code and send it privately:
+
+```bash
+curl -X POST -H "Authorization: Bearer $CONTROL_API_SECRET" http://${SAAS_BIND_HOST:-127.0.0.1}:3910/tenants/<id>/access-code
+```
+
+Their money and the running agent are unaffected throughout; they only lose the portal until they are back in.
+Sign-in works through the mother: it asks the cells when it has no record of an agent.
+
 ## Backups and disaster recovery
 
 A customer's Binance wallet login lives only in their data folder. If a disk dies, that login is gone

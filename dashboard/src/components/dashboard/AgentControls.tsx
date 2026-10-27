@@ -9,7 +9,12 @@ import {
   CalendarClock,
   Check,
   Copy,
+  Download,
   ExternalLink,
+  KeyRound,
+  MonitorSmartphone,
+  Trash2,
+  Wallet,
   Fuel,
   Globe2,
   Layers,
@@ -63,6 +68,13 @@ export interface AccountControls {
     cancelling: boolean;
   };
   telegramLinked: boolean;
+  /** Wallets that can sign in without the access code (identity only: no funds, no trading). */
+  loginWallets: string[];
+  signedInBrowsers: number;
+  onLinkWallet: () => Promise<{ ok: boolean; error?: string }>;
+  onUnlinkWallet: (address: string) => Promise<{ ok: boolean; error?: string }>;
+  onNewAccessCode: () => Promise<{ ok: boolean; code?: string; error?: string }>;
+  onSignOutOthers: () => Promise<{ ok: boolean; error?: string }>;
   onRenew: () => void;
   onCancel: (undo: boolean) => Promise<{ ok: boolean; error?: string }>;
   onTelegramCode: () => Promise<{ ok: boolean; code?: string; deepLink?: string; expiresAt?: string; error?: string }>;
@@ -694,6 +706,104 @@ function TelegramPanel({ account, disabled }: { account: AccountControls; disabl
   );
 }
 
+function SignInPanel({ account }: { account: AccountControls }) {
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
+  const [code, setCode] = useState("");
+  const [copied, setCopied] = useState(false);
+  const short = (a: string) => `${a.slice(0, 6)}…${a.slice(-4)}`;
+
+  const run = async (key: string, fn: () => Promise<{ ok: boolean; error?: string }>) => {
+    setBusy(key);
+    setError("");
+    const r = await fn().catch((e) => ({ ok: false, error: String(e) }));
+    setBusy("");
+    if (!r.ok) setError(r.error || "That did not work");
+  };
+  const makeCode = async () => {
+    setBusy("code");
+    setError("");
+    const r = await account.onNewAccessCode().catch((e) => ({ ok: false, error: String(e) }) as Awaited<ReturnType<AccountControls["onNewAccessCode"]>>);
+    setBusy("");
+    if (r.ok && r.code) setCode(r.code);
+    else setError(r.error || "Could not make a code");
+  };
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([`Neural Alpha access code\n\n${code}\n\nKeep this somewhere safe. It opens your agent from any browser.\n`], { type: "text/plain" }));
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "neural-alpha-access-code.txt";
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+  const copy = () =>
+    void navigator.clipboard?.writeText(code).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
+  const row = "flex flex-wrap items-center justify-between gap-3 rounded-[12px] bg-black/20 px-4 py-3 ring-1 ring-white/[0.06]";
+  const ghost = "inline-flex min-h-9 items-center gap-2 rounded-xl px-3 text-[12.5px] text-[#9aa6b2] transition hover:bg-white/[0.06] hover:text-white disabled:opacity-50";
+
+  return (
+    <Panel icon={KeyRound} title="Sign-in and recovery" subtitle="Three ways back into your agent if you lose your code." delay={0.1}>
+      <div className="grid gap-3">
+        <div className={row}>
+          <div className="min-w-0">
+            <p className="m-0 text-[13px] font-medium text-white">Access code</p>
+            <p className="m-0 mt-0.5 text-[12px] text-[#7e8a97]">Opens your agent from any browser. A new code replaces the old one.</p>
+          </div>
+          <button type="button" onClick={makeCode} disabled={busy === "code"} className={ghost + " bg-white/[0.06]"}>
+            {busy === "code" && <Loader2 className="size-3.5 animate-spin" />} Make a new code
+          </button>
+          {code && (
+            <div className="flex w-full flex-wrap items-center gap-2">
+              <span className="rounded-lg bg-black/30 px-3 py-2 font-[family-name:var(--mono)] text-[17px] font-semibold tracking-[0.12em] text-[#2fd98a] ring-1 ring-white/[0.08]">{code}</span>
+              <button type="button" onClick={copy} aria-label="Copy code" className="grid size-9 place-items-center rounded-lg bg-white/[0.06] text-[#cfd8df] ring-1 ring-white/[0.08]">{copied ? <Check className="size-4 text-[#2fd98a]" /> : <Copy className="size-4" />}</button>
+              <button type="button" onClick={download} className={ghost}><Download className="size-3.5" /> Download</button>
+              <p className="m-0 w-full text-[11.5px] text-[#7e8a97]">Shown once. Save it now.</p>
+            </div>
+          )}
+        </div>
+
+        <div className={row}>
+          <div className="min-w-0 basis-[260px] flex-1">
+            <p className="m-0 flex items-center gap-2 text-[13px] font-medium text-white"><Wallet className="size-3.5 text-[#61b0ff]" /> Login wallets</p>
+            <p className="m-0 mt-0.5 text-[12px] leading-5 text-[#7e8a97]">
+              Link a browser wallet to sign in without the code. It only signs a message: it cannot move funds, trade, or see your Binance wallet. Up to 3.
+            </p>
+          </div>
+          <button type="button" onClick={() => run("link", account.onLinkWallet)} disabled={busy === "link" || account.loginWallets.length >= 3} className={ghost + " bg-white/[0.06]"}>
+            {busy === "link" ? <Loader2 className="size-3.5 animate-spin" /> : <Wallet className="size-3.5" />} Link a wallet
+          </button>
+          {account.loginWallets.length > 0 && (
+            <ul className="m-0 grid w-full list-none gap-2 p-0">
+              {account.loginWallets.map((w) => (
+                <li key={w} className="flex items-center justify-between gap-3 rounded-lg bg-black/25 px-3 py-2">
+                  <span className="font-[family-name:var(--mono)] text-[12.5px] text-[#cfd8df]">{short(w)}</span>
+                  <button type="button" aria-label={`Remove ${short(w)}`} onClick={() => run(`rm-${w}`, () => account.onUnlinkWallet(w))} disabled={busy === `rm-${w}`} className={ghost}>
+                    {busy === `rm-${w}` ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />} Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+
+        <div className={row}>
+          <div className="min-w-0">
+            <p className="m-0 flex items-center gap-2 text-[13px] font-medium text-white"><MonitorSmartphone className="size-3.5 text-[#9aa6b2]" /> Signed-in browsers</p>
+            <p className="m-0 mt-0.5 text-[12px] text-[#7e8a97]">{account.signedInBrowsers} of 3 in use. Signing in on a new device does not sign out the others.</p>
+          </div>
+          <button type="button" onClick={() => run("out", account.onSignOutOthers)} disabled={busy === "out" || account.signedInBrowsers <= 1} className={ghost + " bg-white/[0.06]"}>
+            {busy === "out" && <Loader2 className="size-3.5 animate-spin" />} Sign out other browsers
+          </button>
+        </div>
+      </div>
+      {error && <p role="alert" className="m-0 mt-3 text-[12px] text-[#ff6b79]">{error}</p>}
+    </Panel>
+  );
+}
+
 export interface AgentControlsProps {
   connected: boolean;
   config: DeskConfig | null;
@@ -849,6 +959,7 @@ export function AgentControls({ connected, config, onSave, signals, account }: A
           <TelegramPanel account={account} disabled={false} />
         </div>
       )}
+      {account && <SignInPanel account={account} />}
 
       <div className={cn("grid min-w-0 gap-5", signals && "xl:grid-cols-2")}>
       <Panel icon={Layers} title="Risk profile" subtitle="One tap sets size, names, stop, trail and slippage together." delay={0.05}>

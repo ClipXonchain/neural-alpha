@@ -9,9 +9,9 @@ export function controlBase() {
 
 export async function control(
   path: string,
-  init: { method?: string; body?: unknown; token?: string } = {},
+  init: { method?: string; body?: unknown; token?: string; headers?: Record<string, string> } = {},
 ) {
-  const headers: Record<string, string> = {};
+  const headers: Record<string, string> = { ...(init.headers || {}) };
   if (init.token) headers.authorization = `Bearer ${init.token}`;
   if (init.body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(`${controlBase()}${path}`, {
@@ -59,4 +59,10 @@ export function portalCookie(req: Request) {
     path: "/",
     secure: !local && proto !== "http",
   };
+}
+
+/** The visitor's address as the proxy in front of the portal reports it, for per-visitor limits. */
+export function clientAddress(req: Request) {
+  const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  return (req.headers.get("x-real-ip") || forwarded || "unknown").slice(0, 64);
 }

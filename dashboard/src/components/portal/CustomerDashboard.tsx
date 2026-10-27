@@ -5,6 +5,7 @@ import { Info } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ClipxApp } from "@/components/clipx/ClipxApp";
 import type { AccountControls, SignalSwitches } from "@/components/dashboard/AgentControls";
+import { connectAccount, getEthereum, NO_WALLET, signMessage, walletErrorMessage } from "@/lib/browser-wallet";
 import { useAgentConnection } from "@/hooks/useAgentConnection";
 import { blacklistToken, setAgentApiBase, unblacklistToken } from "@/lib/agent-api";
 
@@ -33,6 +34,8 @@ function DashboardSkeleton() {
 }
 
 type TenantView = {
+  login_wallets?: string[];
+  signed_in_browsers?: number;
   cmc_x402?: number | null;
   studio_x402?: number | null;
   telegram_linked?: boolean;
@@ -59,7 +62,9 @@ async function post(op: string, body?: unknown) {
 export function CustomerDashboard() {
   setAgentApiBase("/api/portal/agent");
   useEffect(() => () => setAgentApiBase(null), []);
-  const [tenant, setTenant] = useState<TenantView | null>(null);
+  const [tenant, setTenantRaw] = useState<TenantView | null>(null);
+  // Some replies carry fewer fields than the full view; keep what they leave out.
+  const setTenant = useCallback((next: TenantView) => setTenantRaw((prev) => ({ ...(prev || {}), ...next })), []);
 
   const refresh = useCallback(async () => {
     const res = await fetch("/api/portal/session", { cache: "no-store" }).catch(() => null);
@@ -81,13 +86,49 @@ export function CustomerDashboard() {
         return { ok: r.ok, error: r.error };
       },
     };
-  }, [tenant]);
+  }, [tenant, setTenant]);
 
   const account = useMemo<AccountControls | null>(() => {
     if (!tenant?.subscription) return null;
     return {
       subscription: tenant.subscription,
       telegramLinked: Boolean(tenant.telegram_linked),
+      loginWallets: tenant.login_wallets || [],
+      signedInBrowsers: tenant.signed_in_browsers || 1,
+      onLinkWallet: async () => {
+        const eth = getEthereum();
+        if (!eth) return { ok: false, error: NO_WALLET };
+        try {
+          const account = await connectAccount(eth);
+          const ch = await fetch("/api/portal/challenge", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ purpose: "link" }) });
+          const challenge = await ch.json().catch(() => ({}));
+          if (!ch.ok) return { ok: false, error: String(challenge?.error || "Could not start") };
+          const signature = await signMessage(eth, account, String(challenge.message));
+          const res = await fetch("/api/portal/wallets", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ signature }) });
+          const data = await res.json().catch(() => ({}));
+          if (!res.ok) return { ok: false, error: String(data?.error || "Could not link the wallet") };
+          if (data?.tenant) setTenant(data.tenant as TenantView);
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: walletErrorMessage(err, "Could not link the wallet") };
+        }
+      },
+      onUnlinkWallet: async (address) => {
+        const res = await fetch("/api/portal/wallets", { method: "DELETE", headers: { "content-type": "application/json" }, body: JSON.stringify({ address }) });
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data?.tenant) setTenant(data.tenant as TenantView);
+        return { ok: res.ok, error: res.ok ? undefined : String(data?.error || "Could not remove it") };
+      },
+      onNewAccessCode: async () => {
+        const res = await fetch("/api/portal/access-code", { method: "POST" });
+        const data = await res.json().catch(() => ({}));
+        return res.ok && data?.accessCode ? { ok: true, code: String(data.accessCode) } : { ok: false, error: String(data?.error || "Could not make a code") };
+      },
+      onSignOutOthers: async () => {
+        const r = await post("sessions-revoke");
+        if (r.ok && r.data?.tenant) setTenant(r.data.tenant as TenantView);
+        return { ok: r.ok, error: r.error };
+      },
       onRenew: () => {
         window.location.href = "/portal?renew=1";
       },
@@ -109,7 +150,7 @@ export function CustomerDashboard() {
       },
       onRefresh: refresh,
     };
-  }, [tenant, refresh]);
+  }, [tenant, refresh, setTenant]);
 
   const {
     connected,

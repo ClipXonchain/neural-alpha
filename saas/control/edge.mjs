@@ -166,12 +166,13 @@ export function createEdgeCluster({ store, config, localCapacity, fetchImpl = gl
     return found ? found.baseUrl : null;
   }
 
-  async function forwardJson(hostId, method, path, body, authHeader) {
+  async function forwardJson(hostId, method, path, body, authHeader, extraHeaders = {}) {
     const baseUrl = resolveNodeUrl(hostId);
     if (!baseUrl) {
       throw Object.assign(new Error(`unknown cell hostId: ${hostId}`), { status: 404 });
     }
     const headers = {
+      ...extraHeaders,
       ...(authHeader ? { authorization: authHeader } : config.apiSecret ? { authorization: `Bearer ${config.apiSecret}` } : {}),
       ...(body !== undefined ? { "content-type": "application/json" } : {}),
     };

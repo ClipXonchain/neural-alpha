@@ -728,8 +728,9 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     });
     assert.equal(reopened.status, 200);
     assert.notEqual(reopened.body.compoundToken, compoundToken);
+    // Signing in elsewhere no longer signs the first browser out: an agent keeps several sessions.
     const oldToken = await call(url, `/tenants/${tenantId}`, { token: compoundToken });
-    assert.equal(oldToken.status, 404);
+    assert.equal(oldToken.status, 200);
     const newToken = await call(url, `/tenants/${tenantId}`, { token: reopened.body.compoundToken });
     assert.equal(newToken.status, 200);
 
@@ -1400,5 +1401,225 @@ test("encrypted tenant backups run on demand and hold no readable secret", async
   } finally {
     second.server.close();
     off.store.close();
+  }
+});
+
+// ---- Several sessions, per-client limits and login wallets ------------------------------------
+
+const W1 = `0x${"a1".repeat(20)}`;
+const W2 = `0x${"b2".repeat(20)}`;
+
+async function codeOf(url, id) {
+  const r = await call(url, `/tenants/${id}/access-code`, { method: "POST", body: {} });
+  assert.equal(r.status, 200);
+  return r.body.accessCode;
+}
+
+test("an agent keeps up to three signed-in browsers; the oldest makes room; others can be signed out", async () => {
+  const h = opsHarness();
+  const { server, url, id, token } = await boot(h);
+  try {
+    const code = await codeOf(url, id);
+    const signIn = async () => (await call(url, "/session/code", { method: "POST", token: null, body: { code } })).body.compoundToken;
+    const second = await signIn();
+    const third = await signIn();
+    // the purchase token, the second and the third all work at once
+    for (const t of [token, second, third]) assert.equal((await call(url, `/tenants/${id}`, { token: t })).status, 200);
+    assert.equal((await call(url, `/tenants/${id}`, { token: third })).body.tenant.signed_in_browsers, 3);
+
+    // a fourth sign-in drops the oldest (the purchase token) and nobody else
+    const fourth = await signIn();
+    assert.equal((await call(url, `/tenants/${id}`, { token })).status, 404);
+    for (const t of [second, third, fourth]) assert.equal((await call(url, `/tenants/${id}`, { token: t })).status, 200);
+    const fifth = await signIn();
+    assert.equal((await call(url, `/tenants/${id}`, { token: second })).status, 404);
+    assert.equal((await call(url, `/tenants/${id}`, { token: fifth })).status, 200);
+
+    // "sign out other devices" keeps the caller and removes the rest
+    const out = await call(url, `/tenants/${id}/sessions/revoke`, { method: "POST", token: fifth, body: {} });
+    assert.equal(out.status, 200);
+    assert.equal(out.body.tenant.signed_in_browsers, 1);
+    assert.equal((await call(url, `/tenants/${id}`, { token: fifth })).status, 200);
+    for (const t of [third, fourth]) assert.equal((await call(url, `/tenants/${id}`, { token: t })).status, 404);
+    // the operator has no browser of its own to keep, so it must not wipe the customer's
+    assert.equal((await call(url, `/tenants/${id}/sessions/revoke`, { method: "POST", body: {} })).status, 400);
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("wrong access codes are limited per client, so one guesser never locks out a customer", async () => {
+  const h = opsHarness();
+  const { server, url, id } = await boot(h);
+  try {
+    const code = await codeOf(url, id);
+    const bad = (client) =>
+      call(url, "/session/code", { method: "POST", token: "test-secret", headers: { "x-portal-client": client }, body: { code: "AAAA-BBBB-CCCC-DDDD" } });
+    for (let i = 0; i < 8; i++) assert.equal((await bad("203.0.113.9")).status, 401);
+    assert.equal((await bad("203.0.113.9")).status, 429, "the guesser is stopped");
+
+    // another visitor, with the right code, is unaffected
+    const fine = await call(url, "/session/code", { method: "POST", token: "test-secret", headers: { "x-portal-client": "198.51.100.4" }, body: { code } });
+    assert.equal(fine.status, 200);
+    // and the blocked address cannot dodge by using the right code until its minute passes
+    const still = await call(url, "/session/code", { method: "POST", token: "test-secret", headers: { "x-portal-client": "203.0.113.9" }, body: { code } });
+    assert.equal(still.status, 429);
+
+    // a caller that is not the portal cannot choose its own bucket with a header
+    for (let i = 0; i < 8; i++) await call(url, "/session/code", { method: "POST", token: null, headers: { "x-portal-client": `spoof-${i}` }, body: { code: "AAAA-BBBB-CCCC-DDDD" } });
+    const unmasked = await call(url, "/session/code", { method: "POST", token: null, headers: { "x-portal-client": "fresh" }, body: { code: "AAAA-BBBB-CCCC-DDDD" } });
+    assert.equal(unmasked.status, 429, "a spoofed header does not reset the limit");
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("a linked wallet signs in; only the portal can link; unlink removes it; three wallets at most", async () => {
+  const h = opsHarness();
+  const { server, url, id, token } = await boot(h);
+  try {
+    const open = (payer, extra = {}) => call(url, "/session/open", { method: "POST", body: { payer, ...extra } });
+    assert.equal((await open(W1)).status, 404, "an unknown wallet opens nothing");
+
+    // a customer cannot add a wallet by themselves: the portal must have checked a signature
+    assert.equal((await call(url, `/tenants/${id}/wallets`, { method: "POST", token, body: { address: W1 } })).status, 401);
+    assert.equal((await call(url, `/tenants/${id}/wallets`, { method: "POST", body: { address: "nope" } })).status, 400);
+
+    const linked = await call(url, `/tenants/${id}/wallets`, { method: "POST", body: { address: W1.toUpperCase().replace("0X", "0x") } });
+    assert.equal(linked.status, 200);
+    assert.deepEqual(linked.body.tenant.login_wallets, [W1]);
+    assert.deepEqual((await call(url, `/tenants/${id}`, { token })).body.tenant.login_wallets, [W1], "the customer sees it");
+
+    const session = await open(W1);
+    assert.equal(session.status, 200);
+    assert.equal((await call(url, `/tenants/${id}`, { token: session.body.compoundToken })).status, 200);
+    assert.equal((await open(W2)).status, 404);
+
+    await call(url, `/tenants/${id}/wallets`, { method: "POST", body: { address: W2 } });
+    await call(url, `/tenants/${id}/wallets`, { method: "POST", body: { address: `0x${"c3".repeat(20)}` } });
+    const fourth = await call(url, `/tenants/${id}/wallets`, { method: "POST", body: { address: `0x${"d4".repeat(20)}` } });
+    assert.equal(fourth.status, 409);
+
+    const removed = await call(url, `/tenants/${id}/wallets/${W1}`, { method: "DELETE", token });
+    assert.equal(removed.body.tenant.login_wallets.includes(W1), false);
+    assert.equal((await open(W1)).status, 404, "an unlinked wallet no longer signs in");
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("a wallet that opens two agents gets a list to choose from, then opens the one it picks", async () => {
+  const h = opsHarness();
+  const a = await boot(h, "a7");
+  const { server, url } = a;
+  const second = await call(url, "/tenants", { method: "POST", token: null, body: pay("b8", "USDT") });
+  const idB = second.body.tenant.id;
+  try {
+    for (const id of [a.id, idB]) await call(url, `/tenants/${id}/wallets`, { method: "POST", body: { address: W1 } });
+    const both = await call(url, "/session/open", { method: "POST", body: { payer: W1 } });
+    assert.equal(both.status, 200);
+    assert.deepEqual(both.body.agents.map((x) => x.id).sort(), [a.id, idB].sort());
+    assert.equal(both.body.compoundToken, undefined, "no session until it chooses");
+    const picked = await call(url, "/session/open", { method: "POST", body: { payer: W1, tenantId: idB } });
+    assert.equal(picked.status, 200);
+    assert.equal((await call(url, `/tenants/${idB}`, { token: picked.body.compoundToken })).status, 200);
+    assert.equal((await call(url, `/tenants/${a.id}`, { token: picked.body.compoundToken })).status, 404, "the session is for that agent only");
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("through an edge-only mother, sign-in and checkout reach agents and orders that live on a cell", async () => {
+  const rootM = mkdtempSync(join(tmpdir(), "na-mother-"));
+  const rootC = mkdtempSync(join(tmpdir(), "na-cell-"));
+  const treasury = "0x1111111111111111111111111111111111111111";
+  const shared = { CONTROL_API_SECRET: "shared-cluster-secret", SAAS_MONITOR_SECRET: "monitor-secret", SAAS_TREASURY_ADDRESS: treasury };
+  const mother = loadConfig({ ...shared, SAAS_DATA_ROOT: rootM, SAAS_DB_PATH: join(rootM, "control.sqlite"), SAAS_HOST_ID: "mother", SAAS_EDGE_ONLY: "1" });
+  const cellCfg = loadConfig({ ...shared, SAAS_DATA_ROOT: rootC, SAAS_DB_PATH: join(rootC, "control.sqlite"), SAAS_HOST_ID: "cell-02", SAAS_MAX_TENANTS: "2" });
+  const storeM = openStore(mother.dbPath);
+  const storeC = openStore(cellCfg.dbPath);
+  const edge = await listen(createHandler({ store: storeM, docker: fakeDocker(), config: mother }));
+  const cell = await listen(createHandler({ store: storeC, docker: fakeDocker(), config: cellCfg }));
+  const cellDirect = await listen(createHandler({ store: storeC, docker: fakeDocker(), config: { ...cellCfg, treasuryAddress: "" } }));
+  const OP = "shared-cluster-secret";
+  try {
+    assert.equal((await call(edge.url, "/cluster/nodes", { method: "POST", token: OP, body: { hostId: "cell-02", baseUrl: cell.url } })).status, 201);
+
+    // the agent lives on the cell; the mother has no record of it
+    const made = await call(cellDirect.url, "/tenants", { method: "POST", token: null, body: pay("ee", "USDT") });
+    const id = made.body.tenant.id;
+    assert.equal(storeM.get(id), null);
+    const code = (await call(cellDirect.url, `/tenants/${id}/access-code`, { method: "POST", token: OP, body: {} })).body.accessCode;
+    await call(cellDirect.url, `/tenants/${id}/wallets`, { method: "POST", token: OP, body: { address: W1 } });
+
+    // access code, asked of the mother
+    const byCode = await call(edge.url, "/session/code", { method: "POST", token: OP, headers: { "x-portal-client": "198.51.100.4" }, body: { code } });
+    assert.equal(byCode.status, 200, JSON.stringify(byCode.body) + " code=" + code);
+    assert.match(byCode.body.compoundToken, /^cell-02\./);
+    assert.equal((await call(edge.url, `/tenants/${id}`, { token: byCode.body.compoundToken })).status, 200, "and the mother then proxies to the cell");
+
+    // a wallet, asked of the mother
+    const byWallet = await call(edge.url, "/session/open", { method: "POST", token: OP, body: { payer: W1 } });
+    assert.equal(byWallet.status, 200);
+    assert.match(byWallet.body.compoundToken, /^cell-02\./);
+
+    // nobody anywhere knows these
+    const wrong = await call(edge.url, "/session/code", { method: "POST", token: OP, headers: { "x-portal-client": "198.51.100.5" }, body: { code: "AAAA-BBBB-CCCC-DDDD" } });
+    assert.equal(wrong.status, 401);
+    assert.equal((await call(edge.url, "/session/open", { method: "POST", token: OP, body: { payer: W2 } })).status, 404);
+
+    // checkout: the mother sends the new order to the cell, then can still read and finish it
+    const quote = await call(edge.url, "/checkout", { method: "POST", token: null, body: { paymentAsset: "USDT", preset: "100" } });
+    assert.equal(quote.status, 201);
+    assert.equal(quote.body.order.hostId, "cell-02");
+    assert.equal(storeM.getOrder(quote.body.order.id), null, "the order is not on the mother");
+    const read = await call(edge.url, `/checkout/${quote.body.order.id}`, { token: null });
+    assert.equal(read.status, 200);
+    assert.equal(read.body.order.id, quote.body.order.id);
+    const claim = await call(edge.url, `/checkout/${quote.body.order.id}/claim`, { method: "POST", token: null, body: { claimSecret: quote.body.claimSecret } });
+    assert.notEqual(claim.body.error, "order not found", "the cell answered, not the mother");
+    assert.equal((await call(edge.url, "/checkout/ord_000000000000", { token: null })).status, 404, "an order nobody has is still not found");
+  } finally {
+    for (const s of [edge, cell, cellDirect]) s.server.close();
+    storeM.close();
+    storeC.close();
+  }
+});
+
+test("the Telegram poller on the mother reaches a chat that is linked on a cell", async () => {
+  const rootM = mkdtempSync(join(tmpdir(), "na-tgm-"));
+  const rootC = mkdtempSync(join(tmpdir(), "na-tgc-"));
+  const shared = { CONTROL_API_SECRET: "shared-cluster-secret", TELEGRAM_BOT_TOKEN: "1:T", TELEGRAM_BOT_USERNAME: "FakeBot" };
+  const mother = loadConfig({ ...shared, SAAS_DATA_ROOT: rootM, SAAS_DB_PATH: join(rootM, "c.sqlite"), SAAS_HOST_ID: "mother", SAAS_EDGE_ONLY: "1" });
+  const cellCfg = loadConfig({ ...shared, SAAS_DATA_ROOT: rootC, SAAS_DB_PATH: join(rootC, "c.sqlite"), SAAS_HOST_ID: "cell-02" });
+  const storeM = openStore(mother.dbPath);
+  const storeC = openStore(cellCfg.dbPath);
+  const tg = { enabled: true, send: async () => true, ops: async () => true };
+  const motherHandler = createHandler({ store: storeM, docker: fakeDocker(), config: mother, telegram: tg });
+  const edge = await listen(motherHandler);
+  const cell = await listen(createHandler({ store: storeC, docker: fakeDocker(), config: cellCfg, telegram: tg }));
+  const OP = "shared-cluster-secret";
+  try {
+    await call(edge.url, "/cluster/nodes", { method: "POST", token: OP, body: { hostId: "cell-02", baseUrl: cell.url } });
+    const cellOnly = await listen(createHandler({ store: storeC, docker: fakeDocker(), config: { ...cellCfg, treasuryAddress: "" }, telegram: tg }));
+    const made = await call(cellOnly.url, "/tenants", { method: "POST", token: null, body: pay("ee", "USDT") });
+    const id = made.body.tenant.id;
+    const code = (await call(cell.url, `/tenants/${id}/telegram/code`, { method: "POST", token: OP, body: {} })).body.code;
+
+    // the poller only runs on the mother, so the mother has to find the owning cell
+    assert.match(await motherHandler.routeTelegram({ chatId: "555", text: `/start ${code}` }), /^Linked/);
+    assert.equal(storeC.get(id).telegram_chat_id, "555");
+    assert.match(await motherHandler.routeTelegram({ chatId: "555", text: "/status" }), new RegExp(`Agent ${id}`));
+    assert.match(await motherHandler.routeTelegram({ chatId: "999", text: "/status" }), /do not know this chat/);
+    cellOnly.server.close();
+  } finally {
+    edge.server.close();
+    cell.server.close();
+    storeM.close();
+    storeC.close();
   }
 });

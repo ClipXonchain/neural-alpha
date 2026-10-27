@@ -3,13 +3,15 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 export const CHALLENGE_COOKIE = "na_challenge";
 export const PROOF_COOKIE = "na_wallet";
 
-export type ChallengePurpose = "login" | "payment";
+export type ChallengePurpose = "login" | "payment" | "link";
 
 export type Challenge = {
   purpose: ChallengePurpose;
   nonce: string;
   exp: number;
   paymentTx?: string;
+  /** Only for "link": the agent the wallet is being linked to. */
+  tenantId?: string;
 };
 
 export function packCookie(value: unknown) {
@@ -30,21 +32,25 @@ export function loginMessage(input: Challenge) {
     "Neural Alpha",
     input.purpose === "payment"
       ? "Confirm the fee transaction from this wallet."
-      : "Open the agent paid by this wallet.",
+      : input.purpose === "link"
+        ? `Link this wallet to sign in to agent ${input.tenantId}. It only proves you own this wallet. It cannot move funds or trade.`
+        : "Sign in to your agent. This only proves you own this wallet. It cannot move funds.",
     `Nonce: ${input.nonce}`,
     `Expires: ${new Date(input.exp).toISOString()}`,
   ];
   if (input.purpose === "payment" && input.paymentTx) lines.push(`Transaction: ${input.paymentTx}`);
+  if (input.purpose === "link" && input.tenantId) lines.push(`Agent: ${input.tenantId}`);
   return lines.join("\n");
 }
 
 export function readChallenge(raw: string | undefined, now = Date.now()): Challenge | null {
   const parsed = unpackCookie<Challenge>(raw);
   if (!parsed) return null;
-  if (parsed.purpose !== "login" && parsed.purpose !== "payment") return null;
+  if (parsed.purpose !== "login" && parsed.purpose !== "payment" && parsed.purpose !== "link") return null;
   if (!/^[a-f0-9]{32}$/.test(parsed.nonce || "")) return null;
   if (!Number.isFinite(parsed.exp) || parsed.exp < now) return null;
   if (parsed.purpose === "payment" && !/^0x[a-f0-9]{64}$/.test(parsed.paymentTx || "")) return null;
+  if (parsed.purpose === "link" && !/^[a-f0-9]{8}$/.test(parsed.tenantId || "")) return null;
   return parsed;
 }
 

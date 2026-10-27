@@ -48,7 +48,19 @@ pm2 save && pm2 startup
 `SAAS_EDGE_ONLY=1` means the mother never takes a customer itself; it only routes to cells.
 `TELEGRAM_BOT_POLL=1` goes on exactly this one process.
 
-Put nginx and TLS in front of port 3007 for your domain (certbot). Never expose port 3910.
+Put nginx and TLS in front of port 3007 for your domain (certbot). Never expose port 3910. The portal limits
+wrong access codes **per visitor**, so nginx must tell it who the visitor is. Without these lines everyone shares
+one limit, and a single guesser can lock all customers out of code sign-in:
+
+```nginx
+location / {
+    proxy_pass http://127.0.0.1:3007;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;          # set by nginx, so a visitor cannot forge it
+    proxy_set_header X-Forwarded-For $remote_addr;
+    proxy_set_header X-Forwarded-Proto $scheme;
+}
+```
 
 **Check:** `curl -s -H "Authorization: Bearer <secret>" http://127.0.0.1:3910/capacity` returns JSON, and
 `https://YOUR-DOMAIN/portal` shows the plan page.

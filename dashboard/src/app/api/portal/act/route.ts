@@ -12,6 +12,7 @@ const OPS: Record<string, { method: "GET" | "POST"; path: string }> = {
   mode: { method: "POST", path: "/mode" },
   signals: { method: "POST", path: "/signals" },
   cancel: { method: "POST", path: "/cancel" },
+  "sessions-revoke": { method: "POST", path: "/sessions/revoke" },
   "telegram-code": { method: "POST", path: "/telegram/code" },
   "telegram-unlink": { method: "POST", path: "/telegram/unlink" },
   "pair-start": { method: "POST", path: "/pair/start" },
