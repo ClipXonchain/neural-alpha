@@ -1,5 +1,9 @@
 # Setting up the SaaS, step by step
 
+> **Starting from fresh or wiped servers?** Use [infra/REBUILD.md](infra/REBUILD.md): one `bootstrap.sh` per server does the
+> hardening, nginx, HTTPS, PM2 and watchdog for you, and `inventory.sh` / `restore-apps.sh` carry your other apps across.
+> This guide explains the same setup by hand.
+
 Follow in order. Each step says how to check it worked. For day-to-day running see
 [OPERATIONS.md](OPERATIONS.md).
 

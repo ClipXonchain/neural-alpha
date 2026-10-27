@@ -1,6 +1,6 @@
 # Operations runbook
 
-First time? Start with [SETUP.md](SETUP.md).
+First time? Start with [SETUP.md](SETUP.md). Rebuilding or replacing a server? See [infra/REBUILD.md](infra/REBUILD.md).
 
 Everything here lives on the `SaaS` branch. Commands run from the repo root.
 
@@ -155,3 +155,10 @@ then the next. Never all cells at once.
 
 First-time setup, in order, is in [SETUP.md](SETUP.md), with an honest list of what was and was not
 tested on real machines.
+
+## The server watchdog
+
+`saas/infra/hostwatch.mjs` runs every 5 minutes (cron, installed by `bootstrap.sh`) and messages the ops chat once
+when something goes wrong and once when it recovers: a disk at 85%, under 10% RAM available, a `neural-*` app that is
+down or restarting in a loop, a customer container restarting, or one pinned at 90% CPU for 15 minutes. Apps you stopped
+on purpose (anything not named `neural-*`) never alert. Its log is `/var/log/neural-hostwatch.log`.

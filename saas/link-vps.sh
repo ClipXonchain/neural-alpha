@@ -125,9 +125,9 @@ EOF
         # shellcheck disable=SC1090
         source "$CELL_ENV"
         set +a
-        # Run node directly (like ecosystem.config.cjs does). PM2's own wrapper would load the
-        # ES module without making it the main program, so the server would never start.
-        pm2 start "$(command -v node)" --interpreter none --name neural-saas-cell --cwd "${REPO_ROOT}" -- "${REPO_ROOT}/saas/control/server.mjs"
+        # One shared definition: node run directly (PM2's wrapper would never make the ES module the
+        # main program) with a memory ceiling, so a leak restarts this process, not the whole host.
+        NA_ROLE=cell pm2 start "${REPO_ROOT}/saas/infra/ecosystem.config.cjs"
         pm2 save >/dev/null 2>&1 || true
       )
       echo "✓ neural-saas-cell is running on ${BIND_HOST}:${PORT} (hostId=${HOST_ID})"

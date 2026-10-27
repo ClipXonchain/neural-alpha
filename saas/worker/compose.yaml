@@ -1,6 +1,17 @@
 # Image definition for one customer container.
 # saas/control starts this with a per-customer override. Do not run it
 # by itself: that would have no private folder and no container name.
+#
+# The limits matter: a customer container that goes wrong (a loop, a flood of network
+# traffic, a runaway log) must hurt only itself. Docker stops it at the memory limit,
+# throttles its CPU, and rotates its logs, while the host and the other customers carry on.
+
+x-limits: &small
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
 
 services:
   worker:
@@ -8,6 +19,12 @@ services:
     build:
       context: ../..
       dockerfile: saas/worker/Dockerfile
+    <<: *small
+    mem_reservation: 512m
+    mem_limit: 1g
+    memswap_limit: 1g        # no swap for a container, so it is killed and restarted instead of crawling
+    cpus: 1.0
+    pids_limit: 512
   bridge:
     image: neural-saas-bridge:local
     build:
@@ -17,3 +34,8 @@ services:
     depends_on:
       - worker
     restart: unless-stopped
+    <<: *small
+    mem_limit: 128m
+    memswap_limit: 128m
+    cpus: 0.25
+    pids_limit: 64

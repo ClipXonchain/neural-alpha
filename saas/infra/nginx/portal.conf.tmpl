@@ -1,0 +1,31 @@
+# Neural Alpha portal. __DOMAIN__ and __PORT__ are filled in by bootstrap.sh.
+# certbot --nginx adds the HTTPS listener and the redirect to this same block.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name __DOMAIN__;
+
+    client_max_body_size 1m;
+
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-Frame-Options "DENY" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Strict-Transport-Security "max-age=31536000" always;   # ignored over plain HTTP
+
+    location ~ ^/api/portal/(code|restore|verify|challenge|open|wallets)$ {
+        limit_req zone=na_auth burst=10 nodelay;
+        proxy_pass http://127.0.0.1:__PORT__;
+        include snippets/neural-proxy.conf;
+    }
+
+    location /api/ {
+        limit_req zone=na_api burst=100 nodelay;
+        proxy_pass http://127.0.0.1:__PORT__;
+        include snippets/neural-proxy.conf;
+    }
+
+    location / {
+        proxy_pass http://127.0.0.1:__PORT__;
+        include snippets/neural-proxy.conf;
+    }
+}
