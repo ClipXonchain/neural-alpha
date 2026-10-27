@@ -50,13 +50,29 @@ test("trades notify once, oldest first, and never replay on first look", () => {
   const t2 = { time: 200, side: "sell", symbol: "NVDAB", usd: 104.5, pnl: 4.5 };
   let r = step({}, up({ recent: [t2, t1] }), 1);
   assert.equal(r.events.length, 0);
-  assert.equal(r.next.lastTrade, 200);
+  assert.equal(r.next.seen.length, 2);
   const t3 = { time: 300, side: "buy", symbol: "TSLAB", usd: 50 };
   const t4 = { time: 400, side: "sell", symbol: "TSLAB", usd: 49, pnl: -1 };
   r = step(r.next, up({ recent: [t4, t3, t2, t1] }), 2);
   assert.deepEqual(r.events.map((e) => e.customer), ["Bought TSLAB for $50.00", "Sold TSLAB for $49.00 (-$1.00)"]);
   r = step(r.next, up({ recent: [t4, t3, t2, t1] }), 3);
   assert.equal(r.events.length, 0);
+});
+
+test("a trade whose timestamp keeps changing is still told once, by its transaction hash", () => {
+  const tx = `0x${"ab".repeat(32)}`;
+  let r = step({}, up({ recent: [{ time: 1000, side: "sell", symbol: "AAPLB", usd: 59.2, pnl: 9.2, tx }] }), 1);
+  for (let i = 0; i < 5; i++) {
+    r = step(r.next, up({ recent: [{ time: 2000 + i, side: "sell", symbol: "AAPLB", usd: 59.2, pnl: 9.2, tx }] }), 2 + i);
+    assert.equal(r.events.length, 0);
+  }
+});
+
+test("an unreachable agent keeps its trade memory", () => {
+  let r = step({}, up({ recent: [{ time: 1, side: "buy", symbol: "A", usd: 1, tx: "0x1" }] }), 1);
+  const before = r.next.seen;
+  r = step(r.next, { reachable: false }, 2);
+  assert.deepEqual(r.next.seen, before);
 });
 
 test("paper trades are labelled", () => {

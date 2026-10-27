@@ -10,6 +10,9 @@ set -euo pipefail
 # A standby mother gets its own interface and subnet, so a cell can have both:
 #   sudo bash saas/wg-link.sh cell --mother-ssh root@STANDBY_IP --iface wg1 --subnet 10.89.0
 #
+# If the mother's public IP is not what the cell should dial (a DNS name, a private
+# address), pass --endpoint host:port or set WG_ENDPOINT.
+#
 # Prints WG_ADDR=<this cell's private address> when done.
 
 CMD="${1:-help}"; shift || true
@@ -81,6 +84,7 @@ case "$CMD" in
     [[ -f "$KEY" ]] || wg genkey > "$KEY"
     PUB="$(wg pubkey < "$KEY")"
     ARGS="mother-add --pubkey '${PUB}' --name '${NAME}' --iface '${IFACE}' --subnet '${SUBNET}' --port '${PORT}'"
+    [[ -z "$ENDPOINT" ]] || { [[ "$ENDPOINT" =~ ^[A-Za-z0-9.:-]+:[0-9]+$ ]] || die "--endpoint must look like host:port"; ARGS="${ARGS} --endpoint '${ENDPOINT}'"; }
     echo "▸ Asking ${MOTHER_SSH} to add this cell as a WireGuard peer"
     OUT="$(ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new "$MOTHER_SSH" \
       "if [ \"\$(id -u)\" -eq 0 ]; then bash -s -- ${ARGS}; else sudo bash -s -- ${ARGS}; fi" < "$0")"

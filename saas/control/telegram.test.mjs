@@ -36,6 +36,8 @@ test("/start CODE and a bare code both link, and the code works once", async () 
   assert.equal(store.get("aaaa1111").telegram_chat_id, "555");
   assert.equal(store.get("aaaa1111").telegram_code_hash, null);
   assert.deepEqual(await ask(store, "777", "/start K7M2QX9P"), { handled: false });
+  // The same used code from the chat that is already linked gets a clear answer, not "who are you".
+  assert.match((await ask(store, "555", "/start K7M2QX9P")).reply, /already linked to your agent/);
   arm(store, "bbbb2222", "ZZZ22222");
   assert.match((await ask(store, "888", "zzz22222")).reply, /^Linked/);
 });

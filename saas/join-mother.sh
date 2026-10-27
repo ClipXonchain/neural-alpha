@@ -13,16 +13,19 @@ set -euo pipefail
 # Cells share the mother's CONTROL_API_SECRET: the mother calls every cell with it.
 # Pass --mother-ssh more than once to register with a standby mother too.
 # --wireguard puts the control API on a private tunnel instead of the public internet.
+#   (--mother-endpoint host:port, once per --mother-ssh in the same order, if a mother should be
+#    dialled somewhere other than its public IP, e.g. a DNS name.)
 #
 # Optional:
 #   --backup-key <64 hex>   key for encrypted customer backups (made for you if omitted: SAVE IT)
 #   --telegram-ops-chat ID  chat that receives ops alerts          --host-id NAME  --port N
 #   --mother-url URL        register over HTTP instead of ssh      --public-ip IP  --mother-ip IP
+#   --mother-endpoint H:P   how to dial each mother's WireGuard port (see above)
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SECRET="${CONTROL_API_SECRET:-}"; TREASURY="${SAAS_TREASURY_ADDRESS:-}"
 HOST_ID=""; PUBLIC_IP=""; MOTHER_URL=""; MOTHER_IP=""; PORT="${SAAS_CONTROL_PORT:-3910}"
-MOTHERS=(); WG=0
+MOTHERS=(); MOTHER_EPS=(); WG=0
 TG_TOKEN="${TELEGRAM_BOT_TOKEN:-}"; TG_USER="${TELEGRAM_BOT_USERNAME:-}"; TG_OPS="${TELEGRAM_OPS_CHAT_ID:-}"
 BK_KEY="${SAAS_BACKUP_KEY:-}"; BK_RSYNC="${SAAS_BACKUP_RSYNC:-}"
 
@@ -34,6 +37,7 @@ while [[ $# -gt 0 ]]; do
     --public-ip) PUBLIC_IP="${2:-}"; shift 2 ;;
     --mother-url) MOTHER_URL="${2:-}"; shift 2 ;;
     --mother-ssh) MOTHERS+=("${2:-}"); shift 2 ;;
+    --mother-endpoint) MOTHER_EPS+=("${2:-}"); shift 2 ;;
     --mother-ip) MOTHER_IP="${2:-}"; shift 2 ;;
     --port) PORT="${2:-}"; shift 2 ;;
     --wireguard) WG=1; shift ;;
@@ -42,7 +46,7 @@ while [[ $# -gt 0 ]]; do
     --telegram-ops-chat) TG_OPS="${2:-}"; shift 2 ;;
     --backup-key) BK_KEY="${2:-}"; shift 2 ;;
     --backup-rsync) BK_RSYNC="${2:-}"; shift 2 ;;
-    -h|--help) sed -n 3,22p "$0"; exit 0 ;;
+    -h|--help) sed -n 3,26p "$0"; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
@@ -75,7 +79,8 @@ if [[ $WG -eq 1 ]]; then
   echo "▸ WireGuard: private link to ${#MOTHERS[@]} mother(s)"
   FIRST_WG=""
   for i in "${!MOTHERS[@]}"; do
-    WG_OUT="$($SUDO bash "$ROOT/saas/wg-link.sh" cell --mother-ssh "${MOTHERS[$i]}" --iface "wg$i" --subnet "10.$((88 + i)).0" --name "$HOST_ID")"
+    WG_OUT="$($SUDO bash "$ROOT/saas/wg-link.sh" cell --mother-ssh "${MOTHERS[$i]}" --iface "wg$i" --subnet "10.$((88 + i)).0" --name "$HOST_ID" ${MOTHER_EPS[$i]:+--endpoint "${MOTHER_EPS[$i]}"})" \
+      || die "could not set up the WireGuard link with ${MOTHERS[$i]} (the error is printed above; check ssh access and that it can run as root)"
     echo "$WG_OUT" | grep -v '^WG_ADDR=' || true
     ADDR="$(sed -n 's/^WG_ADDR=//p' <<<"$WG_OUT")"
     [[ -n "$ADDR" ]] || die "WireGuard setup for ${MOTHERS[$i]} did not return an address"

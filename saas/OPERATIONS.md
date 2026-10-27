@@ -1,5 +1,7 @@
 # Operations runbook
 
+First time? Start with [SETUP.md](SETUP.md).
+
 Everything here lives on the `SaaS` branch. Commands run from the repo root.
 
 ## Add a server (about 5 minutes)
@@ -16,6 +18,8 @@ sudo bash saas/join-mother.sh \
 It installs what is missing, opens a private WireGuard tunnel to the mother, starts the cell,
 registers it, and turns on encrypted backups. **Save the backup key it prints, somewhere that is not
 that server.** Without it the backups cannot be opened.
+
+If a mother should be dialled by a DNS name or private address instead of its public IP, add `--mother-endpoint host:51820` (once per `--mother-ssh`, same order).
 
 Without `--wireguard` the cell speaks plain HTTP with a shared secret, so traffic (including customer
 tokens) is readable on the way. Use it only for a first test.
@@ -78,7 +82,7 @@ and the customer must pair again, unless there is a backup.
 - Files are AES-256-GCM encrypted on the cell. `SAAS_BACKUP_KEY` stays on the cell and with you.
   The machine that stores the copies sees ciphertext only.
 - `SAAS_BACKUP_RSYNC=user@host:/path` copies them off the machine after each run.
-- Run one now: `curl -X POST -H "Authorization: Bearer $CONTROL_API_SECRET" http://127.0.0.1:3910/backups/run`
+- Run one now: `curl -X POST -H "Authorization: Bearer $CONTROL_API_SECRET" http://${SAAS_BIND_HOST:-127.0.0.1}:3910/backups/run` (a `--wireguard` cell listens on its private address, not 127.0.0.1)
 
 Restore onto a replacement machine:
 
@@ -117,8 +121,7 @@ then the next. Never all cells at once.
 | `SAAS_BACKUP_RSYNC` | unset | `user@host:/path` off-site copy |
 | `SAAS_ROLLOUT_POLL_MS`, `SAAS_ROLLOUT_TIMEOUT_MS` | 5000, 150000 | how long a new image gets to come up |
 
-## Not verified on real servers
+## Setup and what was tested
 
-The Docker build, `join-mother.sh`, `wg-link.sh`, `rollout.sh` and the Telegram bot talking to
-Telegram have only been checked by syntax, argument tests and fakes. Try each on one spare VPS and one
-test customer before relying on it.
+First-time setup, in order, is in [SETUP.md](SETUP.md), with an honest list of what was and was not
+tested on real machines.

@@ -1,7 +1,8 @@
 # Runs the agent from this checkout (neural-alpha/), so one commit ships
 # the agent, control plane and portal together. Build context: repo root.
 
-FROM node:20-bookworm-slim
+# Node 22: the agent uses the built-in node:sqlite, which Node 20 does not have.
+FROM node:22-bookworm-slim
 
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates python3 make g++ \

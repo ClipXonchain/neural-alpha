@@ -785,7 +785,7 @@ export function AgentControls({ connected, config, onSave, signals, account }: A
           <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="relative overflow-hidden">
             <div className="flex items-center gap-3 rounded-2xl bg-[rgba(245,185,66,.08)] px-4 py-3 text-[12.5px] text-[#f5b942] ring-1 ring-[rgba(245,185,66,.22)]">
               <WifiOff className="size-4 shrink-0" />
-              Your agent is offline. You can look around, and editing unlocks as soon as it reconnects.
+              Your agent is offline. Trading settings unlock when it reconnects. Subscription, Telegram and paid signals still work.
             </div>
           </motion.div>
         )}
@@ -846,7 +846,7 @@ export function AgentControls({ connected, config, onSave, signals, account }: A
       {account && (
         <div className="grid min-w-0 gap-5 xl:grid-cols-2">
           <SubscriptionPanel account={account} disabled={false} />
-          <TelegramPanel account={account} disabled={off} />
+          <TelegramPanel account={account} disabled={false} />
         </div>
       )}
 
@@ -900,7 +900,8 @@ export function AgentControls({ connected, config, onSave, signals, account }: A
         </div>
       </Panel>
 
-      {signals && <SignalsPanel controls={signals} disabled={off} />}
+      {/* Paid-call switches and Telegram go to the control plane, not the agent, so they stay usable while the agent is down. */}
+      {signals && <SignalsPanel controls={signals} disabled={false} />}
       </div>
 
       <div className="mt-1 flex items-center gap-2.5 px-1">

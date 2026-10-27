@@ -15,7 +15,9 @@ CELL_ENV="${SAAS_DATA_ROOT:-$ROOT/saas/runtime}/cell.env"
 [[ -f "$CELL_ENV" ]] && { set -a; source "$CELL_ENV"; set +a; }
 
 SECRET="${CONTROL_API_SECRET:-}"
-URL="http://127.0.0.1:${SAAS_CONTROL_PORT:-3910}"
+# With --wireguard the API listens on the private address only, so call that one.
+BIND="${SAAS_BIND_HOST:-127.0.0.1}"; [[ "$BIND" == "0.0.0.0" ]] && BIND="127.0.0.1"
+URL="http://${BIND}:${SAAS_CONTROL_PORT:-3910}"
 TAG=""; SOAK=120; PULL=1; BUILD=1; TENANTS=()
 
 while [[ $# -gt 0 ]]; do
@@ -52,7 +54,9 @@ fi
 
 IDS="[]"
 if [[ ${#TENANTS[@]} -gt 0 ]]; then IDS="$(printf '%s\n' "${TENANTS[@]}" | node -e 'console.log(JSON.stringify(require("fs").readFileSync(0,"utf8").split("\n").filter(Boolean)))')"; fi
-BODY="{\"tag\":\"${TAG}\",\"soakSec\":${SOAK}$([[ "$IDS" != "[]" ]] && echo ",\"tenantIds\":${IDS}")}"
+# (An `a && b` inside the string would abort the script under set -e when `a` is false.)
+IDS_PART=""; [[ "$IDS" == "[]" ]] || IDS_PART=",\"tenantIds\":${IDS}"
+BODY="{\"tag\":\"${TAG}\",\"soakSec\":${SOAK}${IDS_PART}}"
 
 echo "▸ Rolling out ${TAG} (canary soak ${SOAK}s)"
 curl -fsS -X POST -H "Authorization: Bearer ${SECRET}" -H "Content-Type: application/json" -d "$BODY" "${URL}/rollout" >/dev/null

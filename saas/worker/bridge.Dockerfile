@@ -1,4 +1,4 @@
-FROM node:20-bookworm-slim
+FROM node:22-bookworm-slim
 WORKDIR /app
 COPY saas/worker/bridge.mjs ./bridge.mjs
 ENV AGENT_PORT=3847 BRIDGE_PORT=3848

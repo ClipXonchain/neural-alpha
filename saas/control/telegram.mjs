@@ -22,10 +22,10 @@ export function newTelegramCode() {
 export const normalizeTelegramCode = (text) => String(text || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
 export const hashTelegramCode = (code) => createHash("sha256").update(`telegram:${normalizeTelegramCode(code)}`).digest("hex");
 
-export function createTelegram({ token = "", opsChatId = "", fetchImpl = globalThis.fetch, log = console } = {}) {
+export function createTelegram({ token = "", opsChatId = "", apiBase = "https://api.telegram.org", fetchImpl = globalThis.fetch, log = console } = {}) {
   const redact = (value) => String(value instanceof Error ? value.message : value).split(token).join("[token]");
   async function api(method, body, timeoutMs = 15_000) {
-    const res = await fetchImpl(`https://api.telegram.org/bot${token}/${method}`, {
+    const res = await fetchImpl(`${apiBase}/bot${token}/${method}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -74,7 +74,12 @@ export async function handleInbound({ store, config, now, chatId, text, describe
 
   if (code) {
     const row = CODE_RE.test(code) ? store.findByTelegramCodeHash(hashTelegramCode(code)) : null;
-    if (!row || row.host_id !== config.hostId) return { handled: false };
+    if (!row || row.host_id !== config.hostId) {
+      // A used or unknown code from a chat that is already linked here is not a stranger.
+      return alreadyLinked
+        ? { handled: true, reply: "This chat is already linked to your agent. Send /status, or /unlink if you want to link a different one." }
+        : { handled: false };
+    }
     if (Date.parse(row.telegram_code_expires || "") < now().getTime()) {
       return { handled: true, reply: "That code has expired. Make a new one in Settings and send it here." };
     }

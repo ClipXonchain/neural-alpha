@@ -74,20 +74,25 @@ export function evaluate({ row, desk, nowMs, prev = {}, stallMs }) {
     }
   }
 
-  // Trades: the first look only records where we are, so a new link never replays history.
-  let lastTrade = prev.lastTrade;
+  // Trades are told apart by transaction hash (time if there is none), so a clock that
+  // moves or a reordered list never repeats one. The first look only records what is
+  // already there, so a new link never replays history.
+  let seen = Array.isArray(prev.seen) ? prev.seen : undefined;
   const recent = Array.isArray(desk.recent) ? desk.recent : [];
-  const newest = recent.reduce((m, t) => Math.max(m, Number(t.time) || 0), 0);
-  if (desk.reachable && lastTrade === undefined) {
-    lastTrade = newest;
-  } else if (desk.reachable) {
-    const fresh = recent
-      .filter((t) => Number(t.time) > lastTrade)
-      .sort((a, b) => a.time - b.time)
-      .slice(-5);
-    for (const t of fresh) events.push({ type: "trade", customer: tradeText(t, row.agent_mode) });
-    lastTrade = Math.max(lastTrade, newest);
+  const keyOf = (t) => t.tx || `t${t.time}`;
+  if (desk.reachable) {
+    if (seen === undefined) {
+      seen = recent.map(keyOf);
+    } else {
+      const known = new Set(seen);
+      const fresh = recent
+        .filter((t) => !known.has(keyOf(t)))
+        .sort((a, b) => a.time - b.time)
+        .slice(-5);
+      for (const t of fresh) events.push({ type: "trade", customer: tradeText(t, row.agent_mode) });
+      seen = [...seen, ...recent.map(keyOf).filter((k) => !known.has(k))].slice(-100);
+    }
   }
 
-  return { next: { miss, open, cycle, lastTrade }, events };
+  return { next: { miss, open, cycle, seen }, events };
 }

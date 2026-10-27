@@ -104,6 +104,8 @@ export function loadConfig(env = process.env) {
     telegramBotUsername: env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "") || "",
     telegramOpsChatId: env.TELEGRAM_OPS_CHAT_ID?.trim() || "",
     telegramPoll: env.TELEGRAM_BOT_POLL === "1",
+    // Only for tests against a fake Telegram on localhost.
+    telegramApiBase: env.TELEGRAM_API_BASE?.trim() || "https://api.telegram.org",
     maintenanceMs: Math.max(5000, num("SAAS_MAINTENANCE_MS", 60_000)),
     backupKey: env.SAAS_BACKUP_KEY?.trim() || "",
     backupDir: env.SAAS_BACKUP_DIR?.trim() || "",
@@ -156,7 +158,7 @@ export function formatAgentId(value) {
 export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice, telegram: injectedTelegram, now = () => new Date() }) {
   const telegram =
     injectedTelegram ||
-    createTelegram({ token: config.telegramToken, opsChatId: config.telegramOpsChatId, fetchImpl });
+    createTelegram({ token: config.telegramToken, opsChatId: config.telegramOpsChatId, apiBase: config.telegramApiBase, fetchImpl });
   let rolloutJob = null;
   const currentBnbPriceUsd = () => {
     const live = Number(bnbPrice?.priceUsd?.());
@@ -2432,9 +2434,16 @@ export function createSandboxRpc(store, config) {
     const isBnb = openOrder.asset === "BNB";
     const contract = config.tokenContracts[openOrder.asset] || config.tokenContracts.USDT;
     const hash = String(params?.[0] || `0x${"aa".repeat(32)}`).toLowerCase();
+    const blockHash = `0x${"b1".repeat(32)}`;
+    if (method === "eth_getBlockByNumber") {
+      // A payment is made after its order exists; one second ahead clears the sub-second rounding in the check.
+      return { hash: blockHash, timestamp: `0x${(Math.floor(Date.now() / 1000) + 1).toString(16)}` };
+    }
     if (method === "eth_getTransactionByHash") {
       return {
         hash,
+        blockHash,
+        blockNumber: "0x3d0",
         from: payer,
         to: isBnb ? openOrder.treasury_address : contract,
         value: isBnb ? `0x${BigInt(openOrder.amount_wei).toString(16)}` : "0x0",
@@ -2443,6 +2452,8 @@ export function createSandboxRpc(store, config) {
     if (method === "eth_getTransactionReceipt") {
       return {
         status: "0x1",
+        transactionHash: hash,
+        blockHash,
         blockNumber: "0x3d0", // block 976 -> 25 confirmations (>= 15)
         logs: isBnb
           ? []
@@ -2450,7 +2461,7 @@ export function createSandboxRpc(store, config) {
               {
                 address: contract,
                 topics: [ERC20_TRANSFER_TOPIC, padTopicAddress(payer), padTopicAddress(openOrder.treasury_address)],
-                data: `0x${BigInt(openOrder.amount_wei).toString(16)}`,
+                data: `0x${BigInt(openOrder.amount_wei).toString(16).padStart(64, "0")}`, // a real log pads to 32 bytes
               },
             ],
       };
@@ -2466,7 +2477,7 @@ export function start(config = loadConfig(), deps = {}) {
   watchUserRecords(store, () => backup.kick());
   void attachSaasBackup({
     store,
-    databaseUrl: config.databaseUrl,
+    databaseUrl: config.devSandbox ? "" : config.databaseUrl,
     log: (message, level) => {
       if (level === "info") console.log(message);
       else console.warn(message);
@@ -2507,13 +2518,11 @@ export function start(config = loadConfig(), deps = {}) {
     };
     timers.push(setTimeout(run, firstMs).unref(), setInterval(run, ms).unref());
   };
-  if (!config.devSandbox) {
-    every(() => runMaintenance({ store, docker, config, telegram: handler.telegram }), config.maintenanceMs, 15_000);
-    if (parseBackupKey(config.backupKey) && config.backupDir) {
-      every(() => runTenantBackup({ store, config, telegram: handler.telegram }), config.backupEveryMs, 120_000);
-    } else {
-      console.warn("  Tenant backups are OFF: set SAAS_BACKUP_KEY and SAAS_BACKUP_DIR (a lost disk loses every wallet login).");
-    }
+  every(() => runMaintenance({ store, docker, config, telegram: handler.telegram }), config.maintenanceMs, 15_000);
+  if (parseBackupKey(config.backupKey) && config.backupDir) {
+    every(() => runTenantBackup({ store, config, telegram: handler.telegram }), config.backupEveryMs, 120_000);
+  } else if (!config.devSandbox) {
+    console.warn("  Tenant backups are OFF: set SAAS_BACKUP_KEY and SAAS_BACKUP_DIR (a lost disk loses every wallet login).");
   }
   let poller = null;
   if (config.telegramPoll && handler.telegram.enabled) {
@@ -2541,6 +2550,7 @@ export function start(config = loadConfig(), deps = {}) {
 const isMain = process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (isMain) {
   const cellEnv = join(REPO_ROOT, "saas/runtime/cell.env");
-  if (existsSync(cellEnv)) process.loadEnvFile(cellEnv);
+  // The dev sandbox is fake end to end: it must never pick up a real cell's secrets or database.
+  if (process.env.SAAS_DEV_SANDBOX !== "1" && existsSync(cellEnv)) process.loadEnvFile(cellEnv);
   start();
 }

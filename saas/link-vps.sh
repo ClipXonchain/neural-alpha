@@ -125,7 +125,9 @@ EOF
         # shellcheck disable=SC1090
         source "$CELL_ENV"
         set +a
-        pm2 start "${REPO_ROOT}/saas/control/server.mjs" --name neural-saas-cell
+        # Run node directly (like ecosystem.config.cjs does). PM2's own wrapper would load the
+        # ES module without making it the main program, so the server would never start.
+        pm2 start "$(command -v node)" --interpreter none --name neural-saas-cell --cwd "${REPO_ROOT}" -- "${REPO_ROOT}/saas/control/server.mjs"
         pm2 save >/dev/null 2>&1 || true
       )
       echo "✓ neural-saas-cell is running on ${BIND_HOST}:${PORT} (hostId=${HOST_ID})"
