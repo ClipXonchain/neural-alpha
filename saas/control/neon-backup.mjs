@@ -355,11 +355,19 @@ function firstExisting(paths) {
 
 const SQLITE_BOOK_TABLES = new Set(["trades", "nav_snapshots", "chain_syncs", "agent_state"]);
 
+/**
+ * Newest rows per table, so one pass never loads a whole multi-gigabyte book into memory.
+ * The Neon copy only upserts, so rows from earlier passes stay there. Trades are rare and
+ * precious; snapshots and syncs are written constantly, so they get a tighter cap.
+ */
+export const BOOK_ROW_LIMITS = { trades: 50_000, nav_snapshots: 5_000, chain_syncs: 5_000, agent_state: 1_000 };
+
 function readRows(db, table) {
   if (!SQLITE_BOOK_TABLES.has(table)) return [];
   const found = db.prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
   if (!found) return [];
-  return db.prepare(`SELECT * FROM ${table}`).all();
+  const limit = BOOK_ROW_LIMITS[table] ?? 5_000;
+  return db.prepare(`SELECT * FROM ${table} ORDER BY rowid DESC LIMIT ${limit}`).all();
 }
 
 function mapTrade(row, hostId, tenantId) {
@@ -550,10 +558,13 @@ export function createBackupController({
   debounceMs = CHANGE_DEBOUNCE_MS,
   startImmediately = true,
   log = () => {},
+  minGapMs = 0,
+  now = Date.now,
   schedule = setTimeout,
   clear = clearTimeout,
 }) {
   let stopped = false;
+  let lastEnd = null; // when the last pass finished; null until the first one does
   let running = false;
   let rerun = false;
   let intervalTimer = null;
@@ -585,9 +596,11 @@ export function createBackupController({
       }
     } finally {
       running = false;
+      lastEnd = now();
       if (!stopped && rerun) {
+        // Something changed during the pass: schedule one more, but through the same spacing.
         rerun = false;
-        await runSafe();
+        kick();
       }
     }
   }
@@ -599,10 +612,13 @@ export function createBackupController({
       void runSafe();
       return;
     }
+    // Changes arrive in bursts. Wait for the burst to settle, and never run again sooner than
+    // `minGapMs` after the last pass finished, however often something is written.
+    const wait = Math.max(debounceMs, lastEnd !== null ? lastEnd + minGapMs - now() : 0);
     debounceTimer = schedule(() => {
       debounceTimer = null;
       void runSafe();
-    }, debounceMs);
+    }, wait);
     debounceTimer.unref?.();
   };
 
@@ -673,6 +689,8 @@ export async function attachSaasBackup({
   }
   const controller = createBackupController({
     intervalMs: intervalMs ?? backupIntervalMs(),
+    // At most one change-triggered pass every 5 minutes (SAAS_NEON_MIN_GAP_MS to change it).
+    minGapMs: Number(process.env.SAAS_NEON_MIN_GAP_MS) >= 0 && process.env.SAAS_NEON_MIN_GAP_MS ? Number(process.env.SAAS_NEON_MIN_GAP_MS) : 5 * 60_000,
     debounceMs,
     startImmediately,
     log: writeLog,
