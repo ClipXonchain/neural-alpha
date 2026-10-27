@@ -1,5 +1,5 @@
-# Runs ClipXonchain/neural-alpha at a pinned ref.
-# Built from the SaaS branch. Does not patch the deployed tree.
+# Runs the agent from this checkout (neural-alpha/), so one commit ships
+# the agent, control plane and portal together. Build context: repo root.
 
 FROM node:20-bookworm-slim
 
@@ -8,13 +8,15 @@ RUN apt-get update \
   && npm install -g @binance/agentic-wallet@1.12.0 \
   && rm -rf /var/lib/apt/lists/*
 
-ARG UPSTREAM_REPO=https://github.com/ClipXonchain/neural-alpha.git
-ARG UPSTREAM_REF=agentic-wallet
-
 WORKDIR /opt/neural-alpha
-RUN git clone --depth 1 --branch "$UPSTREAM_REF" "$UPSTREAM_REPO" .
+# Manifests first so the npm layer is cached; dashboard's is needed for the lockfile.
+COPY package.json package-lock.json ./
+COPY neural-alpha/package.json neural-alpha/
+COPY dashboard/package.json dashboard/
+RUN npm ci --workspace=neural-alpha
 
-RUN npm ci && npm run build --workspace=neural-alpha
+COPY neural-alpha neural-alpha
+RUN npm run build --workspace=neural-alpha
 
 COPY saas/worker/entrypoint.sh /usr/local/bin/neural-saas-entrypoint
 RUN chmod +x /usr/local/bin/neural-saas-entrypoint

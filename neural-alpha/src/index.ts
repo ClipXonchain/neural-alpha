@@ -48,12 +48,9 @@ async function main() {
 ╚══════════════════════════════════════════════════════════╝\x1b[0m
 `);
 
-  const hasCmcKey = !!process.env.CMC_PRO_API_KEY?.trim();
-
   logger.info("Starting agent", {
     mode,
     bridgeMode: process.env.BRIDGE_MODE || "auto",
-    cmcProApiKey: hasCmcKey ? "set" : "not set",
     paymentToken: process.env.PAYMENT_TOKEN || "USDT",
     initialCash,
     dashboardPort: dashPort,

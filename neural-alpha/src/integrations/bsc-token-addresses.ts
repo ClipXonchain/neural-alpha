@@ -1,7 +1,6 @@
 import { logger } from "../utils/logger.js";
 
 const EVM_ADDRESS = /^0x[a-fA-F0-9]{40}$/i;
-const CMC_PRO_BASE = process.env.CMC_PRO_BASE_URL || "https://pro-api.coinmarketcap.com";
 
 /** BEP-20 contract addresses for competition-eligible tokens on BSC mainnet. */
 export const BSC_TOKEN_ADDRESSES: Record<string, string> = {
@@ -169,41 +168,6 @@ function normalizeAddress(addr: string): string | undefined {
   return EVM_ADDRESS.test(trimmed) ? trimmed : undefined;
 }
 
-function extractBscAddressFromCmcEntry(entry: Record<string, unknown>): string | undefined {
-  const platform = entry.platform as Record<string, unknown> | undefined;
-  if (platform) {
-    const name = String(platform.name ?? "").toLowerCase();
-    const slug = String(platform.slug ?? "").toLowerCase();
-    const tokenAddress = platform.token_address;
-    if (
-      typeof tokenAddress === "string" &&
-      (name.includes("bnb") || name.includes("bsc") || slug === "bnb" || slug === "bsc")
-    ) {
-      return normalizeAddress(tokenAddress);
-    }
-  }
-
-  const contracts = entry.contract_address;
-  if (Array.isArray(contracts)) {
-    for (const row of contracts) {
-      if (!row || typeof row !== "object") continue;
-      const c = row as Record<string, unknown>;
-      const platformName = String(
-        (c.platform as Record<string, unknown> | undefined)?.name ?? c.platform_name ?? ""
-      ).toLowerCase();
-      const addr = c.contract_address ?? c.address;
-      if (
-        typeof addr === "string" &&
-        (platformName.includes("bnb") || platformName.includes("bsc"))
-      ) {
-        return normalizeAddress(addr);
-      }
-    }
-  }
-
-  return undefined;
-}
-
 /** Synchronous lookup — static map only (no CMC API round-trip). */
 export function getKnownBscTokenAddress(symbol: string): string | undefined {
   const sym = symbol.toUpperCase();
@@ -223,32 +187,6 @@ export async function resolveBscTokenAddress(symbol: string): Promise<string | u
       addressCache.set(sym, addr);
       return addr;
     }
-  }
-
-  const apiKey = process.env.CMC_PRO_API_KEY?.trim();
-  if (!apiKey) return undefined;
-
-  try {
-    const url = `${CMC_PRO_BASE}/v2/cryptocurrency/info?symbol=${encodeURIComponent(sym)}`;
-    const res = await fetch(url, {
-      headers: { "X-CMC_PRO_API_KEY": apiKey, Accept: "application/json" },
-    });
-    if (!res.ok) return undefined;
-
-    const body = (await res.json()) as { data?: Record<string, Record<string, unknown>> };
-    const entries = body.data?.[sym] ?? body.data?.[symbol];
-    const list = Array.isArray(entries) ? entries : entries ? [entries] : [];
-
-    for (const entry of list) {
-      const addr = extractBscAddressFromCmcEntry(entry);
-      if (addr) {
-        addressCache.set(sym, addr);
-        logger.info("Resolved BSC token address via CMC", { symbol: sym, address: addr });
-        return addr;
-      }
-    }
-  } catch (err) {
-    logger.warn("CMC token address lookup failed", { symbol: sym, error: String(err) });
   }
 
   return undefined;

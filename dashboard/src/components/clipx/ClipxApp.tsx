@@ -73,7 +73,7 @@ import { SignalMonitor } from "@/components/dashboard/SignalMonitor";
 import { AiDesk } from "@/components/dashboard/AiDesk";
 import { WalletPanel } from "@/components/dashboard/WalletPanel";
 import { ActivityFeed } from "@/components/dashboard/ActivityFeed";
-import { AgentControls, type DeskConfig } from "@/components/dashboard/AgentControls";
+import { AgentControls, type DeskConfig, type SignalControls } from "@/components/dashboard/AgentControls";
 
 type ViewId = "overview" | "portfolio" | "agents" | "strategies" | "trades" | "intelligence" | "watchlist" | "analytics" | "wallet" | "activity" | "settings";
 
@@ -447,6 +447,7 @@ export function ClipxApp({
   onUnblacklist,
   showcaseView,
   allowAccessCode = false,
+  signals = null,
 }: {
   state: AgentState;
   wallet: WalletSnapshot | null;
@@ -469,6 +470,8 @@ export function ClipxApp({
   showcaseView?: ViewId;
   /** Customer portal only. Mints a replacement access code for this signed-in browser. */
   allowAccessCode?: boolean;
+  /** Customer portal only. Per-tenant paid CMC / Agent Studio switches. */
+  signals?: SignalControls | null;
 }) {
   const [view, setView] = useState<ViewId>(showcaseView ?? "overview");
   const [open, setOpen] = useState(false);
@@ -697,7 +700,7 @@ export function ClipxApp({
         {view === "analytics" && (funded ? <AnalyticsPage state={state} config={config} /> : <div className="page"><div className="panel"><p className="feature-note">Portfolio value appears after your Binance wallet is paired.</p></div></div>)}
         {view === "settings" && !readOnly && (
           <div className="page">
-            <AgentControls connected={connected} config={config} onSave={onSave} />
+            <AgentControls connected={connected} config={config} onSave={onSave} signals={signals} />
           </div>
         )}
       </main>

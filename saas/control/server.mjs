@@ -477,6 +477,20 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
         if (tenant.status === "running") await docker.up(dockerTarget(updated));
         return send(res, 200, { tenant: customerView(updated) });
       }
+      if (req.method === "POST" && action === "/signals") {
+        const body = await readJson(req);
+        const patch = {};
+        for (const [key, col] of [["cmc", "cmc_x402"], ["studio", "studio_x402"]]) {
+          if (body[key] === undefined) continue;
+          if (typeof body[key] !== "boolean") return send(res, 400, { error: `${key} must be true or false` });
+          patch[col] = body[key] ? 1 : 0;
+        }
+        if (Object.keys(patch).length === 0) return send(res, 400, { error: "send cmc or studio" });
+        const flagged = store.update(tenant.id, { ...patch, updated_at: now().toISOString() });
+        const updated = applySpec(store, flagged, { risk: riskFromRow(flagged), agentMode: flagged.agent_mode }, config, now);
+        if (tenant.status === "running") await docker.up(dockerTarget(updated));
+        return send(res, 200, { tenant: customerView(updated) });
+      }
       if (req.method === "POST" && action === "/mode") {
         const body = await readJson(req);
         if (body.mode !== "paper" && body.mode !== "live") return send(res, 400, { error: "mode must be paper or live" });
@@ -1230,6 +1244,7 @@ function specFrom(row, risk, config) {
     intervalMs: config.plan.intervalMs,
     staggerSec: staggerSeconds(row.id),
     risk,
+    signals: { cmc: row.cmc_x402 !== 0, studio: row.studio_x402 !== 0 },
     buysHalted: Boolean(row.buys_halted),
     paymentAsset: row.payment_asset,
     apiSecret: row.agent_api_secret,

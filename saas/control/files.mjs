@@ -21,6 +21,10 @@ function x402PerDay(risk) {
   return Number.isInteger(n) && n >= DEFAULT_X402_PER_DAY && n <= MAX_X402_PER_DAY ? n : DEFAULT_X402_PER_DAY;
 }
 
+function flag(on) {
+  return on === false ? "false" : "true";
+}
+
 function x402ScheduleLines(risk) {
   const perDay = x402PerDay(risk);
   const intervalMs = x402IntervalMs(perDay);
@@ -45,8 +49,8 @@ export function renderEnv(spec) {
     `MAX_POSITION_SIZE_USD=${maxPositionUsd}`,
     `HACKATHON_MAX_TRADE_USD=${maxTradeUsd}`,
     `X402_MIN_PAYMENTS_PER_DAY=${x402ScheduleLines(spec.risk).perDay}`,
-    `CMC_X402_ENABLED=true`,
-    `STUDIO_X402_ENABLED=true`,
+    `CMC_X402_ENABLED=${flag(spec.signals?.cmc)}`,
+    `STUDIO_X402_ENABLED=${flag(spec.signals?.studio)}`,
     `CMC_X402_INTERVAL_MS=${x402ScheduleLines(spec.risk).intervalMs}`,
     `STUDIO_X402_INTERVAL_MS=${x402ScheduleLines(spec.risk).intervalMs}`,
     "DISABLE_DRAWDOWN_LIMIT=true",
@@ -83,8 +87,8 @@ export function renderOverride(spec) {
       MAX_POSITION_SIZE_USD: "${maxPositionUsd}"
       HACKATHON_MAX_TRADE_USD: "${maxTradeUsd}"
       X402_MIN_PAYMENTS_PER_DAY: "${x402ScheduleLines(spec.risk).perDay}"
-      CMC_X402_ENABLED: "true"
-      STUDIO_X402_ENABLED: "true"
+      CMC_X402_ENABLED: "${flag(spec.signals?.cmc)}"
+      STUDIO_X402_ENABLED: "${flag(spec.signals?.studio)}"
       CMC_X402_INTERVAL_MS: "${x402ScheduleLines(spec.risk).intervalMs}"
       STUDIO_X402_INTERVAL_MS: "${x402ScheduleLines(spec.risk).intervalMs}"
       DISABLE_DRAWDOWN_LIMIT: "true"

@@ -248,10 +248,6 @@ export async function createAgenticWalletBridge(): Promise<McpBridge> {
       }
     },
 
-    async x402Request(_url, _maxPayment) {
-      return null;
-    },
-
     async getTrendingTokens(limit: number) {
       const symbols = getEligibleBstockSymbols().slice(0, Math.max(1, limit));
       return symbols.map((symbol) => ({ symbol }));

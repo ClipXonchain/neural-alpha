@@ -2,7 +2,19 @@
 
 Hosted Neural Alpha. One backend on each server starts a private container per customer, keeps Binance and CMC calls inside a shared budget, and writes the risk cap into that container.
 
-`agentic-wallet` stays the VPS deploy. This branch does not change it. The customer container clones that ref and runs it unchanged.
+This branch is self-contained: agent, control plane, portal, admin desk and VPS linking all live here. The customer image is built from this checkout (`saas/worker/Dockerfile`, repo-root build context), not cloned from another branch. `agentic-wallet` is untouched and still the founder-bot deploy.
+
+## Add a VPS in one command
+
+On the new server (Ubuntu/Debian), with the mother's `CONTROL_API_SECRET`:
+
+```bash
+git clone -b SaaS https://github.com/ClipXonchain/neural-alpha.git && cd neural-alpha
+sudo bash saas/join-mother.sh --secret <mother secret> --treasury 0xTreasury \
+  --mother-ssh root@MOTHER_IP --mother-ip MOTHER_IP
+```
+
+It installs Docker, Node 22 and PM2 if missing, builds the worker image, starts the cell (`cell-<hostname>`), limits port 3910 to the mother with ufw, waits for `/capacity`, then registers the cell through `POST /cluster/nodes` on the mother. Use `--mother-url` instead of `--mother-ssh` if the mother's control port is reachable. Check with `bash saas/link-vps.sh status --secret <secret>` on the mother.
 
 ## What the backend owns
 
@@ -17,6 +29,7 @@ Hosted Neural Alpha. One backend on each server starts a private container per c
 - The control API listens on `127.0.0.1:3910`. Create is limited to 10 calls a minute. Everything else is 120 a minute.
 - The admin desk is the dashboard at `/admin` (`http://127.0.0.1:3000/admin` locally). It uses `SAAS_MONITOR_SECRET`, which can only read. The page has no pause, trade, pair, or size controls. Put the monitor key in the browser. Keep `CONTROL_API_SECRET` off that page. The control process keeps the read APIs and redirects `/admin` to that dashboard.
 - A stopped container is not started again by a reboot. A running one is.
+- Paid signals are per customer. `POST /tenants/:id/signals` with `{"cmc":false}` or `{"studio":true}` (or the portal Settings switches) rewrites `CMC_X402_ENABLED` / `STUDIO_X402_ENABLED` and restarts that one container. Both default on. Calls are paid from the customer's own Agentic Wallet through `baw x402-payment`; there is no CMC API key.
 
 ## Run the backend
 

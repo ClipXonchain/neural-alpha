@@ -2,8 +2,9 @@
 
 import Image from "next/image";
 import { Info } from "lucide-react";
-import { useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { ClipxApp } from "@/components/clipx/ClipxApp";
+import type { SignalSwitches } from "@/components/dashboard/AgentControls";
 import { useAgentConnection } from "@/hooks/useAgentConnection";
 import { blacklistToken, setAgentApiBase, unblacklistToken } from "@/lib/agent-api";
 
@@ -31,10 +32,45 @@ function DashboardSkeleton() {
   );
 }
 
+function switchesOf(tenant: unknown): SignalSwitches | null {
+  if (!tenant || typeof tenant !== "object") return null;
+  const t = tenant as { cmc_x402?: number | null; studio_x402?: number | null };
+  // Null means a row from before the switch existed, which runs with both on.
+  return { cmc: t.cmc_x402 !== 0, studio: t.studio_x402 !== 0 };
+}
+
 /** The same desk as neuralalpha.io, pointed at this customer's container and wallet. */
 export function CustomerDashboard() {
   setAgentApiBase("/api/portal/agent");
   useEffect(() => () => setAgentApiBase(null), []);
+  const [signals, setSignals] = useState<SignalSwitches | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/portal/session", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const next = switchesOf(data?.tenant);
+        if (alive && next) setSignals(next);
+      })
+      .catch(() => {});
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const saveSignals = useCallback(async (patch: Partial<SignalSwitches>) => {
+    const res = await fetch("/api/portal/act", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ op: "signals", body: patch }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return { ok: false, error: String(data?.error || "Could not save") };
+    const next = switchesOf(data?.tenant);
+    if (next) setSignals(next);
+    return { ok: true };
+  }, []);
   const {
     connected,
     loading,
@@ -87,6 +123,7 @@ export function CustomerDashboard() {
       onBlacklist={async (symbol) => { await blacklistToken(symbol); }}
       onUnblacklist={async (symbol) => { await unblacklistToken(symbol); }}
       allowAccessCode
+      signals={signals ? { value: signals, onChange: saveSignals } : null}
     />
   );
 }

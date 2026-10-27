@@ -1,6 +1,6 @@
 import type { AgentConfig, MarketData, CycleResult, TradeResult, PortfolioHolding, TradeOrder, PortfolioSnapshot, LogEntry } from "./utils/types.js";
 import { loadConfig, resolveInitialDepositUsd, buildDefaultWatchlist, MOMENTUM_CORE, MOMENTUM_VOLATILE, ANCHOR_TOKENS, MAX_WATCHLIST_SIZE, ELIGIBLE_TOKENS, FULL_SCAN_INTERVAL, FULL_SCAN_BATCH_SIZE, FULL_SCAN_PROMOTE_COUNT, isEligibleToken, isStablecoin, isTradableToken, MIN_TRADABLE_PRICE_USD, EXCLUDED_TOKENS, BSC_CHAIN, MIN_POSITION_VALUE_USD } from "./config.js";
-import { buildMarketData, getLatestPrice, recordPrice, CMC_ENDPOINTS, seedPriceHistory, getHistoryLength, hasRealHistory, loadPriceHistory, parseCmcQuotesBatch, parseCmcTrending, unwrapX402Response } from "./data/market.js";
+import { buildMarketData, getLatestPrice, recordPrice, seedPriceHistory, getHistoryLength, hasRealHistory, loadPriceHistory } from "./data/market.js";
 import { fetchNewsFeed } from "./data/news.js";
 import { analyzeMarkets, selectTrades } from "./strategy/index.js";
 import { getSessionProfile } from "./strategy/presets.js";
@@ -162,7 +162,6 @@ export interface McpBridge {
   getSwapQuote(params: ReturnType<typeof buildQuoteParams>): Promise<Record<string, unknown> | null>;
   executeSwap(params: ReturnType<typeof buildSwapParams>): Promise<Record<string, unknown>>;
   getAddress(chain: string): Promise<{ address: string } | null>;
-  x402Request(url: string, maxPayment: string): Promise<Record<string, unknown> | null>;
   getTrendingTokens(limit: number): Promise<Array<{ symbol: string }> | null>;
   checkTokenRisk(chain: string, token?: string): Promise<Record<string, unknown> | null>;
   /** USDT (or base stable) balance for the agent wallet */
@@ -223,7 +222,6 @@ export class TradingAgent {
   private lastAiInsights = new Map<string, AiSignalInsight>();
   private lastTradeSignals = new Map<string, import("./utils/types.js").TradeSignal>();
   private bridgeSource = "unknown";
-  private x402Payment = process.env.CMC_X402_MAX_PAYMENT || "10000";
   private startedAt = Date.now();
   /** Autonomous swap failures — prevents approve+retry spam on the same token. */
   private failedSwapUntil = new Map<string, number>();
@@ -1025,15 +1023,15 @@ export class TradingAgent {
       await this.runFullTokenScan(markets);
     }
 
-    // Primary: CMC Agent Hub quotes via x402 (batch = fewer micropayments)
-    const cmcQuotes = await this.fetchCmcQuotes(symbols);
-    for (const md of cmcQuotes.values()) {
+    // Primary: Binance Web3 bStock quotes (type=3), one batch for the watchlist
+    const quotes = await this.fetchBstockQuotes(symbols);
+    for (const md of quotes.values()) {
       markets.push(md);
     }
 
-    // Fallback: Agentic Wallet / Binance spot for symbols CMC did not return
+    // Fallback: Agentic Wallet price for symbols Binance did not return
     for (const symbol of symbols) {
-      if (cmcQuotes.has(symbol)) continue;
+      if (quotes.has(symbol)) continue;
       try {
         const priceData = await this.mcp.getTokenPrice(BSC_CHAIN, symbol);
         if (priceData) {
@@ -1047,23 +1045,11 @@ export class TradingAgent {
       }
     }
 
-    // Trending: eligible bStock list / CMC, then wallet fallback
+    // Trending: eligible bStock list from the wallet bridge
     try {
-      const raw = await this.mcp.x402Request(CMC_ENDPOINTS.trending(), this.x402Payment);
-      trendingTokens = parseCmcTrending(unwrapX402Response(raw));
-      if (trendingTokens?.length) {
-        logger.info("CMC trending tokens (x402)", { count: trendingTokens.length });
-      }
-    } catch (err) {
-      logger.warn("CMC trending x402 failed", { error: String(err) });
-    }
-
-    if (!trendingTokens) {
-      try {
-        trendingTokens = await this.mcp.getTrendingTokens(20);
-      } catch {
-        // supplementary
-      }
+      trendingTokens = await this.mcp.getTrendingTokens(20);
+    } catch {
+      // supplementary
     }
 
     if (trendingTokens) {
@@ -1071,7 +1057,7 @@ export class TradingAgent {
         .filter((t) => isTradableToken(t.symbol, getLatestPrice(t.symbol)) && !tokensToCheck.has(t.symbol))
         .map((t) => t.symbol);
 
-      const trendingQuotes = await this.fetchCmcQuotes(newSymbols);
+      const trendingQuotes = await this.fetchBstockQuotes(newSymbols);
       for (const md of trendingQuotes.values()) {
         markets.push(md);
       }
@@ -1097,9 +1083,9 @@ export class TradingAgent {
     logger.info("Market data fetched", {
       count: markets.length,
       watchlist: this.watchlist.length,
-      cmcQuotes: cmcQuotes.size,
+      bstockQuotes: quotes.size,
       bridge: this.bridgeSource,
-      dataSource: "cmc-agent-hub-x402",
+      dataSource: "binance-web3-bstock",
       fullScanCycle: fullScan,
     });
     return markets;
@@ -1128,7 +1114,7 @@ export class TradingAgent {
 
     for (let i = 0; i < tradable.length; i += FULL_SCAN_BATCH_SIZE) {
       const batch = tradable.slice(i, i + FULL_SCAN_BATCH_SIZE);
-      const quotes = await this.fetchCmcQuotes(batch);
+      const quotes = await this.fetchBstockQuotes(batch);
       for (const [symbol, md] of quotes) {
         if (!isTradableToken(symbol, md.price)) continue;
         allQuotes.set(symbol, md);
@@ -1162,50 +1148,29 @@ export class TradingAgent {
     }
   }
 
-  /** Fetch CMC quotes via x402 in batches of 20 symbols. */
-  private async fetchCmcQuotes(symbols: string[]): Promise<Map<string, MarketData>> {
+  /** Live bStock quotes from Binance Web3; free, so no paid call per cycle. */
+  private async fetchBstockQuotes(symbols: string[]): Promise<Map<string, MarketData>> {
     const out = new Map<string, MarketData>();
     if (symbols.length === 0) return out;
 
-    const batchSize = 20;
-    for (let i = 0; i < symbols.length; i += batchSize) {
-      const batch = symbols.slice(i, i + batchSize);
-      try {
-        const raw = await this.mcp.x402Request(
-          CMC_ENDPOINTS.quotes(batch),
-          this.x402Payment
-        );
-        const body = unwrapX402Response(raw);
-        const parsed = parseCmcQuotesBatch(body, batch);
-        for (const [symbol, md] of parsed) {
-          out.set(symbol, md);
-        }
-      } catch (err) {
-        logger.warn("CMC x402 batch quote failed", { batch: batch.join(","), error: String(err) });
-      }
-    }
-
-    const missing = symbols.filter((s) => !out.has(s));
-    if (missing.length > 0) {
-      try {
-        const enrich = await enrichSymbolsFromBinance(missing, {
-          fetchLive: true,
-          fetchIcons: false,
-          fetchOhlcv: true,
+    try {
+      const enrich = await enrichSymbolsFromBinance(symbols, {
+        fetchLive: true,
+        fetchIcons: false,
+        fetchOhlcv: true,
+      });
+      for (const [symbol, q] of enrich.liveQuotes) {
+        if (q.price <= 0) continue;
+        out.set(symbol, {
+          symbol,
+          price: q.price,
+          change24h: q.change24hPct,
+          volume24h: q.volume24h,
+          timestamp: q.updatedAt,
         });
-        for (const [symbol, q] of enrich.liveQuotes) {
-          if (q.price <= 0) continue;
-          out.set(symbol, {
-            symbol,
-            price: q.price,
-            change24h: q.change24hPct,
-            volume24h: q.volume24h,
-            timestamp: q.updatedAt,
-          });
-        }
-      } catch (err) {
-        logger.warn("Binance bStock quote fallback failed", { error: String(err) });
       }
+    } catch (err) {
+      logger.warn("Binance bStock quotes failed", { error: String(err) });
     }
     return out;
   }
@@ -1764,7 +1729,7 @@ export class TradingAgent {
     // 2. Ensure we have a price + enough history for indicators/sizing.
     if (getLatestPrice(sym) === null || getHistoryLength(sym) < 20) {
       try {
-        const quotes = await this.fetchCmcQuotes([sym]);
+        const quotes = await this.fetchBstockQuotes([sym]);
         const md = quotes.get(sym);
         if (md && md.price > 0 && getHistoryLength(sym) < 40) {
           seedPriceHistory(sym, md.price, 50, 3.5);
@@ -1996,7 +1961,7 @@ export class TradingAgent {
   /**
    * Resolve the real BSC wallet address.
    * Prefers the live Agentic Wallet address; falls back to AGENT_WALLET_ADDRESS env
-   * when the bridge returns nothing or a known placeholder (mock/cmc-pro modes).
+   * when the bridge returns nothing or a known placeholder (mock mode).
    */
   private resolveWalletAddress(mcpAddress?: string | null): string | null {
     const isPlaceholder = (a?: string | null) =>

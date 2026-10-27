@@ -1,0 +1,10 @@
+.git
+.env
+.env.*
+node_modules
+**/node_modules
+dashboard/*
+!dashboard/package.json
+saas/runtime
+BrandKit
+neural-alpha/data/*.sqlite*

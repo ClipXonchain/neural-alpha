@@ -945,6 +945,51 @@ test("saving a position size updates the live tenant in USDT and rejects a bad c
   }
 });
 
+test("a customer switches paid CMC and Studio signals off and on", async () => {
+  const root = mkdtempSync(join(tmpdir(), "na-signals-"));
+  const config = loadConfig({
+    CONTROL_API_SECRET: "test-secret",
+    SAAS_DATA_ROOT: root,
+    SAAS_DB_PATH: join(root, "control.sqlite"),
+    SAAS_HOST_ID: "box-a",
+    SAAS_MAX_TENANTS: "2",
+  });
+  const store = openStore(config.dbPath);
+  const { server, url } = await listen(createHandler({ store, docker: fakeDocker(), config }));
+  try {
+    const created = await call(url, "/tenants", { method: "POST", token: null, body: pay("a7", "USDT") });
+    const id = created.body.tenant.id;
+    const token = created.body.compoundToken;
+    const envOf = () => readFileSync(join(root, id, "tenant.env"), "utf8");
+    assert.match(envOf(), /CMC_X402_ENABLED=true/);
+    assert.match(envOf(), /STUDIO_X402_ENABLED=true/);
+
+    const off = await call(url, `/tenants/${id}/signals`, { method: "POST", token, body: { cmc: false } });
+    assert.equal(off.status, 200);
+    assert.equal(off.body.tenant.cmc_x402, 0);
+    assert.match(envOf(), /CMC_X402_ENABLED=false/);
+    assert.match(envOf(), /STUDIO_X402_ENABLED=true/);
+    assert.match(readFileSync(join(root, id, "override.yml"), "utf8"), /CMC_X402_ENABLED: "false"/);
+
+    // A risk save keeps the switch.
+    await call(url, `/tenants/${id}/risk`, { method: "POST", token, body: { preset: "500" } });
+    assert.match(envOf(), /CMC_X402_ENABLED=false/);
+
+    for (const body of [{}, { cmc: "no" }, { studio: 0 }]) {
+      const bad = await call(url, `/tenants/${id}/signals`, { method: "POST", token, body });
+      assert.equal(bad.status, 400, JSON.stringify(body));
+    }
+
+    const both = await call(url, `/tenants/${id}/signals`, { method: "POST", token, body: { cmc: true, studio: false } });
+    assert.equal(both.status, 200);
+    assert.match(envOf(), /CMC_X402_ENABLED=true/);
+    assert.match(envOf(), /STUDIO_X402_ENABLED=false/);
+  } finally {
+    server.close();
+    store.close();
+  }
+});
+
 test("a stored 6-decimal stablecoin quote is replaced with a 3-decimal quote when the pay screen reads it", async () => {
   const root = mkdtempSync(join(tmpdir(), "na-control-"));
   const currentTime = new Date("2026-10-26T12:00:00.000Z");

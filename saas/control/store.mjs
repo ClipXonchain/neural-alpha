@@ -27,6 +27,8 @@ export const COLUMNS = [
   "overpaid_amount",
   "buys_halted",
   "x402_per_day",
+  "cmc_x402",
+  "studio_x402",
   "created_at",
   "updated_at",
 ];
@@ -104,6 +106,9 @@ export function openStore(dbPath) {
     ["overpaid_amount", "TEXT"],
     ["buys_halted", "INTEGER DEFAULT 0"],
     ["x402_per_day", "INTEGER"],
+    // Paid signal sources the customer can switch off; null or 1 means on.
+    ["cmc_x402", "INTEGER DEFAULT 1"],
+    ["studio_x402", "INTEGER DEFAULT 1"],
   ]) {
     const cols = db.prepare("PRAGMA table_info(tenants)").all();
     if (!cols.some((col) => col.name === name)) db.exec(`ALTER TABLE tenants ADD COLUMN ${name} ${ddl}`);
@@ -216,6 +221,8 @@ export function openStore(dbPath) {
         "overpaid_amount",
         "buys_halted",
         "x402_per_day",
+        "cmc_x402",
+        "studio_x402",
         "host_id",
         "updated_at",
       ];

@@ -12,8 +12,6 @@ import { BSC_CHAIN } from "../config.js";
  * running the agent as a standalone process (non-MCP mode).
  */
 
-const CMC_X402_BASE = process.env.CMC_X402_BASE_URL || "https://agenthub.coinmarketcap.com";
-
 const priceHistory: Map<string, PricePoint[]> = new Map();
 /** Symbols whose candle history came from Binance klines (not synthetic seed). */
 const realOhlcvSymbols = new Set<string>();
@@ -115,124 +113,6 @@ export function buildMarketData(
     timestamp: Date.now(),
     ...extras,
   };
-}
-
-/**
- * CMC x402 endpoint URLs for different data types.
- * These are called via the CMC Pro bridge or campaign x402, which handles
- * the payment flow (402 challenge → sign → retry with X-Payment header).
- */
-export const CMC_ENDPOINTS = {
-  price: (symbol: string) =>
-    `${CMC_X402_BASE}/v1/cryptocurrency/quotes/latest?symbol=${encodeURIComponent(symbol)}`,
-  /** Batch quotes — one x402 payment for many symbols (CMC Agent Hub). */
-  quotes: (symbols: string[]) =>
-    `${CMC_X402_BASE}/v1/cryptocurrency/quotes/latest?symbol=${encodeURIComponent(symbols.join(","))}`,
-  trending: () =>
-    `${CMC_X402_BASE}/v1/cryptocurrency/trending/latest`,
-  listings: (limit = 100) =>
-    `${CMC_X402_BASE}/v1/cryptocurrency/listings/latest?limit=${limit}`,
-  /** OHLCV historical candles (CMC Agent Hub x402). */
-  ohlcv: (symbol: string, interval = "5m", count = 100) =>
-    `${CMC_X402_BASE}/v1/cryptocurrency/ohlcv/historical?symbol=${encodeURIComponent(symbol)}&time_period=hourly&interval=${interval}&count=${count}`,
-  metadata: (symbol: string) =>
-    `${CMC_X402_BASE}/v1/cryptocurrency/info?symbol=${symbol}`,
-  socialBuzz: (symbol: string) =>
-    `${CMC_X402_BASE}/v1/cryptocurrency/social?symbol=${symbol}`,
-} as const;
-
-/**
- * Parse CMC x402 response data into our MarketData format.
- */
-export function parseCmcQuote(raw: Record<string, unknown>, symbol: string): MarketData | null {
-  try {
-    const data = raw as Record<string, Record<string, unknown>>;
-    const quote = data?.data?.[symbol] as Record<string, unknown> | undefined;
-    if (!quote) return null;
-
-    const usd = (quote as Record<string, Record<string, unknown>>)?.quote?.USD as Record<string, number> | undefined;
-    if (!usd) return null;
-
-    return buildMarketData(symbol, usd.price, {
-      change24h: usd.percent_change_24h,
-      volume24h: usd.volume_24h,
-      marketCap: usd.market_cap,
-    });
-  } catch (e) {
-    logger.error("Failed to parse CMC quote", { symbol, error: String(e) });
-    return null;
-  }
-}
-
-/**
- * Unwrap x402 / CMC tool output into parsed JSON body.
- * Handles direct JSON, nested `data`, string `body`, and MCP text payloads.
- */
-export function unwrapX402Response(
-  raw: Record<string, unknown> | null | undefined
-): Record<string, unknown> | null {
-  if (!raw) return null;
-
-  if (typeof raw.body === "string") {
-    try {
-      return JSON.parse(raw.body) as Record<string, unknown>;
-    } catch {
-      return null;
-    }
-  }
-
-  if (raw.data && typeof raw.data === "object" && !Array.isArray(raw.data)) {
-    const inner = raw.data as Record<string, unknown>;
-    if (inner.data !== undefined || inner.status !== undefined) {
-      return inner;
-    }
-  }
-
-  if (raw.response && typeof raw.response === "object") {
-    return raw.response as Record<string, unknown>;
-  }
-
-  return raw;
-}
-
-/**
- * Parse CMC trending/latest x402 response into eligible symbol list.
- */
-export function parseCmcTrending(
-  raw: Record<string, unknown> | null
-): Array<{ symbol: string }> | null {
-  if (!raw) return null;
-  try {
-    const items = raw.data;
-    if (!Array.isArray(items)) return null;
-    return items
-      .map((item) => {
-        const row = item as Record<string, unknown>;
-        const symbol = (row.symbol || row.ticker) as string | undefined;
-        return symbol ? { symbol: symbol.toUpperCase() } : null;
-      })
-      .filter((x): x is { symbol: string } => x !== null);
-  } catch (e) {
-    logger.error("Failed to parse CMC trending", { error: String(e) });
-    return null;
-  }
-}
-
-/**
- * Parse batch CMC quotes response into MarketData map.
- */
-export function parseCmcQuotesBatch(
-  raw: Record<string, unknown> | null,
-  symbols: string[]
-): Map<string, MarketData> {
-  const out = new Map<string, MarketData>();
-  if (!raw) return out;
-
-  for (const symbol of symbols) {
-    const parsed = parseCmcQuote(raw, symbol);
-    if (parsed) out.set(symbol, parsed);
-  }
-  return out;
 }
 
 /**

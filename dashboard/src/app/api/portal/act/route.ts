@@ -10,6 +10,7 @@ const OPS: Record<string, { method: "GET" | "POST"; path: string }> = {
   resume: { method: "POST", path: "/resume" },
   risk: { method: "POST", path: "/risk" },
   mode: { method: "POST", path: "/mode" },
+  signals: { method: "POST", path: "/signals" },
   "pair-start": { method: "POST", path: "/pair/start" },
   "pair-verify": { method: "POST", path: "/pair/verify" },
 };

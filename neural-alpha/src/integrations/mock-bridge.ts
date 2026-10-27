@@ -33,26 +33,6 @@ export function createMockBridge(): McpBridge {
     return basePrices[upper]!;
   }
 
-  function cmcQuotePayload(symbols: string[]) {
-    const data: Record<string, unknown> = {};
-    for (const symbol of symbols) {
-      const price = driftPrice(symbol);
-      if (price === null) continue;
-      data[symbol] = {
-        symbol,
-        quote: {
-          USD: {
-            price,
-            percent_change_24h: (Math.random() - 0.45) * 8,
-            volume_24h: 500_000 + Math.random() * 5_000_000,
-            market_cap: price * (1_000_000 + Math.random() * 50_000_000),
-          },
-        },
-      };
-    }
-    return { status: { error_code: 0 }, data };
-  }
-
   return {
     async getTokenPrice(_chain: string, token: string) {
       const price = driftPrice(token);
@@ -73,18 +53,6 @@ export function createMockBridge(): McpBridge {
     },
     async getAddress(_chain: string) {
       return { address: "0x" + "a".repeat(40) };
-    },
-    async x402Request(url: string, _maxPayment: string) {
-      if (url.includes("/trending/latest")) {
-        return { data: getEligibleBstockSymbols().slice(0, 6).map((symbol) => ({ symbol })) };
-      }
-      if (url.includes("/quotes/latest")) {
-        const parsed = new URL(url);
-        const symbolParam = parsed.searchParams.get("symbol") || "";
-        const symbols = symbolParam.split(",").map((s) => s.trim()).filter(Boolean);
-        return cmcQuotePayload(symbols.length > 0 ? symbols : ["NVDAB"]);
-      }
-      return { data: {} };
     },
     async getTrendingTokens(limit: number) {
       return getEligibleBstockSymbols().slice(0, limit).map((symbol) => ({ symbol }));

@@ -176,7 +176,7 @@ Copy `.env.example`. Do not commit `.env`.
 | Protective exits | On, checked every 10s | Same |
 | Portfolio | Local | Reconciled with the wallet each cycle |
 
-`BRIDGE_MODE` is `auto` (default), `baw`, `cmc-pro`, or `mock`. `auto` uses Agentic Wallet when `baw` is signed in.
+`BRIDGE_MODE` is `auto` (default), `baw`, or `mock`. `auto` uses Agentic Wallet when `baw` is signed in.
 
 ### Variables that change behavior
 
@@ -211,7 +211,6 @@ Copy `.env.example`. Do not commit `.env`.
 | `AI_SIGNAL_ANALYSIS` | on when a key is set | Can nudge confidence. It cannot place or block an order by itself |
 | `SQLITE_PATH` | `data/neural-alpha.sqlite` | Live database |
 | `DATABASE_URL` | unset | Optional Neon Postgres. Hourly copy of SQLite |
-| `CMC_PRO_API_KEY` | unset | Optional CoinMarketCap Pro quotes and Fear & Greed |
 | `DASHBOARD_PORT` | `3847` | Agent API. Production `deploy.sh` uses `3006` |
 | `LOG_LEVEL` | `info` | `error` `warn` `trade` `signal` `info` `debug` |
 
