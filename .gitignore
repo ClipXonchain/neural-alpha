@@ -74,3 +74,6 @@ Thumbs.db
 # Agent runtime state
 tmp-state.json
 .agent-api-port
+
+# Design references, not part of the product
+SaaS Inspiration/
