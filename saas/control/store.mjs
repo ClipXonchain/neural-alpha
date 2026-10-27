@@ -29,6 +29,13 @@ export const COLUMNS = [
   "x402_per_day",
   "cmc_x402",
   "studio_x402",
+  "telegram_chat_id",
+  "telegram_code_hash",
+  "telegram_code_expires",
+  "cancel_at_period_end",
+  "reminder_stage",
+  "alerts_json",
+  "image_tag",
   "created_at",
   "updated_at",
 ];
@@ -109,6 +116,13 @@ export function openStore(dbPath) {
     // Paid signal sources the customer can switch off; null or 1 means on.
     ["cmc_x402", "INTEGER DEFAULT 1"],
     ["studio_x402", "INTEGER DEFAULT 1"],
+    ["telegram_chat_id", "TEXT"],
+    ["telegram_code_hash", "TEXT"],
+    ["telegram_code_expires", "TEXT"],
+    ["cancel_at_period_end", "INTEGER DEFAULT 0"],
+    ["reminder_stage", "TEXT"],
+    ["alerts_json", "TEXT"],
+    ["image_tag", "TEXT"],
   ]) {
     const cols = db.prepare("PRAGMA table_info(tenants)").all();
     if (!cols.some((col) => col.name === name)) db.exec(`ALTER TABLE tenants ADD COLUMN ${name} ${ddl}`);
@@ -116,6 +130,8 @@ export function openStore(dbPath) {
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tenants_payment_tx ON tenants(payment_tx) WHERE payment_tx IS NOT NULL");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tenants_access_hash ON tenants(access_token_hash) WHERE access_token_hash IS NOT NULL");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tenants_access_code ON tenants(access_code_hash) WHERE access_code_hash IS NOT NULL");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tenants_telegram_code ON tenants(telegram_code_hash) WHERE telegram_code_hash IS NOT NULL");
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS tenants_telegram_chat ON tenants(telegram_chat_id) WHERE telegram_chat_id IS NOT NULL");
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS orders (
@@ -188,6 +204,12 @@ export function openStore(dbPath) {
     findByAccessCodeHash(hash) {
       return db.prepare(`SELECT ${COLUMNS.join(", ")} FROM tenants WHERE access_code_hash = ?`).get(hash) ?? null;
     },
+    findByTelegramCodeHash(hash) {
+      return db.prepare(`SELECT ${COLUMNS.join(", ")} FROM tenants WHERE telegram_code_hash = ?`).get(hash) ?? null;
+    },
+    findByTelegramChat(chatId) {
+      return db.prepare(`SELECT ${COLUMNS.join(", ")} FROM tenants WHERE telegram_chat_id = ?`).get(String(chatId)) ?? null;
+    },
     findByPaymentTx(tx) {
       const tenantHit = db.prepare(`SELECT id FROM tenants WHERE payment_tx = ?`).get(tx) ?? null;
       if (tenantHit) return tenantHit;
@@ -223,6 +245,13 @@ export function openStore(dbPath) {
         "x402_per_day",
         "cmc_x402",
         "studio_x402",
+        "telegram_chat_id",
+        "telegram_code_hash",
+        "telegram_code_expires",
+        "cancel_at_period_end",
+        "reminder_stage",
+        "alerts_json",
+        "image_tag",
         "host_id",
         "updated_at",
       ];
@@ -276,6 +305,10 @@ export function openStore(dbPath) {
         `UPDATE orders SET ${keys.map((key) => `${key} = ?`).join(", ")} WHERE id = ? AND status = 'pending' AND amount_display = ?`,
       ).run(...keys.map((key) => patch[key]), id, expectedDisplay);
       return result.changes === 1 ? this.getOrder(id) : null;
+    },
+    /** A consistent copy of the whole control database, safe to take while it is in use. */
+    snapshot(file) {
+      db.prepare("VACUUM INTO ?").run(file);
     },
     listNodes() {
       return db.prepare(`SELECT host_id, base_url, status, updated_at FROM cluster_nodes ORDER BY host_id`).all();

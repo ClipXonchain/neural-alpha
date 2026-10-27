@@ -4,3 +4,5 @@ runtime/*
 *.sqlite-wal
 # Cell secrets (monitor key, API secret). Never commit.
 runtime/cell.env
+# Encrypted tenant backups. Ciphertext only, but never commit it.
+backups/*

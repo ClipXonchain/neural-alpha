@@ -41,7 +41,7 @@ test("risk presets cap size and do not arm a drawdown halt", () => {
   const active = resolveRisk("250");
   assert.equal(active.maxPositionUsd, 250);
   assert.equal(active.maxTradeUsd, 250);
-  assert.equal(active.x402PerDay, 2);
+  assert.equal(active.x402PerDay, 1);
   assert.equal(active.maxDrawdownPct, undefined);
   const custom = resolveRisk({ preset: "custom", positionUsd: 750, x402PerDay: 4 });
   assert.equal(custom.maxPositionUsd, 750);
@@ -49,7 +49,9 @@ test("risk presets cap size and do not arm a drawdown halt", () => {
   assert.equal(custom.x402PerDay, 4);
   assert.throws(() => resolveRisk({ preset: "custom", positionUsd: 0 }), /positive/);
   assert.throws(() => resolveRisk({ preset: "custom", positionUsd: 10_000_000_000 }), /10000/);
-  assert.throws(() => resolveRisk({ preset: "100", x402PerDay: 1 }), /x402PerDay/);
+  assert.throws(() => resolveRisk({ preset: "100", x402PerDay: 0 }), /x402PerDay/);
+  assert.throws(() => resolveRisk({ preset: "100", x402PerDay: 49 }), /x402PerDay/);
+  assert.equal(resolveRisk({ preset: "100", x402PerDay: 1 }).x402PerDay, 1);
   const legacy = resolveRisk({ preset: "cautious", positionUsd: 50 }, { allowLegacy: true });
   assert.equal(legacy.maxPositionUsd, 50);
   assert.equal(legacy.maxTradeUsd, 50);
@@ -66,9 +68,9 @@ test("risk presets cap size and do not arm a drawdown halt", () => {
   assert.match(env, /PAYMENT_TOKEN=USDT/);
   assert.match(env, /MAX_POSITION_SIZE_USD=250/);
   assert.match(env, /HACKATHON_MAX_TRADE_USD=250/);
-  assert.match(env, /X402_MIN_PAYMENTS_PER_DAY=2/);
+  assert.match(env, /X402_MIN_PAYMENTS_PER_DAY=1/);
   assert.match(env, /CMC_X402_ENABLED=true/);
-  assert.match(env, /STUDIO_X402_ENABLED=true/);
+  assert.match(env, /STUDIO_X402_ENABLED=false/); // Agent Studio is optional and starts off
   assert.match(env, /CMC_X402_INTERVAL_MS=86400000/);
   assert.match(env, /STUDIO_X402_INTERVAL_MS=86400000/);
   assert.match(env, /BINANCE_MARKET_CONCURRENCY=2/);
@@ -85,8 +87,10 @@ test("risk presets cap size and do not arm a drawdown halt", () => {
   assert.match(customEnv, /MAX_POSITION_SIZE_USD=750/);
   assert.match(customEnv, /HACKATHON_MAX_TRADE_USD=750/);
   assert.match(customEnv, /X402_MIN_PAYMENTS_PER_DAY=4/);
-  assert.match(customEnv, /CMC_X402_INTERVAL_MS=43200000/);
-  assert.match(customEnv, /STUDIO_X402_INTERVAL_MS=43200000/);
+  assert.match(customEnv, /CMC_X402_INTERVAL_MS=21600000/);
+  assert.match(customEnv, /STUDIO_X402_INTERVAL_MS=21600000/);
+  const studioOn = renderEnv({ agentMode: "paper", intervalMs: 400_000, staggerSec: 3, apiSecret: "abc123", risk: custom, signals: { cmc: true, studio: true } });
+  assert.match(studioOn, /STUDIO_X402_ENABLED=true/);
 });
 
 test("tenant folders stay inside the data root and container names differ", () => {
@@ -123,7 +127,7 @@ test("env file for a customer is readable", () => {
   const yml = renderOverride(spec);
   assert.match(yml, /PAYMENT_TOKEN: "USDT"/);
   assert.doesNotMatch(yml, /PAYMENT_TOKEN: "BNB"/);
-  assert.match(yml, /X402_MIN_PAYMENTS_PER_DAY: "2"/);
+  assert.match(yml, /X402_MIN_PAYMENTS_PER_DAY: "1"/);
   assert.match(yml, /CMC_X402_INTERVAL_MS: "86400000"/);
   assert.match(yml, /STUDIO_X402_INTERVAL_MS: "86400000"/);
 });

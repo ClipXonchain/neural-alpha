@@ -1,10 +1,24 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createBnbPriceFeed } from "./bnb-price.mjs";
 import { createDocker } from "./docker.mjs";
+import { planLifecycle, reminderText, subscriptionState } from "./lifecycle.mjs";
+import { rollout, TAG_RE } from "./rollout.mjs";
+import { backupAll, parseBackupKey, syncOffsite } from "./tenant-backup.mjs";
+import {
+  createTelegram,
+  handleInbound,
+  hashTelegramCode,
+  newTelegramCode,
+  NOT_LINKED_REPLY,
+  startPolling,
+  TELEGRAM_CODE_TTL_MS,
+} from "./telegram.mjs";
+import { evaluate, parseAlerts } from "./watchdog.mjs";
 import { createEdgeCluster, formatCompoundToken, normalizeBaseUrl, parseCompoundToken } from "./edge.mjs";
 import { tenantDir, writeTenantFiles } from "./files.mjs";
 import { createBscRpc, createTreasuryWatcher, ERC20_TRANSFER_TOPIC, padTopicAddress, readConfirmationCount, verifyBinanceWalletPayment, verifyBscReceipt } from "./payments.mjs";
@@ -85,6 +99,18 @@ export function loadConfig(env = process.env) {
     demo: env.SAAS_DESK_DEMO === "1",
     streamIntervalMs: num("SAAS_DESK_STREAM_MS", 3000),
     operatorAgent: formatAgentId(env.SAAS_OPERATOR_AGENT_ID),
+    // One bot for the whole service. Every cell sends alerts; only one process polls.
+    telegramToken: env.TELEGRAM_BOT_TOKEN?.trim() || "",
+    telegramBotUsername: env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "") || "",
+    telegramOpsChatId: env.TELEGRAM_OPS_CHAT_ID?.trim() || "",
+    telegramPoll: env.TELEGRAM_BOT_POLL === "1",
+    maintenanceMs: Math.max(5000, num("SAAS_MAINTENANCE_MS", 60_000)),
+    backupKey: env.SAAS_BACKUP_KEY?.trim() || "",
+    backupDir: env.SAAS_BACKUP_DIR?.trim() || "",
+    backupRsync: env.SAAS_BACKUP_RSYNC?.trim() || "",
+    backupEveryMs: num("SAAS_BACKUP_HOURS", 24) * 3_600_000,
+    rolloutPollMs: num("SAAS_ROLLOUT_POLL_MS", 5000),
+    rolloutTimeoutMs: num("SAAS_ROLLOUT_TIMEOUT_MS", 150_000),
     plan,
   };
 }
@@ -127,7 +153,11 @@ export function formatAgentId(value) {
   return name + ".ai";
 }
 
-export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice, now = () => new Date() }) {
+export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice, telegram: injectedTelegram, now = () => new Date() }) {
+  const telegram =
+    injectedTelegram ||
+    createTelegram({ token: config.telegramToken, opsChatId: config.telegramOpsChatId, fetchImpl });
+  let rolloutJob = null;
   const currentBnbPriceUsd = () => {
     const live = Number(bnbPrice?.priceUsd?.());
     return Number.isFinite(live) && live > 0 ? live : config.bnbPriceUsd;
@@ -268,6 +298,54 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
         if (actor?.role !== "operator") return send(res, 401, { error: "unauthorized" });
         const removed = store.removeNode(nodeDelMatch[1]);
         return send(res, 200, { removed });
+      }
+      if (req.method === "POST" && url.pathname === "/telegram/inbound") {
+        const body = await readJson(req);
+        const result = await handleInbound({
+          store,
+          config,
+          now,
+          chatId: String(body.chatId || ""),
+          text: String(body.text || ""),
+          describe: (row) => describeTenant(docker, row, now),
+        });
+        return send(res, 200, result);
+      }
+      if (req.method === "POST" && url.pathname === "/maintenance/run") {
+        return send(res, 200, await runMaintenance({ store, docker, config, now, telegram }));
+      }
+      if (req.method === "POST" && url.pathname === "/backups/run") {
+        return send(res, 200, await runTenantBackup({ store, config, telegram, now }));
+      }
+      if (req.method === "GET" && url.pathname === "/rollout") {
+        return send(res, 200, rolloutJob || { status: "idle" });
+      }
+      if (req.method === "POST" && url.pathname === "/rollout") {
+        const body = await readJson(req);
+        const tag = String(body.tag || "");
+        if (!TAG_RE.test(tag)) return send(res, 400, { error: "tag must be letters, digits, . _ - (max 64)" });
+        if (rolloutJob?.status === "running") return send(res, 409, { error: "a rollout is already running" });
+        const ids = Array.isArray(body.tenantIds) ? body.tenantIds.map(String) : null;
+        let rows = store.list().filter((row) => row.host_id === config.hostId && row.status === "running" && (!ids || ids.includes(row.id)));
+        // Canary: the ids you name come first in that order, otherwise paper agents go before live ones.
+        rows = ids
+          ? rows.sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id))
+          : rows.sort((a, b) => (a.agent_mode === "paper" ? 0 : 1) - (b.agent_mode === "paper" ? 0 : 1));
+        const soakMs = Math.min(600, Math.max(0, Number(body.soakSec) || 0)) * 1000;
+        const job = { id: randomBytes(4).toString("hex"), tag, status: "running", startedAt: now().toISOString(), total: rows.length, done: [] };
+        rolloutJob = job;
+        void rollout({
+          rows,
+          tag,
+          soakMs,
+          apply: (row, t) => applyImageTag({ store, docker, config, now }, row.id, t),
+          ready: (row) => waitUntilReady({ store, docker, config }, row.id),
+          onProgress: (done) => { job.done = done; },
+        }).then(
+          (report) => { rolloutJob = { ...job, status: report.ok ? "done" : "failed", finishedAt: now().toISOString(), report }; },
+          (err) => { rolloutJob = { ...job, status: "failed", finishedAt: now().toISOString(), report: { ok: false, reason: String(err?.message || err) } }; },
+        );
+        return send(res, 202, job);
       }
       if (req.method === "POST" && url.pathname === "/watcher/scan") {
         return send(res, 200, await watcher.scanOnce());
@@ -491,6 +569,30 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
         if (tenant.status === "running") await docker.up(dockerTarget(updated));
         return send(res, 200, { tenant: customerView(updated) });
       }
+      if (req.method === "POST" && action === "/cancel") {
+        const body = await readJson(req);
+        if (!tenant.paid_until) return send(res, 409, { error: "this agent has no paid period to cancel" });
+        const updated = store.update(tenant.id, { cancel_at_period_end: body.undo === true ? 0 : 1, updated_at: now().toISOString() });
+        return send(res, 200, { tenant: customerView(updated) });
+      }
+      if (req.method === "POST" && action === "/telegram/code") {
+        if (!telegram.enabled || !config.telegramBotUsername) {
+          return send(res, 503, { error: "Telegram alerts are not set up on this server" });
+        }
+        const code = newTelegramCode();
+        const expiresAt = new Date(now().getTime() + TELEGRAM_CODE_TTL_MS).toISOString();
+        store.update(tenant.id, { telegram_code_hash: hashTelegramCode(code), telegram_code_expires: expiresAt, updated_at: now().toISOString() });
+        return send(res, 200, {
+          code,
+          expiresAt,
+          bot: `@${config.telegramBotUsername}`,
+          deepLink: `https://t.me/${config.telegramBotUsername}?start=${code}`,
+        });
+      }
+      if (req.method === "POST" && action === "/telegram/unlink") {
+        const updated = store.update(tenant.id, { telegram_chat_id: null, telegram_code_hash: null, telegram_code_expires: null, updated_at: now().toISOString() });
+        return send(res, 200, { tenant: customerView(updated) });
+      }
       if (req.method === "POST" && action === "/mode") {
         const body = await readJson(req);
         if (body.mode !== "paper" && body.mode !== "live") return send(res, 400, { error: "mode must be paper or live" });
@@ -555,6 +657,22 @@ export function createHandler({ store, docker, config, rpc, fetchImpl, bnbPrice,
     void watcher.scanOnce().catch(() => {});
     watcher.start();
   }
+  // The Telegram poller asks this cell first, then every linked cell, who owns a chat.
+  handler.telegram = telegram;
+  handler.routeTelegram = async ({ chatId, text }) => {
+    const local = await handleInbound({ store, config, now, chatId, text, describe: (row) => describeTenant(docker, row, now) });
+    if (local.handled) return local.reply;
+    for (const node of store.listNodes()) {
+      if (node.hostId === config.hostId) continue;
+      try {
+        const r = await edge.forwardJson(node.hostId, "POST", "/telegram/inbound", { chatId, text });
+        if (r.status === 200 && r.body?.handled) return r.body.reply;
+      } catch {
+        /* a cell that is down cannot own this chat right now */
+      }
+    }
+    return NOT_LINKED_REPLY;
+  };
   return handler;
 }
 
@@ -939,6 +1057,7 @@ async function fulfillOrderWithTx({
       config,
       now,
     );
+    store.update(existing.id, { cancel_at_period_end: 0 });
     if (existing.status === "running") {
       await docker.up(dockerTarget(updatedTenant));
     }
@@ -1052,26 +1171,147 @@ function claimPaidOrder({ store, config, orderId, claimSecret }) {
 
 async function enforceSubscriptions({ store, docker, config, now }) {
   const nowMs = now().getTime();
-  const mine = store.list().filter((row) => row.host_id === config.hostId);
   const haltedIds = [];
-  for (const row of mine) {
-    if (!row.paid_until) continue;
-    const expiryMs = Date.parse(row.paid_until);
-    if (Number.isFinite(expiryMs) && expiryMs <= nowMs && !row.buys_halted) {
-      const updated = applySpec(
-        store,
-        row,
-        { risk: riskFromRow(row), agentMode: row.agent_mode, buysHalted: true },
-        config,
-        now,
-      );
-      if (row.status === "running") {
-        await docker.up(dockerTarget(updated));
-      }
-      haltedIds.push(row.id);
-    }
+  for (const row of store.list().filter((r) => r.host_id === config.hostId)) {
+    if (!planLifecycle(row, nowMs).halt) continue;
+    await haltBuys({ store, docker, config, now }, row);
+    haltedIds.push(row.id);
   }
   return { hostId: config.hostId, haltedCount: haltedIds.length, haltedIds };
+}
+
+async function haltBuys({ store, docker, config, now }, row) {
+  const updated = applySpec(store, row, { risk: riskFromRow(row), agentMode: row.agent_mode, buysHalted: true }, config, now);
+  if (row.status === "running") await docker.up(dockerTarget(updated));
+  return updated;
+}
+
+async function mapLimit(items, limit, fn) {
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (next < items.length) await fn(items[next++]);
+    }),
+  );
+}
+
+const signed = (n) => `${Number(n) < 0 ? "-" : "+"}$${Math.abs(Number(n) || 0).toFixed(2)}`;
+
+/** The /status reply in Telegram. */
+async function describeTenant(docker, row, now) {
+  const desk = await readDesk(docker, row);
+  const sub = subscriptionState(row, now().getTime());
+  const lines = [`Agent ${row.id} (${row.agent_mode}${row.buys_halted ? ", new buys stopped" : ""})`];
+  if (desk.reachable) {
+    lines.push(`Value $${desk.navUsd} | Cash $${desk.cashUsd}`);
+    lines.push(`Today ${signed(desk.dailyPnlUsd)} | Total ${signed(desk.totalPnlUsd)}`);
+    lines.push(`Open positions: ${desk.positions}${desk.symbols?.length ? ` (${desk.symbols.join(", ")})` : ""}`);
+  } else {
+    lines.push("The agent is not answering right now.");
+  }
+  lines.push(
+    sub.stage === "active"
+      ? `Subscription: ${sub.daysLeft} day${sub.daysLeft === 1 ? "" : "s"} left${sub.cancelling ? " (will not renew)" : ""}`
+      : `Subscription: ${sub.stage}`,
+  );
+  return lines.join("\n");
+}
+
+/**
+ * One pass over this cell: expire or remind subscriptions, then check every running
+ * agent for trouble and new trades. Safe to run again at any time, since each step
+ * records what it already sent.
+ */
+export async function runMaintenance({ store, docker, config, now = () => new Date(), telegram, concurrency = 4, log = console }) {
+  const nowMs = now().getTime();
+  const report = { halted: [], reminded: [], opened: [], resolved: [], trades: 0, errors: [] };
+  const tell = async (row, text) => {
+    if (row.telegram_chat_id) await telegram.send(row.telegram_chat_id, text);
+  };
+  const renewUrl = `${config.portalUrl.replace(/\/$/, "")}?renew=1`;
+  const stallMs = Math.max(config.plan.intervalMs * 3, 30 * 60_000);
+  const ids = store.list().filter((row) => row.host_id === config.hostId).map((row) => row.id);
+
+  await mapLimit(ids, concurrency, async (id) => {
+    try {
+      let row = store.get(id);
+      const plan = planLifecycle(row, nowMs);
+      if (plan.halt) {
+        row = await haltBuys({ store, docker, config, now }, row);
+        report.halted.push(id);
+      }
+      if (plan.clearStage) row = store.update(id, { reminder_stage: "" });
+      if (plan.stage) {
+        await tell(row, reminderText(plan.stage, plan.state, renewUrl));
+        row = store.update(id, { reminder_stage: plan.stage });
+        report.reminded.push(`${id}:${plan.stage}`);
+      }
+
+      const desk = row.status === "running" ? await readDesk(docker, row) : { reachable: false };
+      const { next, events } = evaluate({ row, desk, nowMs, prev: parseAlerts(row.alerts_json), stallMs });
+      const json = JSON.stringify(next);
+      if (json !== (row.alerts_json || "")) store.update(id, { alerts_json: json });
+      for (const ev of events) {
+        await tell(row, ev.customer);
+        if (ev.ops) await telegram.ops(ev.ops);
+        if (ev.type === "open") report.opened.push(`${id}:${ev.kind}`);
+        else if (ev.type === "resolved") report.resolved.push(`${id}:${ev.kind}`);
+        else report.trades += 1;
+      }
+    } catch (err) {
+      report.errors.push({ id, error: err instanceof Error ? err.message : String(err) });
+      log.warn?.(`maintenance ${id}: ${err instanceof Error ? err.message : err}`);
+    }
+  });
+  return report;
+}
+
+/** Encrypted copy of every customer folder, then (optionally) off this machine. */
+export async function runTenantBackup({ store, config, telegram, now = () => new Date() }) {
+  const key = parseBackupKey(config.backupKey);
+  if (!key || !config.backupDir) {
+    throw Object.assign(new Error("set SAAS_BACKUP_KEY (64 hex characters) and SAAS_BACKUP_DIR to turn backups on"), { status: 409 });
+  }
+  const rows = store.list().filter((row) => row.host_id === config.hostId && row.data_dir);
+  // The control database goes in too: without it a lost disk forgets who owns which agent.
+  const snap = mkdtempSync(join(tmpdir(), "na-control-snap-"));
+  let result;
+  try {
+    store.snapshot(join(snap, "control.sqlite"));
+    result = await backupAll({ rows: [...rows, { id: "control", data_dir: snap }], outDir: config.backupDir, key, now: now() });
+  } finally {
+    rmSync(snap, { recursive: true, force: true });
+  }
+  let offsite = "not configured";
+  if (config.backupRsync) {
+    try {
+      await syncOffsite({ outDir: config.backupDir, target: config.backupRsync });
+      offsite = "ok";
+    } catch (err) {
+      offsite = `failed: ${err instanceof Error ? err.message : err}`;
+    }
+  }
+  if (result.failed.length || offsite.startsWith("failed")) {
+    await telegram.ops(`Backup problem on ${config.hostId}: ${result.failed.length} folder(s) failed, off-site ${offsite}`);
+  }
+  return { hostId: config.hostId, backedUp: result.ok.length - 1, controlDb: result.ok.some((f) => /\/control-/.test(f)), failed: result.failed, offsite };
+}
+
+async function applyImageTag({ store, docker, config, now }, id, tag) {
+  const tagged = store.update(id, { image_tag: tag || null });
+  const updated = applySpec(store, tagged, { risk: riskFromRow(tagged), agentMode: tagged.agent_mode }, config, now);
+  await docker.up(dockerTarget(updated));
+}
+
+/** True once the agent answers and its loop is running; false if it never does. */
+async function waitUntilReady({ store, docker, config }, id) {
+  const deadline = Date.now() + config.rolloutTimeoutMs;
+  for (;;) {
+    const desk = await readDesk(docker, store.get(id));
+    if (desk.reachable && desk.running !== false) return true;
+    if (Date.now() + config.rolloutPollMs > deadline) return false;
+    await new Promise((r) => setTimeout(r, config.rolloutPollMs));
+  }
 }
 
 async function resumeErroredTenant({ store, docker, config, now, order, tenant, verified }) {
@@ -1163,6 +1403,9 @@ async function createTenant({ store, docker, config, now, payment, risk, agentNa
     paid_amount: verified ? verified.paidDisplay : null,
     overpaid_amount: verified ? verified.overpaidDisplay : null,
     buys_halted: 0,
+    cmc_x402: 1,
+    studio_x402: 0,
+    cancel_at_period_end: 0,
     created_at: stamp,
     updated_at: stamp,
   };
@@ -1244,6 +1487,7 @@ function specFrom(row, risk, config) {
     intervalMs: config.plan.intervalMs,
     staggerSec: staggerSeconds(row.id),
     risk,
+    imageTag: row.image_tag || "",
     signals: { cmc: row.cmc_x402 !== 0, studio: row.studio_x402 !== 0 },
     buysHalted: Boolean(row.buys_halted),
     paymentAsset: row.payment_asset,
@@ -1514,12 +1758,16 @@ function canAccess(actor, tenantId) {
 }
 
 function isOperatorRoute(method, pathname) {
-  if (method === "GET" && (pathname === "/capacity" || pathname === "/recovery" || pathname === "/tenants")) return true;
+  if (method === "GET" && (pathname === "/capacity" || pathname === "/recovery" || pathname === "/tenants" || pathname === "/rollout")) return true;
   if (
     method === "POST" &&
     (pathname === "/recovery/adopt" ||
       pathname === "/cluster/nodes" ||
       pathname === "/watcher/scan" ||
+      pathname === "/telegram/inbound" ||
+      pathname === "/maintenance/run" ||
+      pathname === "/backups/run" ||
+      pathname === "/rollout" ||
       pathname === "/subscriptions/sweep" ||
       pathname === "/session/open")
   ) {
@@ -1592,12 +1840,24 @@ function safeEqual(left, right) {
   return timingSafeEqual(a, b);
 }
 
-const HIDDEN = new Set(["access_token_hash", "access_code_hash", "agent_api_secret", "max_drawdown_pct"]);
+const HIDDEN = new Set([
+  "access_token_hash",
+  "access_code_hash",
+  "agent_api_secret",
+  "max_drawdown_pct",
+  "telegram_chat_id",
+  "telegram_code_hash",
+  "telegram_code_expires",
+  "alerts_json",
+  "reminder_stage",
+]);
 
 function customerView(row) {
   const view = operatorView(row);
   delete view.data_dir;
   delete view.payment_tx;
+  view.telegram_linked = Boolean(row.telegram_chat_id);
+  view.subscription = subscriptionState(row, Date.now());
   return view;
 }
 
@@ -1625,6 +1885,9 @@ async function overview(store, docker, config, health = { uptimeMs: 0, requests:
     },
     hostId: config.hostId,
     generatedAt: new Date().toISOString(),
+    alerts: mine.flatMap((row) =>
+      Object.entries(parseAlerts(row.alerts_json).open || {}).map(([kind, v]) => ({ id: row.id, kind, since: v.since })),
+    ),
     capacity: cap,
     counts: {
       customers: mine.length,
@@ -2232,10 +2495,36 @@ export function start(config = loadConfig(), deps = {}) {
       (err) => console.warn(`  BNB/USD fallback ${config.bnbPriceUsd}: ${err instanceof Error ? err.message : err}`),
     );
   }
-  const server = createServer(createHandler({ store, docker, config, rpc, bnbPrice }));
+  const handler = createHandler({ store, docker, config, rpc, bnbPrice });
+  const server = createServer(handler);
+  const timers = [];
+  const every = (fn, ms, firstMs) => {
+    let busy = false;
+    const run = async () => {
+      if (busy) return; // a slow pass must not stack up behind itself
+      busy = true;
+      try { await fn(); } catch (err) { console.warn(`scheduled task failed: ${safeError(err)}`); } finally { busy = false; }
+    };
+    timers.push(setTimeout(run, firstMs).unref(), setInterval(run, ms).unref());
+  };
+  if (!config.devSandbox) {
+    every(() => runMaintenance({ store, docker, config, telegram: handler.telegram }), config.maintenanceMs, 15_000);
+    if (parseBackupKey(config.backupKey) && config.backupDir) {
+      every(() => runTenantBackup({ store, config, telegram: handler.telegram }), config.backupEveryMs, 120_000);
+    } else {
+      console.warn("  Tenant backups are OFF: set SAAS_BACKUP_KEY and SAAS_BACKUP_DIR (a lost disk loses every wallet login).");
+    }
+  }
+  let poller = null;
+  if (config.telegramPoll && handler.telegram.enabled) {
+    poller = startPolling({ telegram: handler.telegram, route: handler.routeTelegram });
+    console.log("  Telegram bot: polling for messages");
+  }
   server.on("close", () => {
     backupClosed = true;
     void backup.stop();
+    for (const t of timers) { clearTimeout(t); clearInterval(t); }
+    void poller?.stop();
   });
   server.listen(config.port, config.bind, () => {
     console.log(`Neural Alpha SaaS Control (${config.hostId}) listening on http://${config.bind}:${config.port}`);

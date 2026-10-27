@@ -138,6 +138,17 @@ export function saasBackupSchemaStatements() {
       updated_at TEXT,
       backed_up_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`,
+    // Columns added after the first release. An older Neon table gets them here.
+    `ALTER TABLE saas_backup.tenants
+      ADD COLUMN IF NOT EXISTS cmc_x402 INTEGER,
+      ADD COLUMN IF NOT EXISTS studio_x402 INTEGER,
+      ADD COLUMN IF NOT EXISTS telegram_chat_id TEXT,
+      ADD COLUMN IF NOT EXISTS telegram_code_hash TEXT,
+      ADD COLUMN IF NOT EXISTS telegram_code_expires TEXT,
+      ADD COLUMN IF NOT EXISTS cancel_at_period_end INTEGER,
+      ADD COLUMN IF NOT EXISTS reminder_stage TEXT,
+      ADD COLUMN IF NOT EXISTS alerts_json TEXT,
+      ADD COLUMN IF NOT EXISTS image_tag TEXT`,
     `CREATE TABLE IF NOT EXISTS saas_backup.orders (
       id TEXT PRIMARY KEY,
       host_id TEXT,

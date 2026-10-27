@@ -71,7 +71,7 @@ const SIZE_CHOICES = [
   { id: "custom", figure: "Custom", unit: "" },
 ];
 
-const X402_PER_DAY = 2;
+const X402_PER_DAY = 1;
 const MAX_CUSTOM_USDT = 10_000;
 
 function PositionSizeCard({
@@ -323,6 +323,7 @@ export function PortalDesk() {
   const [accessCode, setAccessCode] = useState("");
   const [codeInput, setCodeInput] = useState("");
   const [toast, setToast] = useState("");
+  const [renewId, setRenewId] = useState("");
   const toastTimer = useRef<number | null>(null);
 
   const assets = useMemo(
@@ -359,7 +360,13 @@ export function PortalDesk() {
         if (stop) return;
         setTenant(data.tenant || null);
         setBook(data.state || null);
-        setStep("agent");
+        // /portal?renew=1 opens the plan and payment steps for this agent instead of the desk.
+        if (new URLSearchParams(window.location.search).get("renew") === "1" && data.tenant?.id) {
+          setRenewId(String(data.tenant.id));
+          setStep("quote");
+        } else {
+          setStep("agent");
+        }
       } catch {
         try {
           const checkout = await readJson(await fetch("/api/portal/order-status", { cache: "no-store" }));
@@ -549,7 +556,7 @@ export function PortalDesk() {
         await fetch("/api/portal/checkout", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ paymentAsset: asset, ...size }),
+          body: JSON.stringify({ paymentAsset: asset, ...size, ...(renewId ? { tenantId: renewId } : {}) }),
         }),
       );
       setOrder(data.order);
@@ -748,6 +755,7 @@ export function PortalDesk() {
         </div>
 
         <main className={step === "agent" ? "flex min-h-0 flex-1 flex-col pt-1" : "pt-7 sm:pt-10"}>
+        {renewId && step !== "agent" ? <div className="mb-6 rounded-xl border border-[#18cf7a]/25 bg-[#18cf7a]/[0.06] px-4 py-3 text-sm text-[#bfe9d3]">Renewing your agent. The new month is added after your current period ends, so you lose nothing.</div> : null}
         {step === "agent" ? null : <div className="mb-8 flex items-center justify-end gap-2 border-b border-white/[0.07] pb-5 sm:gap-3">
             {progressLabels.map((label, index) => { const active = progress >= [0, 0.4, 0.72][index]; return <div key={label} className="flex items-center gap-2 text-[10px] sm:text-xs"><span className={`grid h-6 w-6 place-items-center rounded-full border ${active ? "border-[#18cf7a]/50 bg-[#18cf7a]/10 text-[#18cf7a]" : "border-white/10 text-[#647177]"}`}>{progress > [0.08, 0.4, 0.72][index] ? <Check size={12} /> : index + 1}</span><span className={active ? "text-[#c8d2d5]" : "hidden text-[#647177] sm:inline"}>{label}</span>{index < 2 ? <span className="mx-0.5 h-px w-3 bg-white/10 sm:w-7" /> : null}</div>; })}
         </div>}

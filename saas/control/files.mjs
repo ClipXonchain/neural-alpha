@@ -1,6 +1,6 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { assertTenantId, DEFAULT_X402_PER_DAY, MAX_X402_PER_DAY, SWAP_PAYMENT_TOKEN, x402IntervalMs } from "./policy.mjs";
+import { assertTenantId, DEFAULT_X402_PER_DAY, MAX_X402_PER_DAY, MIN_X402_PER_DAY, SWAP_PAYMENT_TOKEN, x402IntervalMs } from "./policy.mjs";
 
 export function tenantDir(root, id) {
   assertTenantId(id);
@@ -18,7 +18,7 @@ export function writeTenantFiles(dir, spec) {
 
 function x402PerDay(risk) {
   const n = Number(risk?.x402PerDay);
-  return Number.isInteger(n) && n >= DEFAULT_X402_PER_DAY && n <= MAX_X402_PER_DAY ? n : DEFAULT_X402_PER_DAY;
+  return Number.isInteger(n) && n >= MIN_X402_PER_DAY && n <= MAX_X402_PER_DAY ? n : DEFAULT_X402_PER_DAY;
 }
 
 function flag(on) {
@@ -50,7 +50,7 @@ export function renderEnv(spec) {
     `HACKATHON_MAX_TRADE_USD=${maxTradeUsd}`,
     `X402_MIN_PAYMENTS_PER_DAY=${x402ScheduleLines(spec.risk).perDay}`,
     `CMC_X402_ENABLED=${flag(spec.signals?.cmc)}`,
-    `STUDIO_X402_ENABLED=${flag(spec.signals?.studio)}`,
+    `STUDIO_X402_ENABLED=${flag(spec.signals ? spec.signals.studio : false)}`,
     `CMC_X402_INTERVAL_MS=${x402ScheduleLines(spec.risk).intervalMs}`,
     `STUDIO_X402_INTERVAL_MS=${x402ScheduleLines(spec.risk).intervalMs}`,
     "DISABLE_DRAWDOWN_LIMIT=true",
@@ -71,9 +71,10 @@ export function renderOverride(spec) {
   const minBuyIntervalMs = halted ? 315_360_000_000 : spec.risk.minBuyIntervalMs;
   const maxPositionUsd = halted ? 0 : spec.risk.maxPositionUsd;
   const maxTradeUsd = halted ? 0 : spec.risk.maxTradeUsd;
+  const image = /^[A-Za-z0-9_.-]{1,64}$/.test(spec.imageTag || "") ? `\n    image: neural-saas-worker:${spec.imageTag}` : "";
   return `services:
   worker:
-    container_name: ${spec.containerName}
+    container_name: ${spec.containerName}${image}
     volumes:
       - "${path}:/data:rw"
     environment:
@@ -88,7 +89,7 @@ export function renderOverride(spec) {
       HACKATHON_MAX_TRADE_USD: "${maxTradeUsd}"
       X402_MIN_PAYMENTS_PER_DAY: "${x402ScheduleLines(spec.risk).perDay}"
       CMC_X402_ENABLED: "${flag(spec.signals?.cmc)}"
-      STUDIO_X402_ENABLED: "${flag(spec.signals?.studio)}"
+      STUDIO_X402_ENABLED: "${flag(spec.signals ? spec.signals.studio : false)}"
       CMC_X402_INTERVAL_MS: "${x402ScheduleLines(spec.risk).intervalMs}"
       STUDIO_X402_INTERVAL_MS: "${x402ScheduleLines(spec.risk).intervalMs}"
       DISABLE_DRAWDOWN_LIMIT: "true"

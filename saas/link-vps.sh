@@ -101,6 +101,11 @@ SAAS_MONITOR_SECRET=${MONITOR_SECRET}
 SAAS_BIND_HOST=${BIND_HOST}
 SAAS_CONTROL_PORT=${PORT}
 EOF
+    # Optional settings picked up from the environment (join-mother.sh sets them).
+    for var in TELEGRAM_BOT_TOKEN TELEGRAM_BOT_USERNAME TELEGRAM_OPS_CHAT_ID TELEGRAM_BOT_POLL \
+      SAAS_BACKUP_KEY SAAS_BACKUP_DIR SAAS_BACKUP_RSYNC SAAS_EDGE_ONLY SAAS_APP_URL; do
+      [[ -n "${!var:-}" ]] && printf '%s=%s\n' "$var" "${!var}" >> "$CELL_ENV"
+    done
     chmod 600 "$CELL_ENV"
     echo "✓ Wrote cell config to ${CELL_ENV}"
 

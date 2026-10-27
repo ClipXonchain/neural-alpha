@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { ERC20_TRANSFER_TOPIC, padTopicAddress } from "./payments.mjs";
 import { CHECKOUT_EXPIRY_MS, DEFAULT_TOKEN_CONTRACTS, parseUnits18 } from "./policy.mjs";
-import { loadConfig, createHandler, portalLocation, adminLocation } from "./server.mjs";
+import { loadConfig, createHandler, portalLocation, adminLocation, runMaintenance } from "./server.mjs";
 import { openStore } from "./store.mjs";
 
 function fakeDocker() {
@@ -246,7 +246,7 @@ test("each customer gets a separate container and the third is refused", async (
     assert.match(env, /AGENT_MODE=live/);
     assert.match(env, /MAX_POSITION_SIZE_USD=100/);
     assert.match(env, /HACKATHON_MAX_TRADE_USD=100/);
-    assert.match(env, /X402_MIN_PAYMENTS_PER_DAY=2/);
+    assert.match(env, /X402_MIN_PAYMENTS_PER_DAY=1/);
     assert.match(env, /DISABLE_DRAWDOWN_LIMIT=true/);
     assert.match(env, /PAYMENT_TOKEN=USDT/);
     const usdc = listed.body.tenants.find((tenant) => tenant.payment_asset === "USDC");
@@ -712,7 +712,7 @@ test("checkout verifies BSC receipt (status, token, treasury, amount, 15 confirm
     assert.match(restoredEnv, /MAX_POSITION_SIZE_USD=500/);
     assert.match(restoredEnv, /HACKATHON_MAX_TRADE_USD=500/);
     assert.match(restoredEnv, /PAYMENT_TOKEN=USDT/);
-    assert.match(restoredEnv, /X402_MIN_PAYMENTS_PER_DAY=2/);
+    assert.match(restoredEnv, /X402_MIN_PAYMENTS_PER_DAY=1/);
     assert.doesNotMatch(restoredEnv, /DISABLE_NEW_BUYS=true/);
 
     const denied = await call(url, "/session/open", {
@@ -902,8 +902,8 @@ test("saving a position size updates the live tenant in USDT and rejects a bad c
     assert.match(env, /MAX_POSITION_SIZE_USD=750/);
     assert.match(env, /HACKATHON_MAX_TRADE_USD=750/);
     assert.match(env, /X402_MIN_PAYMENTS_PER_DAY=3/);
-    assert.match(env, /CMC_X402_INTERVAL_MS=57600000/);
-    assert.match(env, /STUDIO_X402_INTERVAL_MS=57600000/);
+    assert.match(env, /CMC_X402_INTERVAL_MS=28800000/);
+    assert.match(env, /STUDIO_X402_INTERVAL_MS=28800000/);
     assert.match(env, /PAYMENT_TOKEN=USDT/);
     const yml = readFileSync(join(root, id, "override.yml"), "utf8");
     assert.match(yml, /PAYMENT_TOKEN: "USDT"/);
@@ -914,7 +914,8 @@ test("saving a position size updates the live tenant in USDT and rejects a bad c
       { preset: "custom", positionUsd: 0 },
       { preset: "custom", positionUsd: -20 },
       { preset: "custom", positionUsd: 1_000_000_000_000 },
-      { preset: "500", x402PerDay: 1 },
+      { preset: "500", x402PerDay: 0 },
+      { preset: "500", x402PerDay: 49 },
       { preset: "nope" },
     ]) {
       const rejected = await call(url, `/tenants/${id}/risk`, { method: "POST", token, body });
@@ -961,14 +962,16 @@ test("a customer switches paid CMC and Studio signals off and on", async () => {
     const id = created.body.tenant.id;
     const token = created.body.compoundToken;
     const envOf = () => readFileSync(join(root, id, "tenant.env"), "utf8");
+    // New customers get the daily CMC call; Agent Studio is optional and starts off.
     assert.match(envOf(), /CMC_X402_ENABLED=true/);
-    assert.match(envOf(), /STUDIO_X402_ENABLED=true/);
+    assert.match(envOf(), /STUDIO_X402_ENABLED=false/);
+    assert.equal(created.body.tenant.studio_x402, 0);
 
     const off = await call(url, `/tenants/${id}/signals`, { method: "POST", token, body: { cmc: false } });
     assert.equal(off.status, 200);
     assert.equal(off.body.tenant.cmc_x402, 0);
     assert.match(envOf(), /CMC_X402_ENABLED=false/);
-    assert.match(envOf(), /STUDIO_X402_ENABLED=true/);
+    assert.match(envOf(), /STUDIO_X402_ENABLED=false/);
     assert.match(readFileSync(join(root, id, "override.yml"), "utf8"), /CMC_X402_ENABLED: "false"/);
 
     // A risk save keeps the switch.
@@ -980,10 +983,10 @@ test("a customer switches paid CMC and Studio signals off and on", async () => {
       assert.equal(bad.status, 400, JSON.stringify(body));
     }
 
-    const both = await call(url, `/tenants/${id}/signals`, { method: "POST", token, body: { cmc: true, studio: false } });
+    const both = await call(url, `/tenants/${id}/signals`, { method: "POST", token, body: { cmc: true, studio: true } });
     assert.equal(both.status, 200);
     assert.match(envOf(), /CMC_X402_ENABLED=true/);
-    assert.match(envOf(), /STUDIO_X402_ENABLED=false/);
+    assert.match(envOf(), /STUDIO_X402_ENABLED=true/);
   } finally {
     server.close();
     store.close();
@@ -1113,5 +1116,289 @@ test("a customer container does not receive the shared Neon URL", async () => {
   } finally {
     server.close();
     store.close();
+  }
+});
+
+// ---- Telegram, reminders, alerts, cancel, rollout and backups -------------------------------
+
+const DAY = 86_400_000;
+
+function opsHarness(extraEnv = {}) {
+  const root = mkdtempSync(join(tmpdir(), "na-ops-"));
+  const config = loadConfig({
+    CONTROL_API_SECRET: "test-secret",
+    SAAS_DATA_ROOT: root,
+    SAAS_DB_PATH: join(root, "control.sqlite"),
+    SAAS_HOST_ID: "box-a",
+    SAAS_MAX_TENANTS: "3",
+    TELEGRAM_BOT_TOKEN: "123:TEST",
+    TELEGRAM_BOT_USERNAME: "@NeuralAlphaBot",
+    SAAS_ROLLOUT_POLL_MS: "5",
+    SAAS_ROLLOUT_TIMEOUT_MS: "60",
+    ...extraEnv,
+  });
+  const store = openStore(config.dbPath);
+  const docker = fakeDocker();
+  const sent = [];
+  const opsSent = [];
+  const telegram = {
+    enabled: true,
+    async send(chat, text) { sent.push({ chat: String(chat), text }); return true; },
+    async ops(text) { opsSent.push(text); return true; },
+  };
+  const clock = { now: new Date("2026-11-01T00:00:00Z") };
+  const handler = createHandler({ store, docker, config, telegram, now: () => clock.now });
+  return { root, config, store, docker, sent, opsSent, telegram, clock, handler };
+}
+
+async function boot(h, tag = "a7") {
+  const { server, url } = await listen(h.handler);
+  const created = await call(url, "/tenants", { method: "POST", token: null, body: pay(tag, "USDT") });
+  assert.equal(created.status, 201);
+  return { server, url, id: created.body.tenant.id, token: created.body.compoundToken };
+}
+
+async function linkTelegram(url, id, token, chat = "555") {
+  const made = await call(url, `/tenants/${id}/telegram/code`, { method: "POST", token });
+  assert.equal(made.status, 200);
+  assert.match(made.body.deepLink, /^https:\/\/t\.me\/NeuralAlphaBot\?start=[A-Z2-9]{8}$/);
+  const linked = await call(url, "/telegram/inbound", { method: "POST", body: { chatId: chat, text: `/start ${made.body.code}` } });
+  assert.equal(linked.body.handled, true);
+  assert.match(linked.body.reply, /^Linked/);
+  return made.body.code;
+}
+
+test("a customer links Telegram with a one-time code and the portal never sees the chat id", async () => {
+  const h = opsHarness();
+  const { server, url, id, token } = await boot(h);
+  try {
+    const before = await call(url, `/tenants/${id}`, { token });
+    assert.equal(before.body.tenant.telegram_linked, false);
+    const code = await linkTelegram(url, id, token);
+    const after = await call(url, `/tenants/${id}`, { token });
+    assert.equal(after.body.tenant.telegram_linked, true);
+    assert.equal(after.body.tenant.telegram_chat_id, undefined);
+    assert.equal(after.body.tenant.telegram_code_hash, undefined);
+    const reuse = await call(url, "/telegram/inbound", { method: "POST", body: { chatId: "999", text: `/start ${code}` } });
+    assert.equal(reuse.body.handled, false);
+
+    const status = await call(url, "/telegram/inbound", { method: "POST", body: { chatId: "555", text: "/status" } });
+    assert.match(status.body.reply, new RegExp(`Agent ${id}`));
+    assert.match(status.body.reply, /Value \$120.5/);
+    assert.match(status.body.reply, /Subscription: 30 days left/);
+
+    const customerCannot = await call(url, "/telegram/inbound", { method: "POST", token, body: { chatId: "1", text: "/status" } });
+    assert.equal(customerCannot.status, 401, "only the operator may route bot messages");
+
+    const unlinked = await call(url, `/tenants/${id}/telegram/unlink`, { method: "POST", token });
+    assert.equal(unlinked.body.tenant.telegram_linked, false);
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("Telegram code is refused when the bot is not configured", async () => {
+  const h = opsHarness({ TELEGRAM_BOT_TOKEN: "", TELEGRAM_BOT_USERNAME: "" });
+  h.telegram.enabled = false;
+  const { server, url, id, token } = await boot(h);
+  try {
+    const r = await call(url, `/tenants/${id}/telegram/code`, { method: "POST", token });
+    assert.equal(r.status, 503);
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("reminders, a 3-day grace, then new buys stop; each message is sent once", async () => {
+  const h = opsHarness();
+  const { server, url, id, token } = await boot(h);
+  try {
+    await linkTelegram(url, id, token);
+    const subs = () => h.sent.filter((m) => /subscription/i.test(m.text));
+    const tick = async (days) => {
+      h.clock.now = new Date(Date.parse("2026-11-01T00:00:00Z") + days * DAY);
+      return runMaintenance({ store: h.store, docker: h.docker, config: h.config, now: () => h.clock.now, telegram: h.telegram, log: { warn() {} } });
+    };
+    await tick(10);
+    assert.equal(subs().length, 0);
+    await tick(24);
+    await tick(24.5);
+    assert.deepEqual(subs().map((m) => m.text.match(/ends in (\d+) day/)?.[1]), ["7"]);
+    await tick(29.5);
+    assert.deepEqual(subs().map((m) => m.text.match(/ends in (\d+) day/)?.[1]), ["7", "1"]);
+
+    const grace = await tick(31);
+    assert.deepEqual(grace.halted, []);
+    assert.match(subs().at(-1).text, /keeps trading until 2026-12-04/);
+    assert.equal(h.store.get(id).buys_halted, 0);
+
+    const lapsed = await tick(34);
+    assert.deepEqual(lapsed.halted, [id]);
+    assert.equal(h.store.get(id).buys_halted, 1);
+    assert.match(readFileSync(join(h.root, id, "tenant.env"), "utf8"), /DISABLE_NEW_BUYS=true/);
+    assert.match(subs().at(-1).text, /New buys are stopped/);
+    const count = subs().length;
+    await tick(40);
+    assert.equal(subs().length, count);
+    assert.ok(subs().every((m) => m.chat === "555"));
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("cancelling skips the grace and can be undone", async () => {
+  const h = opsHarness();
+  const { server, url, id, token } = await boot(h);
+  try {
+    const cancelled = await call(url, `/tenants/${id}/cancel`, { method: "POST", token, body: {} });
+    assert.equal(cancelled.body.tenant.subscription.cancelling, true);
+    const undone = await call(url, `/tenants/${id}/cancel`, { method: "POST", token, body: { undo: true } });
+    assert.equal(undone.body.tenant.subscription.cancelling, false);
+    await call(url, `/tenants/${id}/cancel`, { method: "POST", token, body: {} });
+
+    h.clock.now = new Date(Date.parse("2026-11-01T00:00:00Z") + 30 * DAY + 60_000);
+    const report = await runMaintenance({ store: h.store, docker: h.docker, config: h.config, now: () => h.clock.now, telegram: h.telegram, log: { warn() {} } });
+    assert.deepEqual(report.halted, [id], "halted at once, no 3-day grace");
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("a dead agent pages the customer and ops once, shows on the admin overview, and recovers", async () => {
+  const h = opsHarness();
+  const { server, url, id, token } = await boot(h);
+  try {
+    await linkTelegram(url, id, token);
+    const healthy = h.docker.readState;
+    const run = () => runMaintenance({ store: h.store, docker: h.docker, config: h.config, now: () => h.clock.now, telegram: h.telegram, log: { warn() {} } });
+    await run();
+    h.docker.readState = async () => { throw new Error("no answer"); };
+    await run();
+    assert.equal(h.opsSent.length, 0, "one miss is not an alert");
+    const second = await run();
+    assert.deepEqual(second.opened, [`${id}:agent_down`]);
+    assert.match(h.opsSent[0], new RegExp(`Agent ${id} is not responding`));
+    assert.match(h.sent.at(-1).text, /not responding/);
+    await run();
+    assert.equal(h.opsSent.length, 1, "no repeat while it stays down");
+
+    const overview = await call(url, "/admin/overview");
+    assert.deepEqual(overview.body.alerts.map((a) => [a.id, a.kind]), [[id, "agent_down"]]);
+
+    h.docker.readState = healthy;
+    const back = await run();
+    assert.deepEqual(back.resolved, [`${id}:agent_down`]);
+    assert.match(h.sent.at(-1).text, /back to normal/);
+    assert.deepEqual((await call(url, "/admin/overview")).body.alerts, []);
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("new trades reach Telegram once and a fresh link never replays history", async () => {
+  const h = opsHarness();
+  const { server, url, id, token } = await boot(h);
+  try {
+    await linkTelegram(url, id, token);
+    const base = JSON.parse(await h.docker.readState());
+    const run = () => runMaintenance({ store: h.store, docker: h.docker, config: h.config, now: () => h.clock.now, telegram: h.telegram, log: { warn() {} } });
+    await run();
+    assert.equal(h.sent.filter((m) => /Bought|Sold/.test(m.text)).length, 0, "history is not replayed");
+    base.trades.push({ success: true, fromToken: "USDT", toToken: "TSLAB", fromAmount: "40", toAmount: "0.2", priceAtExecution: 200, timestamp: 50, txHash: `0x${"ef".repeat(32)}` });
+    h.docker.readState = async () => JSON.stringify(base);
+    await run();
+    await run();
+    const trades = h.sent.filter((m) => /Bought|Sold/.test(m.text));
+    assert.equal(trades.length, 1);
+    assert.equal(trades[0].text, "Bought TSLAB for $40.00"); // new customers start live, so no [paper] tag
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("a rollout moves customers to a new image tag and a bad image rolls back", async () => {
+  const h = opsHarness();
+  const { server, url, id } = await boot(h);
+  try {
+    const wait = async () => {
+      for (let i = 0; i < 100; i++) {
+        const j = await call(url, "/rollout");
+        if (j.body.status !== "running") return j.body;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      throw new Error("rollout never finished");
+    };
+    assert.equal((await call(url, "/rollout", { method: "POST", body: { tag: "bad tag;" } })).status, 400);
+    assert.equal((await call(url, "/rollout", { method: "POST", token: null, body: { tag: "abc123" } })).status, 401);
+
+    const started = await call(url, "/rollout", { method: "POST", body: { tag: "abc123" } });
+    assert.equal(started.status, 202);
+    const done = await wait();
+    assert.equal(done.status, "done");
+    assert.deepEqual(done.report.done, [id]);
+    assert.equal(h.store.get(id).image_tag, "abc123");
+    assert.match(readFileSync(join(h.root, id, "override.yml"), "utf8"), /image: neural-saas-worker:abc123/);
+
+    const good = h.docker.readState;
+    h.docker.readState = async () => { throw new Error("crash loop"); };
+    await call(url, "/rollout", { method: "POST", body: { tag: "broken1" } });
+    const failed = await wait();
+    assert.equal(failed.status, "failed");
+    assert.equal(failed.report.failed, id);
+    assert.equal(failed.report.rolledBack, true);
+    assert.equal(h.store.get(id).image_tag, "abc123", "back on the previous good image");
+    assert.match(readFileSync(join(h.root, id, "override.yml"), "utf8"), /image: neural-saas-worker:abc123/);
+    h.docker.readState = good;
+  } finally {
+    server.close();
+    h.store.close();
+  }
+});
+
+test("encrypted tenant backups run on demand and hold no readable secret", async () => {
+  const backups = mkdtempSync(join(tmpdir(), "na-bkdir-"));
+  const h = opsHarness({ SAAS_BACKUP_KEY: "ab".repeat(32), SAAS_BACKUP_DIR: backups });
+  const { server, url, id } = await boot(h);
+  try {
+    const { mkdirSync, writeFileSync } = await import("node:fs");
+    mkdirSync(join(h.root, id, "home"), { recursive: true });
+    writeFileSync(join(h.root, id, "home", "session.json"), "wallet-login-secret");
+    const r = await call(url, "/backups/run", { method: "POST" });
+    assert.equal(r.status, 200);
+    assert.equal(r.body.backedUp, 1);
+    assert.equal(r.body.controlDb, true);
+    const files = readdirSync(backups).sort();
+    assert.equal(files.length, 2, "one customer folder plus the control database");
+    const mine = files.find((f) => f.startsWith(`${id}-`));
+    assert.match(mine, new RegExp(`^${id}-\\d{8}T\\d{6}Z\\.tar\\.gz\\.enc$`));
+    for (const f of files) assert.equal(readFileSync(join(backups, f)).includes("wallet-login-secret"), false);
+
+    // The control copy restores into a database that still knows this customer.
+    const { restoreDir, parseBackupKey } = await import("./tenant-backup.mjs");
+    const dest = join(mkdtempSync(join(tmpdir(), "na-restore-")), "ctl");
+    await restoreDir({ file: join(backups, files.find((f) => f.startsWith("control-"))), key: parseBackupKey("ab".repeat(32)), destDir: dest });
+    const restored = openStore(join(dest, "control.sqlite"));
+    assert.equal(restored.get(id)?.id, id);
+    restored.close();
+  } finally {
+    server.close();
+    h.store.close();
+  }
+
+  const off = opsHarness();
+  const second = await listen(off.handler);
+  try {
+    const r = await call(second.url, "/backups/run", { method: "POST" });
+    assert.equal(r.status, 409);
+    assert.ok(!existsSync(join(off.root, "backups")));
+  } finally {
+    second.server.close();
+    off.store.close();
   }
 });

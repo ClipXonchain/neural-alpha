@@ -4,8 +4,12 @@ import { useState, useEffect, useCallback, useId, useMemo, useRef, type ReactNod
 import { AnimatePresence, motion, useMotionValue, useReducedMotion, useSpring, useTransform } from "framer-motion";
 import {
   AlertTriangle,
+  Bell,
   BrainCircuit,
+  CalendarClock,
   Check,
+  Copy,
+  ExternalLink,
   Fuel,
   Globe2,
   Layers,
@@ -13,6 +17,7 @@ import {
   Rocket,
   RotateCcw,
   Scale,
+  Send,
   Shield,
   SlidersHorizontal,
   Sparkles,
@@ -46,6 +51,24 @@ export interface SignalSwitches {
 export interface SignalControls {
   value: SignalSwitches;
   onChange: (patch: Partial<SignalSwitches>) => Promise<{ ok: boolean; error?: string }>;
+}
+
+/** Hosted customers only: where the subscription stands, and the Telegram link. */
+export interface AccountControls {
+  subscription: {
+    stage: "active" | "grace" | "lapsed" | "unknown";
+    daysLeft: number | null;
+    endsAt: string | null;
+    graceEndsAt: string | null;
+    cancelling: boolean;
+  };
+  telegramLinked: boolean;
+  onRenew: () => void;
+  onCancel: (undo: boolean) => Promise<{ ok: boolean; error?: string }>;
+  onTelegramCode: () => Promise<{ ok: boolean; code?: string; deepLink?: string; expiresAt?: string; error?: string }>;
+  onTelegramUnlink: () => Promise<{ ok: boolean; error?: string }>;
+  /** Re-reads the account; called while a Telegram code is waiting to be used. */
+  onRefresh: () => Promise<void>;
 }
 
 interface Form {
@@ -402,7 +425,7 @@ function SignalsPanel({ controls, disabled }: { controls: SignalControls; disabl
         <SignalCard
           icon={Globe2}
           title="CoinMarketCap macro"
-          body="Global market metrics and upcoming macro events. Position size scales down around big announcements."
+          body="One paid check a day (the minimum) of global market metrics and upcoming macro events. Position size scales down around big announcements."
           checked={optimistic.cmc}
           busy={pending === "cmc"}
           disabled={disabled || pending !== null}
@@ -411,7 +434,7 @@ function SignalsPanel({ controls, disabled }: { controls: SignalControls; disabl
         <SignalCard
           icon={BrainCircuit}
           title="Agent Studio research"
-          body="BNB Chain Agent Studio stock analysis on the names your agent is currently watching."
+          body="Optional and off by default. Adds BNB Chain Agent Studio stock analysis on the names your agent is watching, at extra cost per call."
           checked={optimistic.studio}
           busy={pending === "studio"}
           disabled={disabled || pending !== null}
@@ -474,15 +497,214 @@ function ExitMap({ stopLoss, takeProfit, giveback }: { stopLoss: number; takePro
   );
 }
 
+function fmtDate(iso: string | null) {
+  return iso ? new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" }) : "";
+}
+
+function SubscriptionPanel({ account, disabled }: { account: AccountControls; disabled: boolean }) {
+  const s = account.subscription;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const tone: Tone = s.stage === "active" ? "green" : s.stage === "grace" ? "amber" : s.stage === "lapsed" ? "red" : "blue";
+  const label = s.stage === "active" ? (s.cancelling ? "Ending" : "Active") : s.stage === "grace" ? "Grace period" : s.stage === "lapsed" ? "Paused buys" : "Unknown";
+  const detail =
+    s.stage === "active"
+      ? s.cancelling
+        ? `Ends ${fmtDate(s.endsAt)}. It will not renew.`
+        : `${s.daysLeft} day${s.daysLeft === 1 ? "" : "s"} left. Renew any time; the new month is added after this one.`
+      : s.stage === "grace"
+        ? `Your month ended. The agent keeps trading until ${fmtDate(s.graceEndsAt)}, then new buys stop.`
+        : s.stage === "lapsed"
+          ? "New buys are stopped. Open positions stay and their exits still run. Renew to start buying again."
+          : "No paid period on this agent yet.";
+
+  const toggleCancel = async () => {
+    setBusy(true);
+    setError("");
+    const r = await account.onCancel(s.cancelling).catch((e) => ({ ok: false, error: String(e) }));
+    setBusy(false);
+    if (!r.ok) setError(r.error || "Could not save");
+  };
+
+  return (
+    <Panel
+      icon={CalendarClock}
+      title="Subscription"
+      subtitle="Your agent's paid month."
+      delay={0.04}
+      aside={
+        <span className={cn("shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold ring-1", {
+          "bg-[rgba(18,178,100,.12)] text-[#2fd98a] ring-[#2fd98a]/30": tone === "green",
+          "bg-[rgba(245,185,66,.12)] text-[#f5b942] ring-[#f5b942]/30": tone === "amber",
+          "bg-[rgba(255,77,94,.12)] text-[#ff6b79] ring-[#ff6b79]/30": tone === "red",
+          "bg-[rgba(59,158,255,.12)] text-[#61b0ff] ring-[#61b0ff]/30": tone === "blue",
+        })}>
+          {label}
+        </span>
+      }
+    >
+      <p className="m-0 text-[13px] leading-relaxed text-[#9aa6b2]">{detail}</p>
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={account.onRenew}
+          disabled={disabled}
+          className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-[linear-gradient(135deg,#1fd98a,#0f9d5a)] px-5 text-[13px] font-semibold text-[#00160d] shadow-[0_8px_24px_-6px_rgba(31,217,138,.5)] transition hover:brightness-110 active:scale-[0.98] disabled:opacity-50"
+        >
+          Renew
+        </button>
+        {s.stage !== "unknown" && s.stage !== "lapsed" && (
+          <button
+            type="button"
+            onClick={toggleCancel}
+            disabled={disabled || busy}
+            className="inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-[13px] text-[#8b97a3] transition hover:bg-white/[0.06] hover:text-white disabled:opacity-50"
+          >
+            {busy && <Loader2 className="size-3.5 animate-spin" />}
+            {s.cancelling ? "Keep my subscription" : "Don't renew"}
+          </button>
+        )}
+      </div>
+      {error && <p role="alert" className="m-0 mt-3 text-[12px] text-[#ff6b79]">{error}</p>}
+    </Panel>
+  );
+}
+
+function TelegramPanel({ account, disabled }: { account: AccountControls; disabled: boolean }) {
+  const [issued, setIssued] = useState<{ code: string; deepLink: string; expiresAt: string } | null>(null);
+  const [left, setLeft] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [copied, setCopied] = useState(false);
+  const ref = useRef(account);
+  ref.current = account;
+  const linked = account.telegramLinked;
+
+  useEffect(() => {
+    if (!issued || linked) return;
+    const tick = () => setLeft(Math.max(0, Math.round((Date.parse(issued.expiresAt) - Date.now()) / 1000)));
+    tick();
+    const clock = window.setInterval(tick, 1000);
+    const poll = window.setInterval(() => void ref.current.onRefresh(), 3000);
+    return () => {
+      window.clearInterval(clock);
+      window.clearInterval(poll);
+    };
+  }, [issued, linked]);
+
+  useEffect(() => {
+    if (linked) setIssued(null);
+  }, [linked]);
+
+  const make = async () => {
+    setBusy(true);
+    setError("");
+    const r = await account.onTelegramCode().catch((e) => ({ ok: false, error: String(e) }) as Awaited<ReturnType<AccountControls["onTelegramCode"]>>);
+    setBusy(false);
+    if (r.ok && r.code && r.deepLink && r.expiresAt) setIssued({ code: r.code, deepLink: r.deepLink, expiresAt: r.expiresAt });
+    else setError(r.error || "Could not make a code");
+  };
+  const unlink = async () => {
+    setBusy(true);
+    setError("");
+    const r = await account.onTelegramUnlink().catch((e) => ({ ok: false, error: String(e) }));
+    setBusy(false);
+    if (!r.ok) setError(r.error || "Could not unlink");
+  };
+  const copy = () => {
+    if (!issued) return;
+    void navigator.clipboard?.writeText(issued.code).then(() => {
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    });
+  };
+  const mmss = `${Math.floor(left / 60)}:${String(left % 60).padStart(2, "0")}`;
+  const expired = Boolean(issued) && left === 0;
+
+  return (
+    <Panel
+      icon={Bell}
+      title="Telegram alerts"
+      subtitle="Trades, problems and your renewal date, sent to your phone."
+      delay={0.08}
+      aside={
+        <span className={cn("shrink-0 rounded-full px-3 py-1.5 text-[11px] font-semibold ring-1", linked ? "bg-[rgba(18,178,100,.12)] text-[#2fd98a] ring-[#2fd98a]/30" : "bg-white/[0.06] text-[#9aa6b2] ring-white/[0.08]")}>
+          {linked ? "Linked" : "Not linked"}
+        </span>
+      }
+    >
+      {linked ? (
+        <>
+          <p className="m-0 text-[13px] leading-relaxed text-[#9aa6b2]">
+            You will hear about every trade, any time your agent has a problem, and before your subscription ends. Send <code className="rounded bg-white/[0.06] px-1.5 py-0.5 font-[family-name:var(--mono)] text-[11px] text-[#cfd8df]">/status</code> to the bot any time.
+          </p>
+          <button
+            type="button"
+            onClick={unlink}
+            disabled={disabled || busy}
+            className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl px-3 text-[13px] text-[#8b97a3] transition hover:bg-white/[0.06] hover:text-white disabled:opacity-50"
+          >
+            {busy && <Loader2 className="size-3.5 animate-spin" />}
+            Unlink this chat
+          </button>
+        </>
+      ) : issued && !expired ? (
+        <div>
+          <p className="m-0 text-[12.5px] text-[#9aa6b2]">Open the bot and send this code. It works once.</p>
+          <div className="mt-3 flex items-center gap-2">
+            <span className="flex-1 rounded-xl bg-black/30 px-4 py-3 text-center font-[family-name:var(--mono)] text-[22px] font-semibold tracking-[0.25em] text-[#2fd98a] ring-1 ring-white/[0.08]">
+              {issued.code}
+            </span>
+            <button type="button" onClick={copy} aria-label="Copy code" className="grid size-12 place-items-center rounded-xl bg-white/[0.06] text-[#cfd8df] ring-1 ring-white/[0.08] transition hover:bg-white/[0.1]">
+              {copied ? <Check className="size-4 text-[#2fd98a]" /> : <Copy className="size-4" />}
+            </button>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-3">
+            <a
+              href={issued.deepLink}
+              target="_blank"
+              rel="noreferrer"
+              className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-[linear-gradient(135deg,#3b9eff,#2467c9)] px-5 text-[13px] font-semibold text-white transition hover:brightness-110"
+            >
+              <Send className="size-4" /> Open Telegram <ExternalLink className="size-3.5 opacity-70" />
+            </a>
+            <span className="inline-flex items-center gap-2 text-[12px] text-[#7e8a97]">
+              <Loader2 className="size-3.5 animate-spin" /> Waiting for you · {mmss}
+            </span>
+          </div>
+        </div>
+      ) : (
+        <>
+          <p className="m-0 text-[13px] leading-relaxed text-[#9aa6b2]">
+            {expired ? "That code expired. Make a new one." : "Link the Neural Alpha bot once and it messages you about trades, problems and renewals."}
+          </p>
+          <button
+            type="button"
+            onClick={make}
+            disabled={disabled || busy}
+            className="mt-4 inline-flex min-h-10 items-center gap-2 rounded-xl bg-[linear-gradient(135deg,#3b9eff,#2467c9)] px-5 text-[13px] font-semibold text-white transition hover:brightness-110 active:scale-[0.98] disabled:opacity-50"
+          >
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+            Link Telegram
+          </button>
+        </>
+      )}
+      {error && <p role="alert" className="m-0 mt-3 text-[12px] text-[#ff6b79]">{error}</p>}
+    </Panel>
+  );
+}
+
 export interface AgentControlsProps {
   connected: boolean;
   config: DeskConfig | null;
   onSave: (updates: Record<string, unknown>) => Promise<{ ok: boolean; error?: string }>;
   /** Hosted customers only: per-tenant paid signal switches. */
   signals?: SignalControls | null;
+  /** Hosted customers only: subscription and Telegram. */
+  account?: AccountControls | null;
 }
 
-export function AgentControls({ connected, config, onSave, signals }: AgentControlsProps) {
+export function AgentControls({ connected, config, onSave, signals, account }: AgentControlsProps) {
   const reduce = useReducedMotion();
   const [form, setForm] = useState<Form>(DEFAULTS);
   const [saving, setSaving] = useState(false);
@@ -620,6 +842,13 @@ export function AgentControls({ connected, config, onSave, signals }: AgentContr
           <Stat label="Reward / risk" value={rewardRisk} format={fmtR} tone={rrTone} />
         </div>
       </motion.section>
+
+      {account && (
+        <div className="grid min-w-0 gap-5 xl:grid-cols-2">
+          <SubscriptionPanel account={account} disabled={false} />
+          <TelegramPanel account={account} disabled={off} />
+        </div>
+      )}
 
       <div className={cn("grid min-w-0 gap-5", signals && "xl:grid-cols-2")}>
       <Panel icon={Layers} title="Risk profile" subtitle="One tap sets size, names, stop, trail and slippage together." delay={0.05}>

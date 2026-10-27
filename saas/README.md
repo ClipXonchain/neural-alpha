@@ -29,7 +29,7 @@ It installs Docker, Node 22 and PM2 if missing, builds the worker image, starts 
 - The control API listens on `127.0.0.1:3910`. Create is limited to 10 calls a minute. Everything else is 120 a minute.
 - The admin desk is the dashboard at `/admin` (`http://127.0.0.1:3000/admin` locally). It uses `SAAS_MONITOR_SECRET`, which can only read. The page has no pause, trade, pair, or size controls. Put the monitor key in the browser. Keep `CONTROL_API_SECRET` off that page. The control process keeps the read APIs and redirects `/admin` to that dashboard.
 - A stopped container is not started again by a reboot. A running one is.
-- Paid signals are per customer. `POST /tenants/:id/signals` with `{"cmc":false}` or `{"studio":true}` (or the portal Settings switches) rewrites `CMC_X402_ENABLED` / `STUDIO_X402_ENABLED` and restarts that one container. Both default on. Calls are paid from the customer's own Agentic Wallet through `baw x402-payment`; there is no CMC API key.
+- Paid signals are per customer. CoinMarketCap macro is on with a minimum of one paid call a day. Agent Studio is optional and starts off. `POST /tenants/:id/signals` with `{"cmc":false}` or `{"studio":true}` (or the portal Settings switches) rewrites `CMC_X402_ENABLED` / `STUDIO_X402_ENABLED` and restarts that one container. Calls are paid from the customer's own Agentic Wallet through `baw x402-payment`; there is no CMC API key.
 
 ## Run the backend
 
@@ -63,4 +63,6 @@ curl -s -X POST -H "Authorization: Bearer $CONTROL_API_SECRET" \
 
 `GET /capacity` lists `orphans`: containers named `na-` that have no row. The backend does not attach those to a customer.
 
-If the folder did not survive, the wallet login did not either. That customer pairs again. The USDT is still in their Agentic Wallet.
+If the folder did not survive and there is no backup of it, the wallet login did not either, and that customer pairs again. The USDT is still in their Agentic Wallet. With backups on (see OPERATIONS.md) the folder, wallet login included, is restored from an encrypted copy instead.
+
+Alerts, Telegram, renewals, backups, rollouts, the private WireGuard link and a standby mother are in [OPERATIONS.md](OPERATIONS.md).

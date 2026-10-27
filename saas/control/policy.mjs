@@ -6,10 +6,11 @@
  * There is no second closed-market or off-hours number.
  *
  * Swap origin is always USDT. The software-fee asset is not the swap token.
- * The daily x402 count is a floor of 2. The worker does not read
- * X402_MIN_PAYMENTS_PER_DAY. It reads CMC_X402_INTERVAL_MS and
- * STUDIO_X402_INTERVAL_MS, so the hosted files set those from the same count.
- * One CMC call and one Agent Studio call together make up that daily total.
+ * The daily x402 count is the number of paid CMC calls a day, with a floor of 1.
+ * The worker does not read X402_MIN_PAYMENTS_PER_DAY. It reads CMC_X402_INTERVAL_MS
+ * and STUDIO_X402_INTERVAL_MS, so the hosted files set those from the same count.
+ * Agent Studio is optional and starts off; when a customer turns it on it runs
+ * at the same gap as CMC.
  */
 
 export const CALLS_PER_CYCLE = 20;
@@ -26,24 +27,19 @@ export const DEFAULT_POSITION_PRESET = "100";
 export const MAX_CUSTOM_POSITION_USD = 10_000;
 export const MIN_BUY_INTERVAL_MS = 600_000;
 
-/** Paid x402 calls the portal asks each hosted user to make per day. */
-export const DEFAULT_X402_PER_DAY = 2;
-export const MIN_X402_PER_DAY = 2;
+/** Paid CMC x402 calls per day for each hosted user. One a day is the minimum. */
+export const DEFAULT_X402_PER_DAY = 1;
+export const MIN_X402_PER_DAY = 1;
 export const MAX_X402_PER_DAY = 48;
-/** CMC and Agent Studio. The daily count is split across both. */
-export const X402_SOURCES = 2;
 const DAY_MS = 86_400_000;
 
-/**
- * Gap between paid calls of one source. Two sources at this gap land on
- * `perDay` settled attempts across a day, when free USDT covers the fee.
- */
+/** Gap between paid calls of one source: a day divided by `perDay`. */
 export function x402IntervalMs(perDay) {
   const n = Number(perDay);
   const count = Number.isInteger(n) && n >= MIN_X402_PER_DAY && n <= MAX_X402_PER_DAY
     ? n
     : DEFAULT_X402_PER_DAY;
-  return Math.floor((X402_SOURCES * DAY_MS) / count);
+  return Math.floor(DAY_MS / count);
 }
 
 /** Worker swap/quote token. Software fees may use other assets; swaps do not. */
